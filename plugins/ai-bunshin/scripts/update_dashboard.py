@@ -10,6 +10,7 @@
   python3 scripts/update_dashboard.py --review-context   # 17時の振り返り会議の材料（1行目 OPEN/SKIP）
 """
 import argparse
+import heapq
 import json
 import math
 import os
@@ -149,6 +150,10 @@ FLAG_OVERDUE = "🔴 期限超過"
 FLAG_LATE = "⚠ 遅延見込み"
 FLAG_OK = "🟢 順調"
 FLAG_NO_DUE = "― 納期なし"
+STATE_WAIT = "見積もり待ち"   # ポイント（見積もり）が無い。完了予定日は出さない
+STATE_LOOP = "依存の輪"       # depends_on が輪になっている（または輪の先にある）。完了予定日は出さない
+FLAG_WAIT = f"⏳ {STATE_WAIT}"
+FLAG_LOOP = f"🔁 {STATE_LOOP}"
 
 FONT = "Meiryo UI"
 STATUS_FILL = {
@@ -158,7 +163,8 @@ STATUS_FILL = {
     "レビュー": "E4DFEC",
     "完了": "E2EFDA",
 }
-FLAG_FILL = {FLAG_OVERDUE: "F8CBAD", FLAG_LATE: "FFE699", FLAG_OK: "E2EFDA", FLAG_DONE: "E2EFDA"}
+FLAG_FILL = {FLAG_OVERDUE: "F8CBAD", FLAG_LATE: "FFE699", FLAG_OK: "E2EFDA", FLAG_DONE: "E2EFDA",
+             FLAG_WAIT: "DDEBF7", FLAG_LOOP: "F8CBAD"}
 if HAVE_OPENPYXL:  # Excel の書式。openpyxl が無いときは使わない
     HEADER_FILL = PatternFill("solid", fgColor="1F4E78")
     HEADER_FONT = Font(name=FONT, bold=True, color="FFFFFF")
@@ -299,39 +305,125 @@ def today_sprint(data, today):
     return next((ds for ds in data.get("daily_sprints", []) if ds["date"] == fmt(today)), None)
 
 
+def has_estimate(t):
+    """見積もり（points）があるか。無い（null・書いていない）は「見積もり待ち」。0pt は見積もり済み。"""
+    return t.get("points") is not None
+
+
+def unschedulable_states(ai_open):
+    """完了予定日を決められないタスク {ID: 見積もり待ち／依存の輪}。
+    見積もりが無い→見積もり待ち。depends_on が輪になっている→依存の輪（自分に依存するのも輪）。
+    輪や見積もり待ちの先に依存しているタスクも決められない（輪の先は依存の輪、それ以外は見積もり待ち）。"""
+    ids = {t["id"] for t in ai_open}
+    deps = {t["id"]: [d for d in (t.get("depends_on") or []) if d in ids] for t in ai_open}
+
+    def in_cycle(start):
+        seen, stack = set(), list(deps[start])
+        while stack:
+            x = stack.pop()
+            if x == start:
+                return True
+            if x not in seen:
+                seen.add(x)
+                stack.extend(deps[x])
+        return False
+
+    state = {t["id"]: STATE_WAIT for t in ai_open if not has_estimate(t)}
+    for i in deps:
+        if in_cycle(i):
+            state[i] = STATE_LOOP
+    base = dict(state)
+    changed = True
+    while changed:
+        changed = False
+        for i, ds in deps.items():
+            if i in base:
+                continue
+            up = [state[d] for d in ds if d in state]
+            if up:
+                want = STATE_LOOP if STATE_LOOP in up else STATE_WAIT
+                if state.get(i) != want:
+                    state[i] = want
+                    changed = True
+    return state
+
+
 def forecast(tasks, today, velocity, cal, today_planned=None):
-    """優先度順に残ポイントを積み上げ、各タスクの完了予定日と状態フラグを付ける。
+    """各タスクの完了予定日と状態フラグを付ける。
+
+    積み上げの順は、優先度順を基本に「前提タスク（depends_on）を先にする」：優先度の高いタスクが優先度の低いタスクに
+    依存しているときは、前提のほうを（依存するタスクと同じ優先度として）先に積む。前提の完了予定の翌営業日より前には終わらない。
+    見積もり（points）の無い AI のタスクは「見積もり待ち」（完了予定日なし・積み上げにも入れない）。
+    依存の輪（循環）は落とさずに「依存の輪」と表示する（完了予定日なし）。
+    本人のタスクはポイントを数えず、期日（AI が設定）を完了予定とする。
 
     today_planned: 今日の計画が作成済みなら、その計画のタスクIDの集合。計画のタスクは今日の完了予定、
     それ以外は翌営業日から積み上げる（計画の後に登録したものは翌日の計画に入るため）。"""
-    open_tasks = sorted(
-        [t for t in tasks if t["status"] != "完了"],
-        key=lambda t: (t.get("priority") or 999, parse_date(t.get("due")) or date.max, t["id"]),
-    )
+    def prio_key(t):
+        return (t.get("priority") or 999, parse_date(t.get("due")) or date.max, t["id"])
+
+    open_tasks = sorted([t for t in tasks if t["status"] != "完了"], key=prio_key)
     by_id = {t["id"]: t for t in tasks}
     for t in tasks:
+        t["_state"] = None
         if t["status"] == "完了":
             t["_forecast"] = parse_date(t.get("done_date"))
-    cum = 0.0
+    for rank, t in enumerate(open_tasks, start=1):
+        t["_rank"] = rank
     start = today
     if today_planned is not None:
         start = cal.add_workdays(today + timedelta(days=1), 1)
-    for rank, t in enumerate(open_tasks, start=1):
-        t["_rank"] = rank
+
+    # 本人の作業は AI のベロシティに含めない。期日（AIが設定）を完了予定とする
+    ai_open = [t for t in open_tasks if t.get("assignee") != OWNER]
+    for t in open_tasks:
         if t.get("assignee") == OWNER:
-            # 本人の作業は AI のベロシティに含めない。期日（AIが設定）を完了予定とする
             t["_forecast"] = parse_date(t.get("due")) or today
-            continue
-        if today_planned is not None and t["id"] in today_planned:
+    states = unschedulable_states(ai_open)
+    for t in ai_open:
+        t["_state"] = states.get(t["id"])
+        if t["_state"]:
+            t["_forecast"] = None
+    todo = [t for t in ai_open if not t["_state"]]
+    todo_ids = {t["id"] for t in todo}
+    pre = {t["id"]: [d for d in (t.get("depends_on") or []) if d in todo_ids] for t in todo}
+
+    # 積む順：前提は、それに依存するタスクの中でいちばん高い優先度まで繰り上げる。使える（前提が済んだ）ものから優先度順
+    eff = {t["id"]: prio_key(t) for t in todo}
+
+    def lift(i, k):
+        for d in pre[i]:
+            if k < eff[d]:
+                eff[d] = k
+                lift(d, k)
+    for t in todo:
+        lift(t["id"], eff[t["id"]])
+    waiting_on = {i: len(ds) for i, ds in pre.items()}
+    after = {}
+    for i, ds in pre.items():
+        for d in ds:
+            after.setdefault(d, []).append(i)
+    ready = [(eff[i], i) for i, n in waiting_on.items() if n == 0]
+    heapq.heapify(ready)
+    cum = 0.0
+    while ready:
+        _, i = heapq.heappop(ready)
+        t = by_id[i]
+        if today_planned is not None and i in today_planned:
             t["_forecast"] = today
-            continue
-        cum += remaining_points(t)
-        t["_forecast"] = cal.add_workdays(start, math.ceil(cum / velocity) if cum > 0 else 1)
-        # depends_on のタスクが終わってから着手する（前提タスクの完了予定の翌営業日から数える）
-        deps = [by_id[d]["_forecast"] for d in t.get("depends_on", []) if d in by_id and by_id[d].get("_forecast")]
-        if deps:
-            own = math.ceil(remaining_points(t) / velocity) or 1
-            t["_forecast"] = max(t["_forecast"], cal.add_workdays(max(deps) + timedelta(days=1), own))
+        else:
+            cum += remaining_points(t)
+            t["_forecast"] = cal.add_workdays(start, math.ceil(cum / velocity) if cum > 0 else 1)
+            # depends_on のタスクが終わってから着手する（前提タスクの完了予定の翌営業日から数える）
+            deps = [by_id[d]["_forecast"] for d in t.get("depends_on", []) if d in by_id and by_id[d].get("_forecast")]
+            if deps:
+                own = math.ceil(remaining_points(t) / velocity) or 1
+                t["_forecast"] = max(t["_forecast"], cal.add_workdays(max(deps) + timedelta(days=1), own))
+        for j in after.get(i, []):
+            waiting_on[j] -= 1
+            if waiting_on[j] == 0:
+                heapq.heappush(ready, (eff[j], j))
+
     for t in tasks:
         due = parse_date(t.get("due"))
         if t["status"] == "完了":
@@ -340,14 +432,61 @@ def forecast(tasks, today, velocity, cal, today_planned=None):
             t["_flag"] = FLAG_DONE
         elif due and due < today:
             t["_flag"] = FLAG_OVERDUE
+        elif t["_state"]:
+            t["_flag"] = FLAG_WAIT if t["_state"] == STATE_WAIT else FLAG_LOOP
         elif due and t["_forecast"] > due:
             t["_flag"] = FLAG_LATE
         elif due:
             t["_flag"] = FLAG_OK
         else:
             t["_flag"] = FLAG_NO_DUE
-    project_end = max((t["_forecast"] for t in open_tasks), default=None)
+    project_end = max((t["_forecast"] for t in open_tasks if t.get("_forecast")), default=None)
     return open_tasks, project_end
+
+
+def fc_text(t):
+    """完了予定の表示。決められないタスクは日付ではなく「見積もり待ち」「依存の輪」。"""
+    return t["_state"] if t.get("_state") else fmt_jp(t["_forecast"])
+
+
+def unscheduled_ids(tasks, state):
+    return [t["id"] for t in tasks if t["status"] != "完了" and t.get("_state") == state]
+
+
+def unscheduled_notes(tasks):
+    """全体の完了予定日に添える一言（無ければ空）。"""
+    notes = []
+    for state in (STATE_WAIT, STATE_LOOP):
+        n = len(unscheduled_ids(tasks, state))
+        if n:
+            notes.append(f"{state}が{n}件あります")
+    return notes
+
+
+def unscheduled_lines(tasks):
+    """見積もり待ち・依存の輪のタスクを、IDつきで知らせる一言（無ければ空）。"""
+    lines = []
+    wait = unscheduled_ids(tasks, STATE_WAIT)
+    if wait:
+        lines.append(f"⚠ {STATE_WAIT} {len(wait)}件：{'・'.join(wait[:8])}{'…' if len(wait) > 8 else ''}"
+                     "（見積もり（points）を入れると完了予定日が出ます）")
+    loop = unscheduled_ids(tasks, STATE_LOOP)
+    if loop:
+        lines.append(f"⚠ {STATE_LOOP} {len(loop)}件：{'・'.join(loop[:8])}{'…' if len(loop) > 8 else ''}"
+                     "（前提（depends_on）が輪になっているか、輪の先にあります。前提を見直してください）")
+    return lines
+
+
+def project_end_base(ctx):
+    """全体の完了予定日（日付だけ）。日付が決まるタスクが無いとき：見積もり待ち等だけ残っていれば「未定」、何も無ければ「残タスクなし」。"""
+    if ctx["project_end"]:
+        return fmt_jp(ctx["project_end"])
+    return "未定" if any(t.get("_state") for t in ctx["open_tasks"]) else "残タスクなし"
+
+
+def project_end_text(ctx):
+    """全体の完了予定日の表示。見積もり待ち・依存の輪は日付に入れず、件数を添える。"""
+    return project_end_base(ctx) + "".join(f"（{n}）" for n in unscheduled_notes(ctx["open_tasks"]))
 
 
 def current_sprint(data, today):
@@ -434,7 +573,8 @@ def build_dashboard(wb, ctx):
     tds = today_sprint(ctx["data"], today)
     tdr = next((r for r in daily_rows(ctx["data"], tasks) if tds and r["ds"] is tds), None)
     kpis = [
-        ("全体の完了予定日", fmt_jp(ctx["project_end"]) if ctx["project_end"] else "残タスクなし"),
+        ("全体の完了予定日" + ("（見積もり待ち等は含まず）" if unscheduled_notes(ctx["open_tasks"]) else ""),
+         project_end_base(ctx)),
         (f"📌 {OWNER_CALL}へのお願い", f"{len(owner_requests(tasks))} 件"),
         ("今日の計画（完了/約束）", f"{tdr['done_planned']:g} / {tdr['committed']:g} pt" if tdr else "未計画"),
         ("残タスク", f"{open_n} 件"),
@@ -497,7 +637,7 @@ def build_dashboard(wb, ctx):
         for i, t in enumerate(alerts):
             r = start + i
             vals = [f"{t['id']} {t['title']}", t.get("department"), t.get("assignee"),
-                    fmt_jp(parse_date(t.get("due"))), fmt_jp(t["_forecast"]), t["_flag"], t.get("note", "")]
+                    fmt_jp(parse_date(t.get("due"))), fc_text(t), t["_flag"], t.get("note", "")]
             for c, v in enumerate(vals, start=1):
                 ws.cell(row=r, column=c, value=v)
             style_body(ws, r, r, 7)
@@ -763,7 +903,7 @@ def build_task_list(wb, ctx):
                 MEMBER_LABEL.get(t.get("assignee"), t.get("assignee")), MEMBER_LABEL.get(t.get("reviewer"), t.get("reviewer") or ""),
                 t["status"],
                 t["_flag"], t.get("points"), t.get("progress") or (100 if t["status"] == "完了" else 0),
-                parse_date(t.get("start")), parse_date(due) if due else "指定なし", t["_forecast"],
+                parse_date(t.get("start")), parse_date(due) if due else "指定なし", t["_state"] or t["_forecast"],
                 parse_date(t.get("done_date")), t.get("sprint"), t.get("pdca"), t.get("note", "")]
         for c, v in enumerate(vals, start=1):
             cell = ws.cell(row=i, column=c, value=v)
@@ -862,8 +1002,9 @@ def build_board_md(ctx):
     tasks, sprint = ctx["tasks"], ctx["sprint"]
     lines = ["# タスクボード", "",
              f"> 自動生成：{ctx['now']}（編集しないでください。正本は `data/tasks.json`）", "",
-             f"- **全体の完了予定日**：{fmt_jp(ctx['project_end']) if ctx['project_end'] else '残タスクなし'}",
+             f"- **全体の完了予定日**：{project_end_text(ctx)}",
              f"- **ベロシティ**：{ctx['velocity']:.1f} pt/日（{ctx['velocity_src']}）"]
+    lines += [f"- {l}" for l in unscheduled_lines(ctx["open_tasks"])]
     if sprint:
         lines.append(f"- **現在のスプリント**：{sprint['id']}「{sprint.get('goal', '')}」"
                      f"（{fmt_jp(parse_date(sprint['start']))}〜{fmt_jp(parse_date(sprint['end']))}／{sprint.get('pdca', '')}）")
@@ -871,7 +1012,7 @@ def build_board_md(ctx):
     if alerts:
         lines += ["", "## 要注意", ""]
         for t in alerts:
-            lines.append(f"- {t['_flag']} **{t['id']} {t['title']}**（納期 {fmt_jp(parse_date(t.get('due')))} → 完了予定 {fmt_jp(t['_forecast'])}）")
+            lines.append(f"- {t['_flag']} **{t['id']} {t['title']}**（納期 {fmt_jp(parse_date(t.get('due')))} → 完了予定 {fc_text(t)}）")
     for status in ["作業中", "レビュー", "ToDo", "Backlog", "完了"]:
         st = [t for t in tasks if t["status"] == status]
         if status == "完了":
@@ -885,7 +1026,7 @@ def build_board_md(ctx):
         lines += ["| 順位 | ID | タイトル | 部署 | 担当 | 納期 | 完了予定 | 状態 |", "|---|---|---|---|---|---|---|---|"]
         for t in st:
             lines.append(f"| {t.get('_rank') or ''} | {t['id']} | {t['title']} | {t.get('department', '')} | "
-                         f"{t.get('assignee', '')} | {fmt_jp(parse_date(t.get('due')))} | {fmt_jp(t['_forecast'])} | {t['_flag']} |")
+                         f"{t.get('assignee', '')} | {fmt_jp(parse_date(t.get('due')))} | {fc_text(t)} | {t['_flag']} |")
     return "\n".join(lines) + "\n"
 
 
@@ -913,14 +1054,15 @@ def assignment_warnings(tasks):
 
 
 def summary_text(ctx, limit=10):
-    lines = [f"[{AI_NAME} タスク状況 {fmt(ctx['today'])}] 全体完了予定 {fmt_jp(ctx['project_end'])}"
+    lines = [f"[{AI_NAME} タスク状況 {fmt(ctx['today'])}] 全体完了予定 {project_end_text(ctx)}"
              f"／ベロシティ {ctx['velocity']:.1f}pt/日（{ctx['velocity_src']}）"]
     for t in ctx["open_tasks"][:limit]:
         due = parse_date(t.get("due"))
         lines.append(f"  {t['_rank']}. {t['id']} {t['title']} [{t['status']}/{t.get('assignee', '')}] "
-                     f"納期 {fmt_jp(due) if due else '指定なし'} → 完了予定 {fmt_jp(t['_forecast'])} {t['_flag']}")
+                     f"納期 {fmt_jp(due) if due else '指定なし'} → 完了予定 {fc_text(t)} {t['_flag']}")
     if len(ctx["open_tasks"]) > limit:
         lines.append(f"  …ほか {len(ctx['open_tasks']) - limit} 件")
+    lines += [f"[{l}]" for l in unscheduled_lines(ctx["open_tasks"])]
     reqs = owner_requests(ctx["tasks"])
     if ctx.get("events") is not None:
         lines.append(f"[📅 今日の予定 {fmt_jp(ctx['today'])}]（予定の中身は使わず、件名と時間だけ）")
