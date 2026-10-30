@@ -353,13 +353,14 @@ def cli_session_summary_has_no_id_lines_but_plain_and_board_do():
     r = run_cli("--today", "2026-11-02", "--session")
     assert r.returncode == 0, r.stderr[:300]
     ctx = json.loads(r.stdout)["hookSpecificOutput"]["additionalContext"]
-    assert "⚠ 見積もり待ち" not in ctx and "⚠ 依存の輪" not in ctx, "起動時のまとめに ID 付きの ⚠ 行が出ている"
-    assert "見積もり待ちが1件あります" in ctx.splitlines()[0] and "依存の輪が2件あります" in ctx.splitlines()[0], "先頭の行に件数が無い"
+    assert "⚠ 見積もり待ち" not in ctx and "輪になっています" not in ctx, "起動時のまとめに ID 付きの ⚠ 行が出ている"
+    head = next(l for l in ctx.splitlines() if "タスク状況" in l)   # 共通ルール更新の案内が先に付くことがあるので、まとめの先頭の行を探す
+    assert "見積もり待ちが1件あります" in head and "依存の輪が2件あります" in head, f"先頭の行に件数が無い: {head}"
     plain = run_cli("--today", "2026-11-02").stdout
     assert "⚠ 見積もり待ち 1件：T002" in plain, "引数なしの状態表示に ID 付きの行が無い"
-    assert "⚠ 依存の輪" in plain, "引数なしの状態表示に依存の輪の行が無い"
+    assert "⚠ 前提のタスクが輪になっています（T003→T004→T003）" in plain, "引数なしの状態表示に依存の輪の行が無い"
     board = open(os.path.join(HOME_DIR, "00_タスク管理", "タスクボード.md"), encoding="utf-8").read()
-    assert "⚠ 見積もり待ち 1件：T002" in board and "⚠ 依存の輪" in board, "タスクボードに ID 付きの行が無い"
+    assert "⚠ 見積もり待ち 1件：T002" in board and "T003→T004→T003" in board, "タスクボードに ID 付きの行が無い"
 
 
 @case

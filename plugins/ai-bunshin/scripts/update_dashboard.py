@@ -151,7 +151,7 @@ FLAG_LATE = "⚠ 遅延見込み"
 FLAG_OK = "🟢 順調"
 FLAG_NO_DUE = "― 納期なし"
 STATE_WAIT = "見積もり待ち"   # ポイント（見積もり）が無い。完了予定日は出さない
-STATE_LOOP = "依存の輪"       # depends_on が輪になっている（または輪の先にある）。完了予定日は出さない
+STATE_LOOP = "依存の輪"       # 前提（depends_on）が輪になっている（または輪の先にある）。完了予定日は出さない
 FLAG_WAIT = f"⏳ {STATE_WAIT}"
 FLAG_LOOP = f"🔁 {STATE_LOOP}"
 
@@ -219,11 +219,46 @@ class Calendar:
 
 # ---------- 計算 ----------
 
+def points_value(t):
+    """見積もり（ポイント）の数。無い・空・数でない文字は None（数字の文字 "3" は 3 として読む）。"""
+    p = t.get("points")
+    if p is None or p == "" or isinstance(p, bool):
+        return None
+    try:
+        v = float(p)
+    except (TypeError, ValueError):
+        return None
+    return v if math.isfinite(v) else None
+
+
+def pt_of(t):
+    """ポイントの合計などに使う数。無い・読めないときは 0。"""
+    return points_value(t) or 0.0
+
+
+def dep_list(t):
+    """前提タスクの ID の一覧。null・一覧でないもの（文字・数）は空。"""
+    d = t.get("depends_on")
+    return d if isinstance(d, list) else []
+
+
+def bad_fields(t):
+    """tasks.json の書き方が違う欄（ID つきの警告に使う）。"""
+    bad = []
+    p = t.get("points")
+    if p is not None and p != "" and points_value(t) is None:
+        bad.append("ポイントの欄が数ではありません")
+    d = t.get("depends_on")
+    if d is not None and not isinstance(d, list):
+        bad.append("前提のタスクの欄が一覧ではありません（[\"T001\"] の形で書いてください）")
+    return bad
+
+
 def remaining_points(t):
     if t["status"] == "完了":
         return 0.0
     progress = t.get("progress") or 0
-    return float(t.get("points") or 0) * (1 - progress / 100)
+    return pt_of(t) * (1 - progress / 100)
 
 
 def days_left(t, today):
@@ -262,7 +297,7 @@ def today_own_picks(tasks, today, limit=3):
 
 def day_done_points(tasks, d):
     """その日に完了した AI のタスク（本人のタスクを除く）のポイント合計。"""
-    return sum(float(t.get("points") or 0) for t in tasks
+    return sum(pt_of(t) for t in tasks
                if t["status"] == "完了" and t.get("assignee") != OWNER and parse_date(t.get("done_date")) == d)
 
 
@@ -281,7 +316,7 @@ def calc_velocity(data, tasks, today, cal):
 
 def daily_rows(data, tasks):
     """日次スプリントの実績（日付順）。約束・完了・達成率・3日平均。"""
-    pts = {t["id"]: float(t.get("points") or 0) for t in tasks}
+    pts = {t["id"]: pt_of(t) for t in tasks}
     rows = []
     for ds in sorted(data.get("daily_sprints", []), key=lambda x: x["date"]):
         d = parse_date(ds["date"])
@@ -306,32 +341,46 @@ def today_sprint(data, today):
 
 
 def has_estimate(t):
-    """見積もり（points）があるか。無い（null・書いていない）は「見積もり待ち」。0pt は見積もり済み。"""
-    return t.get("points") is not None
+    """見積もりがあるか。無い（null・空・書いていない）・数でない文字は「見積もり待ち」。0pt は見積もり済み。"""
+    return points_value(t) is not None
 
 
 def unschedulable_states(ai_open):
-    """完了予定日を決められないタスク {ID: 見積もり待ち／依存の輪}。
-    見積もりが無い→見積もり待ち。depends_on が輪になっている→依存の輪（自分に依存するのも輪）。
+    """完了予定日を決められないタスク {ID: 見積もり待ち／依存の輪} と、輪の中身 {ID: "T001→T002→T001"}。
+    見積もりが無い・書き方が違う（ポイントが数でない・前提が一覧でない）→見積もり待ち。
+    前提が輪になっている→依存の輪（自分に依存するのも輪）。
     輪や見積もり待ちの先に依存しているタスクも決められない（輪の先は依存の輪、それ以外は見積もり待ち）。"""
     ids = {t["id"] for t in ai_open}
-    deps = {t["id"]: [d for d in (t.get("depends_on") or []) if d in ids] for t in ai_open}
+    deps = {t["id"]: [d for d in dep_list(t) if d in ids] for t in ai_open}
 
-    def in_cycle(start):
-        seen, stack = set(), list(deps[start])
-        while stack:
-            x = stack.pop()
+    def cycle_path(start):
+        """start から前提をたどって start に戻る最短の道（無ければ None）。"""
+        prev = {}
+        queue = list(deps[start])
+        for d in queue:
+            prev.setdefault(d, start)
+        while queue:
+            x = queue.pop(0)
             if x == start:
-                return True
-            if x not in seen:
-                seen.add(x)
-                stack.extend(deps[x])
-        return False
+                path = [start]
+                while True:
+                    path.append(prev[path[-1]])
+                    if path[-1] == start:
+                        break
+                return "→".join(reversed(path))
+            for d in deps[x]:
+                if d not in prev:
+                    prev[d] = x
+                    queue.append(d)
+        return None
 
-    state = {t["id"]: STATE_WAIT for t in ai_open if not has_estimate(t)}
+    state = {t["id"]: STATE_WAIT for t in ai_open if not has_estimate(t) or bad_fields(t)}
+    loops = {}
     for i in deps:
-        if in_cycle(i):
+        path = cycle_path(i)
+        if path:
             state[i] = STATE_LOOP
+            loops[i] = path
     base = dict(state)
     changed = True
     while changed:
@@ -345,7 +394,7 @@ def unschedulable_states(ai_open):
                 if state.get(i) != want:
                     state[i] = want
                     changed = True
-    return state
+    return state, loops
 
 
 def forecast(tasks, today, velocity, cal, today_planned=None):
@@ -366,6 +415,7 @@ def forecast(tasks, today, velocity, cal, today_planned=None):
     by_id = {t["id"]: t for t in tasks}
     for t in tasks:
         t["_state"] = None
+        t["_loop"] = None
         if t["status"] == "完了":
             t["_forecast"] = parse_date(t.get("done_date"))
     for rank, t in enumerate(open_tasks, start=1):
@@ -379,25 +429,27 @@ def forecast(tasks, today, velocity, cal, today_planned=None):
     for t in open_tasks:
         if t.get("assignee") == OWNER:
             t["_forecast"] = parse_date(t.get("due")) or today
-    states = unschedulable_states(ai_open)
+    states, loops = unschedulable_states(ai_open)
     for t in ai_open:
         t["_state"] = states.get(t["id"])
+        t["_loop"] = loops.get(t["id"])
         if t["_state"]:
             t["_forecast"] = None
     todo = [t for t in ai_open if not t["_state"]]
     todo_ids = {t["id"] for t in todo}
-    pre = {t["id"]: [d for d in (t.get("depends_on") or []) if d in todo_ids] for t in todo}
+    pre = {t["id"]: [d for d in dep_list(t) if d in todo_ids] for t in todo}
 
     # 積む順：前提は、それに依存するタスクの中でいちばん高い優先度まで繰り上げる。使える（前提が済んだ）ものから優先度順
     eff = {t["id"]: prio_key(t) for t in todo}
 
-    def lift(i, k):
-        for d in pre[i]:
-            if k < eff[d]:
-                eff[d] = k
-                lift(d, k)
     for t in todo:
-        lift(t["id"], eff[t["id"]])
+        stack = [(t["id"], eff[t["id"]])]
+        while stack:   # 鎖が長くても再帰で落ちないよう、繰り返しで書く
+            i, k = stack.pop()
+            for d in pre[i]:
+                if k < eff[d]:
+                    eff[d] = k
+                    stack.append((d, k))
     waiting_on = {i: len(ds) for i, ds in pre.items()}
     after = {}
     for i, ds in pre.items():
@@ -415,7 +467,7 @@ def forecast(tasks, today, velocity, cal, today_planned=None):
             cum += remaining_points(t)
             t["_forecast"] = cal.add_workdays(start, math.ceil(cum / velocity) if cum > 0 else 1)
             # depends_on のタスクが終わってから着手する（前提タスクの完了予定の翌営業日から数える）
-            deps = [by_id[d]["_forecast"] for d in t.get("depends_on", []) if d in by_id and by_id[d].get("_forecast")]
+            deps = [by_id[d]["_forecast"] for d in dep_list(t) if d in by_id and by_id[d].get("_forecast")]
             if deps:
                 own = math.ceil(remaining_points(t) / velocity) or 1
                 t["_forecast"] = max(t["_forecast"], cal.add_workdays(max(deps) + timedelta(days=1), own))
@@ -445,8 +497,11 @@ def forecast(tasks, today, velocity, cal, today_planned=None):
 
 
 def fc_text(t):
-    """完了予定の表示。決められないタスクは日付ではなく「見積もり待ち」「依存の輪」。"""
-    return t["_state"] if t.get("_state") else fmt_jp(t["_forecast"])
+    """完了予定の表示。決められないタスクは「未定」（状態の欄に「見積もり待ち」「依存の輪」が出るので重ねない。
+    期限超過が優先されて状態の欄に出ないときだけ、理由を書く）。"""
+    if t.get("_state"):
+        return "未定" if t["_flag"] in (FLAG_WAIT, FLAG_LOOP) else t["_state"]
+    return fmt_jp(t["_forecast"])
 
 
 def unscheduled_ids(tasks, state):
@@ -464,16 +519,28 @@ def unscheduled_notes(tasks):
 
 
 def unscheduled_lines(tasks):
-    """見積もり待ち・依存の輪のタスクを、IDつきで知らせる一言（無ければ空）。"""
+    """見積もり待ち・依存の輪・書き方の違いを、IDつきで知らせる行（無ければ空）。
+    起動時のまとめには出さない（約2KBで切れるため）。タスクボードと状態の表示だけ。"""
     lines = []
     wait = unscheduled_ids(tasks, STATE_WAIT)
     if wait:
         lines.append(f"⚠ {STATE_WAIT} {len(wait)}件：{'・'.join(wait[:8])}{'…' if len(wait) > 8 else ''}"
-                     "（見積もり（points）を入れると完了予定日が出ます）")
-    loop = unscheduled_ids(tasks, STATE_LOOP)
-    if loop:
-        lines.append(f"⚠ {STATE_LOOP} {len(loop)}件：{'・'.join(loop[:8])}{'…' if len(loop) > 8 else ''}"
-                     "（前提（depends_on）が輪になっているか、輪の先にあります。前提を見直してください）")
+                     "（見積もりを入れると完了予定日が出ます）")
+    loops = []
+    for t in tasks:
+        if t["status"] != "完了" and t.get("_loop") and t["_loop"] not in loops:
+            loops.append(t["_loop"])
+    for path in loops[:3]:
+        lines.append(f"⚠ 前提のタスクが輪になっています（{path}）。前提を見直してください")
+    if len(loops) > 3:
+        lines.append(f"⚠ 輪はほかに {len(loops) - 3} 個あります")
+    ahead = [t["id"] for t in tasks if t["status"] != "完了" and t.get("_state") == STATE_LOOP and not t.get("_loop")]
+    if ahead:
+        lines.append(f"⚠ 輪の先にあって日付が出ないタスク {len(ahead)}件：{'・'.join(ahead[:8])}{'…' if len(ahead) > 8 else ''}")
+    for t in tasks:
+        if t["status"] != "完了":
+            for msg in bad_fields(t):
+                lines.append(f"⚠ {t['id']}：{msg}。見積もり待ちとして扱っています")
     return lines
 
 
@@ -504,7 +571,7 @@ def burndown(sprint, tasks, today, cal):
     """スプリント期間の日別 理想線 / 実績残ポイント。"""
     start, end = parse_date(sprint["start"]), parse_date(sprint["end"])
     st = [t for t in tasks if t.get("sprint") == sprint["id"]]
-    total = sum(float(t.get("points") or 0) for t in st)
+    total = sum(pt_of(t) for t in st)
     days = [start + timedelta(days=i) for i in range((end - start).days + 1)]
     workdays = [d for d in days if cal.is_workday(d)] or days
     n = len(workdays)
@@ -512,7 +579,7 @@ def burndown(sprint, tasks, today, cal):
     for i, d in enumerate(workdays):
         ideal = total * (1 - i / (n - 1)) if n > 1 else 0
         if d <= today:
-            done = sum(float(t.get("points") or 0) for t in st
+            done = sum(pt_of(t) for t in st
                        if t["status"] == "完了" and parse_date(t.get("done_date")) and parse_date(t["done_date"]) <= d)
             actual = total - done
         else:
@@ -567,8 +634,8 @@ def build_dashboard(wb, ctx):
     overdue = sum(1 for t in tasks if t["_flag"] == FLAG_OVERDUE)
     late = sum(1 for t in tasks if t["_flag"] == FLAG_LATE)
     sp_tasks = [t for t in tasks if sprint and t.get("sprint") == sprint["id"]]
-    sp_total = sum(float(t.get("points") or 0) for t in sp_tasks)
-    sp_done = sum(float(t.get("points") or 0) for t in sp_tasks if t["status"] == "完了")
+    sp_total = sum(pt_of(t) for t in sp_tasks)
+    sp_done = sum(pt_of(t) for t in sp_tasks if t["status"] == "完了")
     sp_rate = sp_done / sp_total if sp_total else 0
     tds = today_sprint(ctx["data"], today)
     tdr = next((r for r in daily_rows(ctx["data"], tasks) if tds and r["ds"] is tds), None)
@@ -768,7 +835,7 @@ def build_own_sheet(wb, ctx):
     picks = {t["id"] for t in today_own_picks(ctx["tasks"], ctx["today"])}
     by_dep = {}
     for t in ctx["tasks"]:
-        for dep in t.get("depends_on") or []:
+        for dep in dep_list(t):
             by_dep.setdefault(dep, []).append(t["id"])
         if t.get("related"):
             by_dep.setdefault(t["related"], []).append(t["id"])
@@ -903,7 +970,7 @@ def build_task_list(wb, ctx):
                 MEMBER_LABEL.get(t.get("assignee"), t.get("assignee")), MEMBER_LABEL.get(t.get("reviewer"), t.get("reviewer") or ""),
                 t["status"],
                 t["_flag"], t.get("points"), t.get("progress") or (100 if t["status"] == "完了" else 0),
-                parse_date(t.get("start")), parse_date(due) if due else "指定なし", t["_state"] or t["_forecast"],
+                parse_date(t.get("start")), parse_date(due) if due else "指定なし", (fc_text(t) if t["_state"] else t["_forecast"]),
                 parse_date(t.get("done_date")), t.get("sprint"), t.get("pdca"), t.get("note", "")]
         for c, v in enumerate(vals, start=1):
             cell = ws.cell(row=i, column=c, value=v)
@@ -983,8 +1050,8 @@ def build_sprint_history(wb, ctx):
     style_header(ws, 1, len(headers))
     for i, s in enumerate(ctx["data"].get("sprints", []), start=2):
         st = [t for t in ctx["tasks"] if t.get("sprint") == s["id"]]
-        plan = sum(float(t.get("points") or 0) for t in st)
-        done = sum(float(t.get("points") or 0) for t in st if t["status"] == "完了")
+        plan = sum(pt_of(t) for t in st)
+        done = sum(pt_of(t) for t in st if t["status"] == "完了")
         vals = [s["id"], s.get("goal"), parse_date(s["start"]), parse_date(s["end"]), s.get("status"),
                 plan, done, (done / plan) if plan else 0, s.get("retro", "")]
         for c, v in enumerate(vals, start=1):
@@ -1053,7 +1120,7 @@ def assignment_warnings(tasks):
     return out
 
 
-def summary_text(ctx, limit=10):
+def summary_text(ctx, limit=10, with_ids=False):
     lines = [f"[{AI_NAME} タスク状況 {fmt(ctx['today'])}] 全体完了予定 {project_end_text(ctx)}"
              f"／ベロシティ {ctx['velocity']:.1f}pt/日（{ctx['velocity_src']}）"]
     for t in ctx["open_tasks"][:limit]:
@@ -1062,7 +1129,8 @@ def summary_text(ctx, limit=10):
                      f"納期 {fmt_jp(due) if due else '指定なし'} → 完了予定 {fc_text(t)} {t['_flag']}")
     if len(ctx["open_tasks"]) > limit:
         lines.append(f"  …ほか {len(ctx['open_tasks']) - limit} 件")
-    lines += [f"[{l}]" for l in unscheduled_lines(ctx["open_tasks"])]
+    if with_ids:   # 起動時・hook のまとめには出さない（件数は先頭の行にある）
+        lines += [f"[{l}]" for l in unscheduled_lines(ctx["open_tasks"])]
     reqs = owner_requests(ctx["tasks"])
     if ctx.get("events") is not None:
         lines.append(f"[📅 今日の予定 {fmt_jp(ctx['today'])}]（予定の中身は使わず、件名と時間だけ）")
@@ -1215,7 +1283,7 @@ def plan_context(today, cal, ctx):
                     new_ids.add(e["id"])
 
     def blocked_by(t):
-        return [d for d in t.get("depends_on") or [] if d in by_id and by_id[d]["status"] != "完了"]
+        return [d for d in dep_list(t) if d in by_id and by_id[d]["status"] != "完了"]
 
     for t in [t for t in ctx["open_tasks"] if t.get("assignee") != OWNER]:
         b = blocked_by(t)
@@ -1239,7 +1307,7 @@ def plan_context(today, cal, ctx):
         lines += [f"- {t['id']} {t['title']} 期日 {fmt_jp(parse_date(t.get('due')))}" for t in picks]
     lines += ["", f"## {OWNER_CALL}へのお願い（期日順。AI のタスクを止めているものに注意）"]
     for t in sorted(owner_requests(tasks), key=lambda t: parse_date(t.get("due")) or date.max):
-        waiting = [x["id"] for x in tasks if t["id"] in (x.get("depends_on") or []) and x["status"] != "完了"]
+        waiting = [x["id"] for x in tasks if t["id"] in dep_list(x) and x["status"] != "完了"]
         lines.append(f"- {t['id']} [{t.get('kind')}] {t['title']} 期日 {fmt_jp(parse_date(t.get('due')))}"
                      + (f" → 待っているタスク：{'、'.join(waiting)}" if waiting else ""))
     lines += ["", "## 実施中の Try", active_tries_text() or "- なし"]
@@ -1404,7 +1472,7 @@ def validate(data):
                 parse_date(t.get(key))
             except ValueError:
                 errors.append(f"{t.get('id')}: {key} は YYYY-MM-DD 形式にしてください")
-    pts = {t.get("id"): float(t.get("points") or 0) for t in data.get("tasks", [])}
+    pts = {t.get("id"): pt_of(t) for t in data.get("tasks", [])}
     dates = [ds.get("date") for ds in data.get("daily_sprints", [])]
     for d in sorted({d for d in dates if dates.count(d) > 1}):
         errors.append(f"日次スプリント {d}: 同じ日付の行が複数あります。1日1行にしてください")
@@ -1538,7 +1606,7 @@ def main():
         return 0
 
     # 案内は起動時と手動実行のときだけ（tasks.json を書くたびの hook では毎回は出さない）
-    text = summary_text(ctx) + (f"\n{note}" if note and not args.hook else "")
+    text = summary_text(ctx, with_ids=not (args.session or args.hook)) + (f"\n{note}" if note and not args.hook else "")
     if args.session:
         # 共通の指揮官ルールは .claude/rules/ai-bunshin-common.md に写す（自動で読み込まれる）
         if sync_rules():
