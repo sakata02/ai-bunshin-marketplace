@@ -50,6 +50,37 @@ def find_root():
     return None
 
 
+def setup_pending():
+    """初回セットアップの準備ができているか：今いる場所（または上）の .claude/settings.json の enabledPlugins に
+    ai-bunshin@… が true で入っている（starter のフォルダ）。ユーザー全体の設定（ホームの .claude）は数えない。"""
+    try:
+        home = Path.home().resolve()
+    except (RuntimeError, OSError):
+        home = None
+    seen = set()
+    for c in (os.environ.get("CLAUDE_PROJECT_DIR"), os.getcwd()):
+        if not c:
+            continue
+        try:
+            p = Path(c).resolve()
+        except (OSError, ValueError):
+            continue
+        for d in (p, *p.parents):
+            if d in seen or d == home:
+                continue
+            seen.add(d)
+            for name in ("settings.json", "settings.local.json"):
+                try:
+                    cfg = json.loads((d / ".claude" / name).read_text(encoding="utf-8"))
+                except (OSError, ValueError):
+                    continue
+                plugins = cfg.get("enabledPlugins") if isinstance(cfg, dict) else None
+                if isinstance(plugins, dict) and any(
+                        str(k).startswith("ai-bunshin@") and v is True for k, v in plugins.items()):
+                    return True
+    return False
+
+
 ROOT = find_root() or Path(os.getcwd()).resolve()
 CONFIG_JSON = ROOT / "設定" / "config.json"
 _cfg = json.loads(CONFIG_JSON.read_text(encoding="utf-8")) if CONFIG_JSON.exists() else {}
@@ -1312,20 +1343,33 @@ def main():
         except json.JSONDecodeError:
             return 0
         path = (payload.get("tool_input") or {}).get("file_path", "")
-        if not path.endswith("tasks.json") or find_root() is None:
+        if not path.endswith("tasks.json") or find_root() is None or not CONFIG_JSON.exists():
+            return 0
+        # 書き換えたのが本人のフォルダの tasks.json のときだけ動く（開発案件の中などの tasks.json では何もしない）
+        try:
+            written = Path(path)
+            if not written.is_absolute():
+                written = Path(payload.get("cwd") or os.getcwd()) / written
+            if written.resolve() != TASKS_JSON.resolve():
+                return 0
+        except (OSError, ValueError):
             return 0
 
     if find_root() is None or not CONFIG_JSON.exists():
         # 本人のフォルダではない、または初回セットアップ前
         if args.session:
-            text = (f"[初回セットアップ] このフォルダには本人設定（設定/config.json）がまだありません。"
-                    f"共通の指揮官ルール（{RULES_MD}）を読み、最初の返事で初回セットアップを始めてください：本人に名前・呼び方・AI の名前・担当部署・勤務時間・定例業務を聞き、"
-                    f"設定/config.json・CLAUDE.md（本人設定）・00_タスク管理/data/tasks.json を作る（/ai-bunshin:setup があればその手順で）。")
+            if setup_pending():
+                text = (f"[初回セットアップ] このフォルダには本人設定（設定/config.json）がまだありません。"
+                        f"共通の指揮官ルール（{RULES_MD}）を読み、最初の返事で初回セットアップを始めてください：本人に名前・呼び方・AI の名前・担当部署・勤務時間・定例業務を聞き、"
+                        f"設定/config.json・CLAUDE.md（本人設定）・00_タスク管理/data/tasks.json を作る（/ai-bunshin:setup があればその手順で）。")
+            else:
+                text = ("このフォルダは AI分身の仕事用フォルダではないため、AI分身の機能（タスク管理・見張り）は動かしていません。"
+                        "使うときは仕事用フォルダで Claude を開いてください")
             print(json.dumps({"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": text}},
                              ensure_ascii=False))
             return 0
         print("本人のフォルダ（00_タスク管理/data/tasks.json と 設定/config.json）が見つかりません。"
-              "本人のフォルダで実行するか、AI_BUNSHIN_HOME を指定してください", file=sys.stderr)
+              "00_タスク管理 があるフォルダで Claude を開き直してください（または AI_BUNSHIN_HOME にそのフォルダを指定）", file=sys.stderr)
         return 1
 
     try:
