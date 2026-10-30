@@ -92,6 +92,7 @@ description: AI 分身の初回セットアップ。新しく使い始める人�
 | `設定/config.json` | `templates/config/config.json`。`path` には、`command -v claude` と openpyxl の入った `python3` のフォルダを含む PATH を入れる |
 | `00_タスク管理/data/tasks.json` | `templates/tasks/tasks.json`。holidays に質問11の休みと、その年の祝日を入れる |
 | `04_ナレッジ/プロフィール.md`・`判断基準.md`・`部署一覧.md`・`改善ログ.md`・`役の書き方.md`・`ルール履歴/README.md` | `templates/knowledge/` の `profile.md`・`judgement.md`・`departments.md`・`improvement_log.md`・`roles.md`・`rule_history/README.md` |
+| `04_ナレッジ/プロダクトゴール.md`・`完成の定義.md`・`スクラムマスターの観察.md` | `templates/knowledge/` の `product_goal.md`・`definition_of_done.md`・`sm_observation.md` |
 | `04_ナレッジ/研修/研修の決まり.md` | `templates/knowledge/training/training_rules.md`（研修を担当する人だけ） |
 | `02_成果物/共通/業務改善の提案.md` | `templates/deliverables/improvement_proposals.md` |
 | `04_ナレッジ/記事スタイル/書き方.md`・`言い回し.md`・`手直し記録.md`・`お手本/README.md` | `templates/knowledge/article_style/` の `style_guide.md`・`phrases.md`・`revisions.md`・`examples/README.md`（本人名義の記事・コラムを書く人だけ。お手本はまだ空でよい） |
