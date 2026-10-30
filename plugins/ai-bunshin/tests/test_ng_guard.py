@@ -3,6 +3,9 @@
 import json,subprocess,sys,os,tempfile
 G=os.path.join(os.path.dirname(os.path.abspath(__file__)),"..","scripts","ng_guard.py")
 R=tempfile.mkdtemp(prefix="ngtest_")
+# R は「本人のフォルダ」：設定/config.json と 00_タスク管理/data/tasks.json の両方がある（見張りはここでだけ動く）
+os.makedirs(os.path.join(R,"設定")); os.makedirs(os.path.join(R,"00_タスク管理","data"))
+open(os.path.join(R,"設定","config.json"),"w").write("{}"); open(os.path.join(R,"00_タスク管理","data","tasks.json"),"w").write("{}")
 def run(tool,inp):
     p=subprocess.run(["python3",G],input=json.dumps({"tool_name":tool,"tool_input":inp}),capture_output=True,text=True,cwd=R,env={**os.environ,"CLAUDE_PROJECT_DIR":R})
     return "STOP" if "deny" in p.stdout else "pass"
@@ -87,4 +90,38 @@ for c in dev_good:
     if run("Bash",{"command":c})!="pass": fail+=1; print("DEV FALSEPOS",repr(c))
 for c in dev_bad:
     if run("Bash",{"command":c})!="STOP": fail+=1; print("DEV MISS",repr(c))
+print("## 本人のフォルダの外・中")
+def run_at(tool,inp,base,env_dir=True,payload_cwd=True):
+    """base で動いている想定（CLAUDE_PROJECT_DIR・payload の cwd・プロセスの cwd をそこにそろえる）。"""
+    env={k:v for k,v in os.environ.items() if k!="CLAUDE_PROJECT_DIR"}
+    if env_dir: env["CLAUDE_PROJECT_DIR"]=base
+    pl={"tool_name":tool,"tool_input":inp}
+    if payload_cwd: pl["cwd"]=base
+    p=subprocess.run(["python3",G],input=json.dumps(pl),capture_output=True,text=True,cwd=base,env=env)
+    return "STOP" if "deny" in p.stdout else "pass"
+OUT=tempfile.mkdtemp(prefix="ngout_")  # 設定なし＝ほかのプロジェクト
+HALF=tempfile.mkdtemp(prefix="nghalf_"); os.makedirs(os.path.join(HALF,"設定")); open(os.path.join(HALF,"設定","config.json"),"w").write("{}")  # config だけ（tasks.json なし）
+for c in ["rm x","git push","npm install x","curl https://example.com","sudo ls","git clean -fd","pip install x","ssh h","gh pr create","> 03_インプット/x","git reset --hard"]:
+    for base in (OUT,HALF):
+        if run_at("Bash",{"command":c},base)!="pass": fail+=1; print("OUTSIDE FALSEPOS",repr(c),base)
+for t,p in [("Write",OUT+"/03_インプット/x.csv"),("Write",OUT+"/.claude/settings.json"),("Edit",os.path.join(SRC,"plugins","x","rules","r.md"))]:
+    if run_at(t,{"file_path":p},OUT)!="pass": fail+=1; print("OUTSIDE PATH FALSEPOS",t,p)
+# 本人のフォルダの外でも、プラグインのコピー（~/.claude/plugins/）への書き込みは止める（読むだけは通す）
+for tool,inp,want in [("Write",{"file_path":CACHE},"STOP"),("Edit",{"file_path":CACHE},"STOP"),
+                      ("Bash",{"command":"echo x > ~/.claude/plugins/cache/x/r.md"},"STOP"),("Bash",{"command":"touch ~/.claude/plugins/a"},"STOP"),
+                      ("Bash",{"command":"sed -i '' s/a/b/ ~/.claude/plugins/cache/x/r.md"},"STOP"),
+                      ("Bash",{"command":"cat ~/.claude/plugins/cache/x/r.md"},"pass"),("Bash",{"command":"ls ~/.claude/plugins/"},"pass")]:
+    if run_at(tool,inp,OUT)!=want: fail+=1; print("OUTSIDE PLUGIN COPY",want,tool,inp)
+# 本人のフォルダの中、その下（05_開発/x）、環境変数なし・cwd だけの場合は、今までどおり止める
+os.makedirs(os.path.join(R,"05_開発","x"),exist_ok=True)
+SUB=os.path.join(R,"05_開発","x")
+for base,kw in [(R,{}),(SUB,{}),(SUB,{"env_dir":False}),(R,{"env_dir":False,"payload_cwd":False})]:
+    for c in ["rm x","git push","curl https://example.com","sudo ls"]:
+        if run_at("Bash",{"command":c},base,**kw)!="STOP": fail+=1; print("INSIDE MISS",repr(c),base.replace(R,"<R>"),kw)
+    if run_at("Write",{"file_path":R+"/03_インプット/x.csv"},base,**kw)!="STOP": fail+=1; print("INSIDE PATH MISS",base.replace(R,"<R>"),kw)
+    if run_at("Bash",{"command":"ls -la"},base,**kw)!="pass": fail+=1; print("INSIDE FALSEPOS ls",base.replace(R,"<R>"),kw)
+# 下のフォルダで動いていても、相対パスの基準は見つかった本人のフォルダ
+if run_at("Write",{"file_path":os.path.join(SUB,"..","..","03_インプット","a")},SUB)!="STOP": fail+=1; print("INSIDE PATH (sub, ..)")
+if run_at("Bash",{"command":"cd 05_開発/x && npm install"},R)!="pass": fail+=1; print("INSIDE DEV FALSEPOS (npm install in 05_開発/x)")
+if run_at("Bash",{"command":"npm install"},SUB)!="pass": fail+=1; print("INSIDE DEV FALSEPOS (cwd=05_開発/x)")
 print(f"失敗 {fail} 件"); sys.exit(1 if fail else 0)

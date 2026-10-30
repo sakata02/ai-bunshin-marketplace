@@ -3,6 +3,9 @@
 
 止めたら理由を Claude に返し（permissionDecision: deny）、00_タスク管理/data/ng_log.jsonl に記録する。
 本人が許可した例外は 設定/config.json の "ng_allow"（正規表現のリスト。コマンドやパスに一致したら通す）に書く。
+
+動くのは本人のフォルダ（設定/config.json と 00_タスク管理/data/tasks.json がある。今いる場所から上にたどって探す）の中だけ。
+ほかのプロジェクトでは何も止めない。ただしプラグインのコピー（~/.claude/plugins/ の下）への書き込みだけは、どこでも止める。
 """
 import json
 import os
@@ -76,11 +79,28 @@ PROTECTED_PATHS = [
 ]
 
 
+def is_owner_dir(d):
+    """本人のフォルダか：設定/config.json と 00_タスク管理/data/tasks.json の両方がある。"""
+    try:
+        return (d / "設定" / "config.json").is_file() and (d / "00_タスク管理" / "data" / "tasks.json").is_file()
+    except OSError:
+        return False
+
+
 def project_dir(payload):
+    """本人のフォルダを返す。今いる場所（CLAUDE_PROJECT_DIR・payload の cwd・os.getcwd）から上にたどって探す
+    （05_開発/ などの下で動いていても本人のフォルダ）。見つからなければ None（＝ほかのプロジェクト。見張りは通す）。"""
     for c in (os.environ.get("CLAUDE_PROJECT_DIR"), payload.get("cwd"), os.getcwd()):
-        if c:
-            return Path(c).resolve()
-    return Path.cwd()
+        if not c:
+            continue
+        try:
+            p = Path(c).resolve()
+        except (OSError, ValueError):
+            continue
+        for d in (p, *p.parents):
+            if is_owner_dir(d):
+                return d
+    return None
 
 
 def allow_patterns(root):
@@ -155,6 +175,8 @@ GLOBAL_INSTALL = re.compile(r"(?:\s-g\b|--global\b|--location[= ]global\b|\bbrew
 
 
 def is_maintainer(root):
+    if root is None:
+        return False
     try:
         return bool(json.loads((root / "設定" / "config.json").read_text(encoding="utf-8")).get("maintainer"))
     except (OSError, ValueError):
@@ -196,7 +218,7 @@ def plugin_bash_check(command, root):
             if ".claude/plugins" in parts[-2] and ".claude/plugins" not in parts[-1]:
                 return None
         return "プラグインのコピーの書き換え（Claude Code が読み込む共通部分。元を直して更新する）"
-    if not is_maintainer(root):
+    if root is not None and not is_maintainer(root):  # 元の保護は本人のフォルダの中だけ（ほかのプロジェクトでは誰がメンテする人か分からない）
         for tk in tokens:
             if "/" in tk and plugin_area(tk.replace("$HOME", "~")) == "source":
                 if READ_ONLY_CP.match(command) and tk == command.split()[-2]:
@@ -210,6 +232,7 @@ NO_EXCEPTION_LABELS = ("プラグインのコピーの書き換え", "共通部�
 
 
 def check(payload, root):
+    """root が None（本人のフォルダの外）のときは、プラグインのコピーの保護だけ効かせ、ほかは止めない。"""
     tool = payload.get("tool_name", "")
     inp = payload.get("tool_input") or {}
     if tool == "Bash":
@@ -218,6 +241,8 @@ def check(payload, root):
         plugin_label = plugin_bash_check(flat, root)
         if plugin_label:
             return plugin_label, command
+        if root is None:
+            return None
         for label, pat in BASH_RULES:
             if re.search(pat, flat):
                 if (label in DEV_ALLOWED and not GLOBAL_INSTALL.search(flat) and not pip_outside_venv(flat)
@@ -229,6 +254,8 @@ def check(payload, root):
         area = plugin_area(path) if path else None
         if area == "copy":
             return "プラグインのコピーの書き換え（Claude Code が読み込む共通部分。元を直して更新する）", path
+        if root is None:
+            return None
         if area == "source" and not is_maintainer(root):
             return "共通部分（プラグインの元）の書き換え（メンテする人だけ。提案の下書きにする）", path
         try:
@@ -251,12 +278,12 @@ def main():
     if not hit:
         return 0
     label, target = hit
-    if not label.startswith(NO_EXCEPTION_LABELS) and any(p.search(target) for p in allow_patterns(root)):
+    if root is not None and not label.startswith(NO_EXCEPTION_LABELS) and any(p.search(target) for p in allow_patterns(root)):
         return 0
     reason = (f"NG（{label}）：この操作は AI 分身では行いません。必要なら止めて、本人へのお願い（手順付き。"
               f"コマンドは `! …` の形で示す）にしてください。対象：{target[:200]}")
-    log = root / "00_タスク管理" / "data" / "ng_log.jsonl"
-    if log.parent.exists():
+    log = root / "00_タスク管理" / "data" / "ng_log.jsonl" if root is not None else None
+    if log is not None and log.parent.exists():
         with log.open("a", encoding="utf-8") as f:
             f.write(json.dumps({"at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "tool": payload.get("tool_name"),
                                 "label": label, "target": target[:500]}, ensure_ascii=False) + "\n")
