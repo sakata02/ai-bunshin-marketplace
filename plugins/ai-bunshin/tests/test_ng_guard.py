@@ -2,6 +2,8 @@
 正規表現を変えたら必ず実行する：python3 tests/test_ng_guard.py（失敗があれば終了コード1）"""
 import json,subprocess,sys,os,tempfile
 G=os.path.join(os.path.dirname(os.path.abspath(__file__)),"..","scripts","ng_guard.py")
+# 見張りは本人のフォルダを ~/.ai-bunshin/owners.json に記録する。本物のホームに作らないよう、HOME を一時フォルダに差し替える
+TEST_HOME=tempfile.mkdtemp(prefix="nghomeall_"); os.environ["HOME"]=TEST_HOME
 R=tempfile.mkdtemp(prefix="ngtest_")
 # R は「本人のフォルダ」：印（設定/config.json・00_タスク管理/data/tasks.json のどれか）がある（見張りはここでだけ動く）
 os.makedirs(os.path.join(R,"設定")); os.makedirs(os.path.join(R,"00_タスク管理","data"))
@@ -184,4 +186,147 @@ for text in ["[]","null","123","\"str\"","{broken","","{\"tool_name\":\"Bash\",\
     for base,want in ((R,"STOP"),(SUB,"STOP"),(OUT,"pass")):
         got,rc=run_raw(text,base)
         if got!=want or rc!=0: fail+=1; print("BROKEN INPUT",repr(text),base.replace(R,"<R>"),got,rc,"want",want)
+# ---- 本人のフォルダの記録（~/.ai-bunshin/owners.json）と、印・本人のフォルダを動かして見張りを外す抜け道（T058 probe2・probe3）----
+print("## 記録と抜け道")
+import unicodedata,getpass
+PH=tempfile.mkdtemp(prefix="ngph_")  # この節のホーム
+W=os.path.join(PH,"workspace"); P=os.path.join(W,"AI坂田"); OUTP=os.path.join(W,"other")
+for d in ["設定","00_タスク管理/data","05_開発/x","02_成果物/共通","03_インプット","02_成果物/設定"]: os.makedirs(os.path.join(P,d))
+open(P+"/設定/config.json","w").write("{}"); open(P+"/00_タスク管理/data/tasks.json","w").write("{}"); os.makedirs(OUTP)
+os.makedirs(P+"/.claude/rules"); open(P+"/.claude/rules/ai-bunshin-common.md","w").write("x")  # .clau* が実際に当たるように
+RM="r"+"m"
+def run_p(tool,inp,where,home=PH):
+    """where：'in'＝本人のフォルダ P で動く、'out'＝外（OUTP）、それ以外はそのフォルダで動く（CLAUDE_PROJECT_DIR もそこ）。"""
+    base={"in":P,"out":OUTP}.get(where,where)
+    env={k:v for k,v in os.environ.items() if k!="CLAUDE_PROJECT_DIR"}; env["HOME"]=home; env["CLAUDE_PROJECT_DIR"]=base
+    p=subprocess.run(["python3",G],input=json.dumps({"tool_name":tool,"tool_input":inp,"cwd":base}),capture_output=True,text=True,cwd=base,env=env)
+    return "STOP" if "deny" in p.stdout else "pass"
+# 本人のフォルダで1回動くと、記録に足される（本物のホームではなく PH の下）
+run_p("Bash",{"command":"ls"},"in")
+REC=os.path.join(PH,".ai-bunshin","owners.json")
+try: recs=json.load(open(REC))["owners"]
+except Exception: recs=[]
+if not any(os.path.realpath(x)==os.path.realpath(P) for x in recs): fail+=1; print("RECORD 記録されていない",recs)
+NFD=unicodedata.normalize("NFD","03_インプット")
+def Bc(c): return ("Bash",{"command":c})
+probe=[  # (名前, (tool, inp), where, 期待)
+ # probe2：通ってしまっていたもの
+ ("in: cp -r 設定 && rm -r 設定",Bc(f"cp -r 設定 /tmp/x && {RM} -r 設定"),"in","STOP"),
+ ("in: find 設定 -delete",Bc("find 設定 -delete"),"in","STOP"),
+ ("in: rsync --remove-source-files",Bc("rsync -a --remove-source-files 設定/ /tmp/x/"),"in","STOP"),
+ ("in: shutil.rmtree('設定')",Bc("python3 -c \"import shutil;shutil.rmtree('設定')\""),"in","STOP"),
+ ("in: mv 設? (glob)",Bc("mv 設? 設定_old"),"in","STOP"),
+ ("in: mv 00_タ* (glob)",Bc("mv 00_タ* /tmp/x"),"in","STOP"),
+ ("in: mv .clau* (glob)",Bc("mv .clau* /tmp/y"),"in","STOP"),
+ ("in: cd 設定 && mv config.json",Bc("cd 設定 && mv config.json c.json"),"in","STOP"),
+ ("in: cd data && mv tasks.json",Bc("cd 00_タスク管理/data && mv tasks.json x"),"in","STOP"),
+ ("in: git rm -r 設定 tasks.json",Bc(f"git {RM} -rq 設定 00_タスク管理/data/tasks.json"),"in","STOP"),
+ ("in: zip -rm",Bc("zip -rmq /tmp/a.zip 設定"),"in","STOP"),
+ ("in: os.rename(getcwd)",Bc("python3 -c \"import os;os.rename(os.getcwd(),'/tmp/x')\""),"in","STOP"),
+ ("in: shutil.move(abs root)",Bc(f"python3 -c \"import shutil;shutil.move('{P}','/tmp/x')\""),"in","STOP"),
+ ("in: mv ../AI坂田",Bc("mv ../AI坂田 /tmp/x"),"in","STOP"),
+ ("in: cd .. && mv AI坂田",Bc("cd .. && mv AI坂田 AI坂田_old"),"in","STOP"),
+ ("in: mv \"$PWD\"",Bc("mv \"$PWD\" /tmp/x"),"in","STOP"),
+ ("in: mv $(pwd)",Bc("mv $(pwd) /tmp/x"),"in","STOP"),
+ ("in: mv 親",Bc(f"mv {W} /tmp/x"),"in","STOP"),
+ ("in: cp x ABS/03_インプット",Bc(f"cp x {P}/03_インプット/a.csv"),"in","STOP"),
+ ("in: echo > \"03_インプット\"/a",Bc("echo x > \"03_インプット\"/a.csv"),"in","STOP"),
+ ("in: echo > ABS/03_インプット",Bc(f"echo x > {P}/03_インプット/a.csv"),"in","STOP"),
+ ("in: Write NFD 03_インプット",("Write",{"file_path":P+"/"+NFD+"/a.csv"}),"in","STOP"),
+ # （in: Write 設定/config.json の ng_allow の書き換えは T059 で扱う）
+ ("out: rm -rf ABS/03_インプット",Bc(f"{RM} -rf {P}/03_インプット"),"out","STOP"),
+ ("out: rm -rf ../AI坂田/03_インプット",Bc(f"{RM} -rf ../AI坂田/03_インプット"),"out","STOP"),
+ ("out: cd ../AI坂田 && rm",Bc(f"cd ../AI坂田 && {RM} -rf 03_インプット"),"out","STOP"),
+ ("out: cd ABS && rm",Bc(f"cd {P} && {RM} -rf 03_インプット"),"out","STOP"),
+ ("out: cd W && rm AI坂田/03_インプット",Bc(f"cd {W} && {RM} -rf AI坂田/03_インプット"),"out","STOP"),
+ ("out: rm \"QUOTED\"/03_インプット",Bc(f"{RM} -rf \"{P}\"/03_インプット"),"out","STOP"),
+ ("out: git -C<abs> clean",Bc(f"git -C{P} clean -fdx"),"out","STOP"),
+ ("out: 61個のパスのあと",Bc(f"{RM} -rf "+" ".join(f"/nx{i}" for i in range(61))+f" {P}/03_インプット"),"out","STOP"),
+ ("out: Write ../AI坂田/03_インプット",("Write",{"file_path":"../AI坂田/03_インプット/a.csv"}),"out","STOP"),
+ ("out: mv ABS/設定",Bc(f"mv {P}/設定 /tmp/x"),"out","STOP"),
+ # probe2：誤検知だったもの
+ ("FP in: git mv 02_成果物",Bc("git mv 02_成果物/a.md 02_成果物/b.md"),"in","pass"),
+ ("FP in: mv 02_成果物/x 共通/",Bc("mv 02_成果物/x 02_成果物/共通/"),"in","pass"),
+ ("FP in: mv a.md 02_成果物/設定/",Bc("mv a.md 02_成果物/設定/"),"in","pass"),
+ ("FP in: mv 02_成果物/設定",Bc("mv 02_成果物/設定 02_成果物/old"),"in","pass"),
+ ("FP in: mv a.xlsx 00_タスク管理/",Bc("mv a.xlsx 00_タスク管理/"),"in","pass"),
+ ("FP in: mv 00_タスク管理/a.xlsx data/",Bc("mv 00_タスク管理/a.xlsx 00_タスク管理/data/"),"in","pass"),
+ ("FP in: str.replace + '設定'",Bc("python3 -c \"s='設定';print(s.replace('a','b'))\""),"in","pass"),
+ ("FP in: tasks.json + .replace(x)",Bc("python3 -c \"import json;d=json.load(open('00_タスク管理/data/tasks.json'));print(str(d).replace(x))\""),"in","pass"),
+ ("FP in: 読むだけ",Bc("ls 設定 && cat 00_タスク管理/data/tasks.json | grep T0 && git status && git log -3 && git diff"),"in","pass"),
+ ("FP out: mv a b",Bc("mv a b"),"out","pass"),
+ ("FP out: rm -rf build",Bc(f"{RM} -rf build"),"out","pass"),
+ ("FP out: git push",Bc("git push origin main"),"out","pass"),
+ ("FP out: npm install",Bc("npm install"),"out","pass"),
+ ("FP out: mv build/設定 dist/",Bc("mv build/設定 dist/"),"out","pass"),
+ ("FP out: cat 本人のファイル && rm -rf build",Bc(f"cat {P}/CLAUDE.md && {RM} -rf build"),"out","pass"),
+ # probe3（~ は PH）
+ ("p3 out: rm ~/workspace/AI坂田",Bc(f"{RM} -rf ~/workspace/AI坂田/03_インプット"),"/tmp","STOP"),
+ ("p3 out: rm \"$HOME\"/workspace",Bc(f"{RM} -rf \"$HOME\"/workspace/AI坂田/03_インプット"),"/tmp","STOP"),
+ ("p3 out: rm \"${HOME}/workspace",Bc(f"{RM} -rf \"${{HOME}}/workspace/AI坂田/03_インプット\""),"/tmp","STOP"),
+ ("p3 out: cd ~/workspace/AI坂田 && rm",Bc(f"cd ~/workspace/AI坂田 && {RM} -rf 03_インプット"),"/tmp","STOP"),
+ ("p3 out: cd ~/workspace && rm AI坂田/",Bc(f"cd ~/workspace && {RM} -rf AI坂田/03_インプット"),"/tmp","STOP"),
+ ("p3 out: rm ~user/（名前で拾う）",Bc(f"{RM} -rf ~{getpass.getuser()}/workspace/AI坂田/03_インプット"),"/tmp","STOP"),
+ ("p3 out: find ABS -delete",Bc(f"find {P}/03_インプット -delete"),"/tmp","STOP"),
+ ("p3 out: mv \"$HOME/workspace/AI坂田\"",Bc("mv \"$HOME/workspace/AI坂田\" /tmp/x"),"/tmp","STOP"),
+ ("p3 in: mv 設? 00_タ* .clau*",Bc("mv 設? 00_タ* .clau* /tmp/x"),"in","STOP"),
+ ("p3 in: mv \"$HOME/workspace/AI坂田\"",Bc("mv \"$HOME/workspace/AI坂田\" /tmp/x"),"in","STOP"),
+ ("p3 FP in: os.replace(tmp, tasks.json)",Bc("python3 -c \"import json,os;d=json.load(open('00_タスク管理/data/tasks.json'));json.dump(d,open('t.tmp','w'));os.replace('t.tmp','00_タスク管理/data/tasks.json')\""),"in","pass"),
+ ("p3 FP in: pandas rename(columns=)",Bc("python3 -c \"import pandas as pd;df=pd.DataFrame(json.load(open('00_タスク管理/data/tasks.json'))['tasks']).rename(columns={'id':'ID'})\""),"in","pass"),
+ ("p3 out: Write ABS/03_インプット",("Write",{"file_path":P+"/03_インプット/a.csv","content":"x"}),"/tmp","STOP"),
+ # 本人のフォルダそのもの・親を、別の書き方で動かす・消す
+ ("out: cd W && mv AI坂田",Bc("cd .. && mv AI坂田 x"),"out","STOP"),
+ ("out: bash -c 'mv ../AI坂田'",Bc("bash -c 'mv ../AI坂田 /tmp/x'"),"out","STOP"),
+ ("out: bash -c 'cd .. && rm AI*/03'",Bc(f"bash -c 'cd .. && {RM} -rf AI*/03_インプット'"),"out","STOP"),
+ ("out: cd .. && rm AI*/03 (glob)",Bc(f"cd .. && {RM} -rf AI*/03_インプット"),"out","STOP"),
+ ("out: mv W/AI坂? (glob)",Bc(f"mv {W}/AI坂? /tmp/x"),"out","STOP"),
+ ("out: zip -rm 本人のフォルダ",Bc("zip -rmq /tmp/a.zip ~/workspace/AI坂田"),"out","STOP"),
+ ("out: find 親 -delete",Bc("find ~/workspace -name '*.json' -delete"),"out","STOP"),
+ ("out: git -C 親 rm -r",Bc(f"git -C ~/workspace {RM} -r AI坂田"),"out","STOP"),
+ ("out: Path(親).rename",Bc(f"python3 -c \"from pathlib import Path;p=Path('{W}');p.rename('/tmp/w')\""),"out","STOP"),
+ ("out: for で受け渡す",Bc(f"for d in ~/workspace/AI坂田; do {RM} -rf $d/03_インプット; done"),"out","STOP"),
+ ("out: 変数で受け渡す",Bc(f"D=~/workspace/AI坂田; {RM} -rf $D/03_インプット"),"out","STOP"),
+ ("out: パイプで受け渡す",Bc(f"echo {P}/03_インプット | xargs {RM} -rf"),"out","STOP"),
+ ("in: mv x 設定/config.json（上書き）",Bc("mv x 設定/config.json"),"in","STOP"),
+ ("in: git rm --cached",Bc(f"git {RM} --cached 02_成果物/a.md"),"in","STOP"),
+ ("in: Bash NFD 03_インプット",Bc("echo x > "+NFD+"/a.csv"),"in","STOP"),
+ ("in: cp x \"ABS\"/03_インプット",Bc(f"cp x \"{P}\"/03_インプット/a.csv"),"in","STOP"),
+ ("FP out: cd ~ && git push",Bc("cd ~ && git push"),"out","pass"),
+ ("FP out: ls 本人のフォルダ && npm install",Bc("ls ~/workspace/AI坂田 && npm install"),"out","pass"),
+ ("FP out: rm -rf ./dist（外の案件）",Bc(f"{RM} -rf ./dist node_modules"),"out","pass"),
+ ("FP in: mv 02_成果物/a.md .",Bc("mv 02_成果物/a.md ."),"in","pass"),
+ ("FP in: cp 設定/config.json 02_成果物/",Bc("cp 設定/config.json 02_成果物/c.bak"),"in","pass"),
+]
+for name,(tool,inp),where,want in probe:
+    got=run_p(tool,inp,where)
+    if got!=want: fail+=1; print("PROBE",got,"want",want,name)
+# 印が無くなっても、記録にあるフォルダは本人のフォルダとして見張る（印を消す・動かす抜け道を塞ぐ）
+NM=os.path.join(PH,"nomark"); os.makedirs(os.path.join(NM,"05_開発"))
+json.dump({"owners":recs+[NM]},open(REC,"w"))
+for tool,inp,where,want in [("Bash",{"command":f"{RM} x"},NM,"STOP"),("Bash",{"command":"git push"},os.path.join(NM,"05_開発"),"STOP"),
+                            ("Bash",{"command":"ls"},NM,"pass"),("Write",{"file_path":NM+"/03_インプット/a"},"out","STOP"),
+                            ("Bash",{"command":f"{RM} -rf {NM}/03_インプット"},"out","STOP"),("Bash",{"command":f"mv {NM} /tmp/x"},"out","STOP"),
+                            ("Bash",{"command":f"{RM} -rf build"},"out","pass")]:
+    if run_p(tool,inp,where)!=want: fail+=1; print("NO-MARK",want,tool,inp,where.replace(PH,"<PH>"))
+# 見張りの記録（~/.ai-bunshin/）は、どこからでも書き換え・削除・移動を止める（読むだけは通す）
+for where in ("in","out"):
+    for tool,inp,want in [("Write",{"file_path":REC},"STOP"),("Edit",{"file_path":REC},"STOP"),
+                          ("Bash",{"command":"echo '{}' > ~/.ai-bunshin/owners.json"},"STOP"),("Bash",{"command":f"{RM} ~/.ai-bunshin/owners.json"},"STOP"),
+                          ("Bash",{"command":"mv ~/.ai-bunshin /tmp/x"},"STOP"),("Bash",{"command":f"{RM} -rf ~/.ai-*"},"STOP"),
+                          ("Bash",{"command":"sed -i '' s/a/b/ ~/.ai-bunshin/owners.json"},"STOP"),("Bash",{"command":"cp /tmp/x $HOME/.ai-bunshin/owners.json"},"STOP"),
+                          ("Bash",{"command":"python3 -c \"import os;os.remove(os.path.expanduser('~/.ai-bunshin/owners.json'))\""},"STOP"),
+                          ("Bash",{"command":"cd ~ && mv .ai-bunshin x"},"STOP"),("Bash",{"command":f"cd ~/.ai-bunshin && {RM} owners.json"},"STOP"),
+                          ("Bash",{"command":"cat ~/.ai-bunshin/owners.json"},"pass"),("Bash",{"command":"ls -la ~/.ai-bunshin 2>&1"},"pass")]:
+        if run_p(tool,inp,where)!=want: fail+=1; print("RECORDS",where,want,tool,inp)
+# 長いコマンド：外では指している本人のフォルダを探しきれないので、記録にあるすべてで判定する（止める側）。中の長い書き出しは通す
+LONG=" ".join(["w"]*3100)
+for c,where,want in [(f"echo {LONG}; {RM} -rf build","out","STOP"),(f"echo {LONG}","out","pass"),
+                     ("cat > 02_成果物/long.md <<'EOF'\n"+"\n".join(["文章 mv find tar の説明"]*1200)+"\nEOF","in","pass")]:
+    if run_p("Bash",{"command":c},where)!=want: fail+=1; print("LONG",where,want,c[:40])
+# ng_allow（.*）でも、本人のフォルダそのもの・見張りの記録の保護は外れない
+json.dump({"ng_allow":[".*"]},open(P+"/設定/config.json","w"))
+for c in [f"mv {P} /tmp/x",f"{RM} ~/.ai-bunshin/owners.json"]:
+    if run_p("Bash",{"command":c},"in")!="STOP": fail+=1; print("NO-EXCEPTION",c)
+if run_p("Bash",{"command":f"{RM} x"},"in")!="pass": fail+=1; print("ng_allow が効かない（rm x）")
+json.dump({},open(P+"/設定/config.json","w"))
 print(f"失敗 {fail} 件"); sys.exit(1 if fail else 0)

@@ -4,18 +4,23 @@
 止めたら理由を Claude に返し（permissionDecision: deny）、00_タスク管理/data/ng_log.jsonl に記録する。
 本人が許可した例外は 設定/config.json の "ng_allow"（正規表現のリスト。コマンドやパスに一致したら通す）に書く。
 
-動くのは本人のフォルダの中だけ。印（設定/config.json・00_タスク管理/data/tasks.json・.claude/rules/ai-bunshin-common.md）の
-どれか1つがあれば本人のフォルダ。今いる場所から上にたどって探す（リンクを解いた道と解かない道の両方）。
-ほかのプロジェクトでは何も止めない。ただし、
-- プラグインのコピー（~/.claude/plugins/ の下）への書き込みは、どこでも止める
-- 外で始めたセッションでも、Write・Edit のパスや Bash の中のパス（絶対パス・~/・$HOME/）が本人のフォルダの中を指すなら、その本人のフォルダを基準に判定する
+動くのは本人のフォルダの中だけ。本人のフォルダ＝印（設定/config.json・00_タスク管理/data/tasks.json・
+.claude/rules/ai-bunshin-common.md）のどれか1つがある、または記録（~/.ai-bunshin/owners.json）にあるフォルダ。
+今いる場所から上にたどって探す（リンクを解いた道と解かない道の両方）。印で見つけたフォルダは記録に足し、記録は消さない
+（印を動かしても・消しても見張りは外れない）。
+ほかのプロジェクトでは普段の作業を止めない。ただし、どこからでも次は止める：
+- プラグインのコピー（~/.claude/plugins/ の下）・見張りの記録（~/.ai-bunshin/）への書き込み
+- 本人のフォルダそのもの（やその親）を動かす・消す操作、印（設定/config.json・tasks.json・共通ルールの写し）を動かす・消す操作
+- 外で始めたセッションでも、操作が本人のフォルダを指すなら（パス・cd の行き先・フォルダの名前）、その本人のフォルダを基準に判定する
 - 見張りの入力を読めなかったときは、本人のフォルダの中なら止める、外なら通す
 """
+import glob
 import json
 import os
 import re
 import shlex
 import sys
+import unicodedata
 from datetime import datetime
 from pathlib import Path
 
@@ -33,15 +38,12 @@ def cmd(words):
     return B + r"(?:" + words + r")" + E
 
 
-# 本人のフォルダの印・その入れ物（動かすと見張りが外れる）
-PROTECTED_NAMES = (r"(?:設定(?:/config\.json)?|00_タスク管理(?:/data(?:/tasks\.json)?)?|"
-                   r"\.claude(?:/rules(?:/ai-bunshin-common\.md)?)?)/?")
-
 BASH_RULES = [
     ("削除", cmd(r"rm|rmdir|unlink|shred|trash|srm|truncate")),
     ("削除", r"\bfind\b[^\n]*\s-(?:delete\b|(?:exec|execdir|ok|okdir)\s+(?:\S*/)?rm\b)"),
+    ("削除", B + r"zip\s+(?:\S+\s+)*?(?:-[A-Za-z]*m[A-Za-z]*|--move)(?=$|[\s;&|)])"),  # 圧縮したあと元を消す
     ("削除・書き換え（git）",
-     B + r"git\s+(?:-\S+(?:\s+[^-\s]\S*)?\s+)*(?:push|clean|rebase|restore|reset\s+--hard|stash\s+(?:drop|clear)|"
+     B + r"git\s+(?:-\S+(?:\s+[^-\s]\S*)?\s+)*(?:push|clean|rebase|restore|rm|reset\s+--hard|stash\s+(?:drop|clear)|"
          r"branch\s+-D|checkout\s+(?:--|\.))(?=\s|$)"),
     ("プロセスの停止", cmd(r"kill|pkill|killall")),
     ("システム", cmd(r"sudo|su|launchctl|crontab|shutdown|reboot|halt|pmset|diskutil|systemsetup|osascript|shortcuts")),
@@ -60,12 +62,7 @@ BASH_RULES = [
     ("スクリプト経由の削除", r"\bperl\b[^\n]*\s-\w*e\b[^\n]*\b(?:unlink|rmdir|system)\b"),
     ("スクリプト経由の削除", r"\bruby\b[^\n]*\s-\w*e\b[^\n]*(?:File\.delete|FileUtils\.rm|system)"),
     ("スクリプト経由の削除", r"\bnode\b[^\n]*\s-\w*e\b[^\n]*(?:rmSync|unlinkSync|rmdirSync|\.rm\(|\.unlink\(|child_process)"),
-    # 印（設定・タスクの正本）を動かすと見張りが外れるので、移す・名前を変える操作を止める
-    ("本人の設定・タスクの正本の移動",
-     B + r"(?:git\s+mv|mv|rename)(?=\s)[^\n;&|]*[\s\"'/=]" + PROTECTED_NAMES + r"(?=$|[\s\"';&|)])"),
-    ("本人の設定・タスクの正本の移動",
-     r"\bpython3?\b(?=[\s\S]*(?:os\.(?:rename|renames|replace)\b|shutil\.move\b|\.rename\(|\.replace\(\s*[\"'\w/.~$]+[\"']?\s*\)))"
-     r"(?=[\s\S]*(?:設定|00_タスク管理|config\.json|tasks\.json|ai-bunshin-common))"),
+    # 印（設定・タスクの正本）を動かす・消す操作は、記録があるので文字の並びではなく行き先を解いて止める（destructive_hit）
     ("空にする・上書き", r"\bdd\b[^\n]*\bof="),
     ("空にする・上書き", r"\b(?:cp|cat)\s+/dev/null\b"),
     ("空にする・上書き", r"\bln\s+-\w*f\w*\s+/dev/null\b"),
@@ -73,16 +70,17 @@ BASH_RULES = [
     ("空にする・上書き", r">\|"),
     ("ゴミ箱・破棄", r"\bmv\b[^\n]*\s(?:/dev/null|\S*/\.Trash\b)"),
     ("保護されたファイルの書き換え",
-     r"\b(?:sed|perl)\b[^\n]*\s-i\b[^\n]*\s[\"']?(?:\./)?(?:\.claude/|CLAUDE\.md(?=$|[\s\"'])|設定/|03_インプット/)"),
-    ("元データの移動・上書き", r"\b(?:mv|cp|tee)\b[^\n]*\s[\"']?(?:\./)?03_インプット/"),
-    ("保護されたファイルの上書き", r">>?\s*[\"']?(?:\S*/)?(?:03_インプット/|\.claude/settings[^\s]*\.json)"),
+     r"\b(?:sed|perl)\b[^\n]*\s-i\b[^\n]*\s[\"']?(?:\./)?(?:\.claude/|CLAUDE\.md(?=$|[\s\"'])|設定/)"),
+    ("保護されたファイルの書き換え", r"\b(?:sed|perl)\b[^\n]*\s-i\b[^\n]*\s[\"']?(?:\S*/)?03_インプット[\"']?/"),
+    ("元データの移動・上書き", r"\b(?:mv|cp|tee)\b[^\n]*\s[\"']?(?:\S*/)?03_インプット[\"']?/"),
+    ("保護されたファイルの上書き", r">>?\s*[\"']?(?:\S*/)?(?:03_インプット[\"']?/|\.claude/settings[^\s]*\.json)"),
 ]
 
 
 def normalize(cmd_text):
-    """\\rm・r\\m・行末の \\ による改行など、見た目をずらす書き方をならす。"""
+    """\\rm・r\\m・行末の \\ による改行など、見た目をずらす書き方をならす。濁点を分けた表記（NFD）も NFC にそろえる。"""
     t = cmd_text.replace("\\\n", " ")
-    return re.sub(r"\\(?=[A-Za-z])", "", t)
+    return unicodedata.normalize("NFC", re.sub(r"\\(?=[A-Za-z])", "", t))
 
 
 # Write / Edit で書いてはいけない場所（本人のフォルダからの相対パスで判定）
@@ -97,40 +95,132 @@ PROTECTED_PATHS = [
 OWNER_MARKS = (("設定", "config.json"), ("00_タスク管理", "data", "tasks.json"), (".claude", "rules", "ai-bunshin-common.md"))
 
 
-def is_owner_dir(d):
-    """本人のフォルダか：印（設定/config.json・00_タスク管理/data/tasks.json・.claude/rules/ai-bunshin-common.md）の
-    どれか1つがある。「両方」を条件にすると、片方を動かすだけで見張りが外れるので、1つでよい。"""
+def nfc(text):
+    return unicodedata.normalize("NFC", text)
+
+
+def path_forms(p, base=None):
+    """p のリンクを解かない形（abspath）と解いた形（realpath）を、NFC にそろえた文字列で返す（~ は展開する）。"""
     try:
-        return any(d.joinpath(*m).is_file() for m in OWNER_MARKS)
+        t = os.path.expanduser(os.fspath(p))
+        if base is not None and not os.path.isabs(t):
+            t = os.path.join(base, t)
+        a = os.path.abspath(t)
+        out = {nfc(a)}
+        out.add(nfc(os.path.realpath(a)))
+        return out
+    except (OSError, ValueError, TypeError):
+        return set()
+
+
+def is_under(f, r):
+    """f が r そのもの、または r の下か（文字列で比べる。どちらも path_forms の形）。"""
+    return f == r or f.startswith(r.rstrip(os.sep) + os.sep)
+
+
+# ---- 本人のフォルダの記録（~/.ai-bunshin/owners.json）。印で見つけたフォルダを足していき、消さない ----
+
+def records_dir():
+    return Path.home() / ".ai-bunshin"
+
+
+def records_file():
+    return records_dir() / "owners.json"
+
+
+_RECORDS = None
+
+
+def _read_records():
+    try:
+        data = json.loads(records_file().read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return False
+        return []
+    items = data.get("owners", []) if isinstance(data, dict) else data
+    if not isinstance(items, list):
+        return []
+    return [nfc(x) for x in items if isinstance(x, str) and os.path.isabs(x)]
+
+
+def load_records():
+    global _RECORDS
+    if _RECORDS is None:
+        _RECORDS = _read_records()
+    return _RECORDS
+
+
+def remember_owner(d):
+    """本人のフォルダ d（abspath と realpath の両方）を記録に足す。重複させない。書けなくても見張りは止めない。"""
+    try:
+        recs = load_records()
+        new = [f for f in sorted(path_forms(d)) if f not in recs]
+        if not new:
+            return
+        recs.extend(new)
+        merged = _read_records()  # ほかの見張りが同時に足した分を消さないよう、読み直して足す
+        for f in recs:
+            if f not in merged:
+                merged.append(f)
+        records_dir().mkdir(parents=True, exist_ok=True)
+        tmp = records_dir() / f".owners.{os.getpid()}.tmp"
+        tmp.write_text(json.dumps({"owners": merged}, ensure_ascii=False, indent=1), encoding="utf-8")
+        os.replace(tmp, records_file())
+    except Exception:
+        pass
+
+
+def record_roots():
+    """記録にある本人のフォルダ：[(記録の文字列, 解いたフォルダ)]。"""
+    out = []
+    for f in load_records():
+        try:
+            out.append((f, Path(os.path.realpath(f))))
+        except (OSError, ValueError):
+            out.append((f, Path(f)))
+    return out
+
+
+_OWNER_DIR_CACHE = {}
+
+
+def is_owner_dir(d):
+    """印（設定/config.json・00_タスク管理/data/tasks.json・.claude/rules/ai-bunshin-common.md）のどれか1つがあるか。
+    「両方」を条件にすると、片方を動かすだけで見張りが外れるので、1つでよい。"""
+    key = str(d)
+    if key not in _OWNER_DIR_CACHE:
+        try:
+            _OWNER_DIR_CACHE[key] = any(d.joinpath(*m).is_file() for m in OWNER_MARKS)
+        except (OSError, ValueError):
+            _OWNER_DIR_CACHE[key] = False
+    return _OWNER_DIR_CACHE[key]
+
+
+def _resolved(d):
+    try:
+        return d.resolve()
+    except (OSError, RuntimeError):
+        return d
 
 
 def find_owner(path):
-    """path（ファイルでもよい）から上にたどって本人のフォルダを探す。リンクを解かない道（abspath）と解いた道（resolve）の
-    両方を見て、どちらかで見つかれば返す（解いたフォルダ）。"""
-    try:
-        text = os.path.expanduser(os.fspath(path))
-        cands = [Path(os.path.abspath(text))]
-    except (OSError, ValueError, TypeError):
-        return None
-    try:
-        cands.append(Path(text).resolve())
-    except (OSError, ValueError, RuntimeError):
-        pass
-    for q in cands:
+    """path（ファイルでもよい）から上にたどって本人のフォルダを探す（印がある、または記録にある）。
+    リンクを解かない道（abspath）と解いた道（realpath）の両方を見て、どちらかで見つかれば返す（解いたフォルダ）。
+    印で見つけたフォルダは記録に足す。"""
+    recs = set(load_records())
+    for f in sorted(path_forms(path)):
+        q = Path(f)
         for d in (q, *q.parents):
             if is_owner_dir(d):
-                try:
-                    return d.resolve()
-                except (OSError, RuntimeError):
-                    return d
+                remember_owner(d)
+                return _resolved(d)
+            if nfc(str(d)) in recs:
+                return _resolved(d)
     return None
 
 
 def project_dir(payload):
     """本人のフォルダを返す。今いる場所（CLAUDE_PROJECT_DIR・payload の cwd・os.getcwd）から上にたどって探す
-    （05_開発/ などの下で動いていても本人のフォルダ）。見つからなければ None（＝ほかのプロジェクト。見張りは通す）。"""
+    （05_開発/ などの下で動いていても本人のフォルダ）。見つからなければ None（＝ほかのプロジェクト）。"""
     cwd = payload.get("cwd") if isinstance(payload, dict) else None
     try:
         here = os.getcwd()
@@ -145,74 +235,453 @@ def project_dir(payload):
     return None
 
 
-PATH_WORD = re.compile(r"(?:^|[\s\"'=:(<>])((?:~|\$HOME|\$\{HOME\}|/)[^\s\"';&|()<>`]*)")
+def base_cwd(payload, root=None):
+    c = payload.get("cwd") if isinstance(payload, dict) else None
+    if isinstance(c, str) and c:
+        return c
+    if root is not None:
+        return str(root)
+    try:
+        return os.getcwd()
+    except OSError:
+        return os.path.expanduser("~")
+
+
+# ---- コマンドの読み解き：区切り（; && || & 改行）・パイプ・cd の行き先・展開・ワイルドカード ----
+
+MAX_WORDS = 3000  # 外のセッションでこれを超える長さは、指している本人のフォルダを探しきれないので、記録にあるすべてで全体を判定する
+
+
+def split_top(text, pipes=False):
+    """引用符・$( )・` ` の外にある ; && || & 改行（pipes=True なら | も）で分ける。"""
+    out, cur, i, q, depth, n = [], [], 0, None, 0, len(text)
+
+    def flush():
+        s = "".join(cur).strip()
+        if s:
+            out.append(s)
+        cur.clear()
+
+    while i < n:
+        c = text[i]
+        if q:
+            cur.append(c)
+            if c == "\\" and q != "'" and i + 1 < n:
+                cur.append(text[i + 1])
+                i += 2
+                continue
+            if c == q:
+                q = None
+            i += 1
+            continue
+        if c == "\\" and i + 1 < n:
+            cur.append(text[i:i + 2])
+            i += 2
+            continue
+        if c in "'\"`":
+            q = c
+        elif text.startswith("$(", i):
+            depth += 1
+            cur.append("$(")
+            i += 2
+            continue
+        elif c == "(" and depth:
+            depth += 1
+        elif c == ")" and depth:
+            depth -= 1
+        elif depth == 0:
+            if text.startswith("&&", i) or text.startswith("||", i):
+                flush()
+                i += 2
+                continue
+            if c in ";\n" or (c == "&" and (i == 0 or text[i - 1] not in "<>") and not text.startswith("&>", i)):
+                flush()
+                i += 1
+                continue
+            if pipes and c == "|":
+                flush()
+                i += 1
+                continue
+        cur.append(c)
+        i += 1
+    flush()
+    return out
+
+
+def seg_words(text):
+    s = re.sub(r"\$\(\s*pwd\s*\)|`\s*pwd\s*`|\$\{PWD\}", "$PWD", text)
+    try:
+        lex = shlex.shlex(s, posix=True, punctuation_chars=True)
+        lex.whitespace_split = True
+        lex.commenters = ""
+        return list(lex)
+    except ValueError:
+        return [w.strip("'\"") for w in re.findall(r"[^\s;&|()<>]+", s)]
+
+
+def expand(w, cwd):
+    home = os.path.expanduser("~")
+    w = w.replace("${HOME}", home).replace("$HOME", home).replace("$PWD", cwd)
+    if w.startswith("~"):
+        w = os.path.expanduser(w)  # ~user も
+    return w
+
+
+GLOB_CHARS = re.compile(r"[*?\[]")
+PY_LIT = r"""(?:[rbuRBU]{1,2})?(['"])(.*?)\1"""
+
+
+def word_texts(w):
+    """語からパスの候補を取り出す：語そのもの、-C/x・--opt=x・NAME=x の後ろ、語の中の引用符つき文字列（python のコードなど）。"""
+    out = [w]
+    for pat in (r"^--?[\w-]+=(.+)$", r"^-[A-Za-z]([/~.$].*)$", r"^[A-Za-z_]\w*=(.+)$"):
+        m = re.match(pat, w)
+        if m:
+            out.append(m.group(1))
+    out += [m.group(2) for m in re.finditer(PY_LIT, w) if m.group(2)]
+    return out
+
+
+def to_paths(t, cwd):
+    """文字列 t をパス（絶対、NFC の文字列の集合）にする。ワイルドカードは実際のファイルに広げる。"""
+    if not t or len(t) > 1024 or "\n" in t or "\x00" in t:
+        return set()
+    t = os.path.expanduser(t)
+    full = t if os.path.isabs(t) else os.path.join(cwd, t)
+    out = set()
+    if GLOB_CHARS.search(t):
+        try:
+            hits = glob.glob(full)
+        except (OSError, ValueError, re.error):
+            hits = []
+        for h in hits[:5000]:
+            out |= path_forms(h)
+        if len(hits) > 5000:
+            out |= path_forms(os.path.dirname(full))
+    out |= path_forms(full)
+    return out
+
+
+WRAPPERS = {"sudo", "env", "command", "builtin", "nohup", "time", "nice", "exec", "then", "do", "else", "elif",
+            "if", "while", "until", "!", "{", "(", "xargs", "caffeinate", "timeout"}
+
+
+class Part:
+    """パイプでつながった1つのコマンド。"""
+
+    def __init__(self, text, cwd, words):
+        self.text, self.cwd, self.words = text, cwd, words
+        i = 0
+        while i < len(words):
+            w = words[i]
+            if w in WRAPPERS or re.match(r"^[A-Za-z_]\w*=", w) or (w.startswith("-") and i and words[i - 1] in WRAPPERS):
+                i += 1
+                continue
+            break
+        self.cmd = os.path.basename(words[i]) if i < len(words) else ""
+        self.args = [a for a in words[i + 1:] if a not in (")", "}", ";;")]
+
+
+class Analysis:
+    def __init__(self):
+        self.groups = []      # [(区切りごとのテキスト, [Part])]
+        self.parts = []       # すべての Part（bash -c・eval の中身も）
+        self.nwords = 0
+        self.too_long = False
+
+
+def analyze(command, cwd, an=None, depth=0, top=None):
+    """コマンドを区切り・パイプに分け、cd の行き先を順にたどって、各コマンドの今いる場所と語を出す。
+    ヒアドキュメント（<<）があるときは区切らない（中身が別の言語のため）。"""
+    an = an or Analysis()
+    groups = [command] if "<<" in command else split_top(command)
+    for g in groups:
+        parts = []
+        for pt in ([g] if "<<" in g else split_top(g, pipes=True)):
+            words = [expand(w, cwd) for w in seg_words(pt)]
+            an.nwords += len(words)
+            an.too_long = an.nwords > MAX_WORDS
+            p = Part(pt, cwd, words)
+            p.top = top if top is not None else g
+            parts.append(p)
+            an.parts.append(p)
+            if p.cmd in ("cd", "pushd"):
+                dest = next((a for a in p.args if not a.startswith("-")), None)
+                if dest is None:
+                    cwd = os.path.expanduser("~")
+                else:
+                    cwd = os.path.normpath(os.path.join(cwd, dest))
+            if depth < 3:
+                if p.cmd in ("bash", "sh", "zsh"):
+                    for k, a in enumerate(p.args[:-1]):
+                        if re.match(r"^-\w*c\w*$", a):
+                            analyze(p.args[k + 1], cwd, an, depth + 1, p.top)
+                            break
+                elif p.cmd == "eval":
+                    analyze(" ".join(p.args), cwd, an, depth + 1, p.top)
+        an.groups.append((g, parts))
+    return an
+
+
+def part_paths(p):
+    out = set()
+    for w in p.words:
+        for t in word_texts(w):
+            out |= to_paths(t, p.cwd)
+    return out
+
+
+# ---- 動かす・消す操作の「元」（行き先は除く）----
+
+def _nonopt(args):
+    out, after = [], False
+    for a in args:
+        if after or not a.startswith("-") or a == "-":
+            out.append(a)
+        elif a == "--":
+            after = True
+    return out
+
+
+PY_CWD = r"(?:os\.getcwd\(\)|(?:pathlib\.)?Path\.cwd\(\)|(?:pathlib\.)?Path\(\s*\)|os\.curdir)"
+PY_CALL = r"(?:os\.(?:rename|renames|replace|remove|unlink|rmdir|removedirs)|shutil\.(?:move|rmtree))\(\s*"
+PY_METHOD = r"\s*\.(?:rename|replace|rmdir|unlink)\("
+
+
+def python_sources(code):
+    """python のコードの中で、動かす・消す対象になっている文字列（今いる場所は "."）。"""
+    lit = r"(?:[rbuRBU]{1,2})?(?:'([^'\n]*)'|\"([^\"\n]*)\")"  # 引用符つき文字列（中身は2つの組のどちらか）
+    out = []
+    for m in re.finditer(PY_CALL + r"(?:" + lit + r"|(" + PY_CWD + r"))", code):
+        out.append("." if m.group(3) else (m.group(1) if m.group(1) is not None else m.group(2)))
+    for m in re.finditer(r"(?:pathlib\.)?Path\(\s*" + lit + r"\s*\)" + PY_METHOD, code):
+        out.append(m.group(1) if m.group(1) is not None else m.group(2))
+    for m in re.finditer(PY_CWD + PY_METHOD, code):
+        out.append(".")
+    for m in re.finditer(r"\b([A-Za-z_]\w*)\s*=\s*(?:pathlib\.)?Path\(\s*" + lit + r"\s*\)", code):
+        if re.search(r"\b" + re.escape(m.group(1)) + PY_METHOD, code):
+            out.append(m.group(2) if m.group(2) is not None else m.group(3))
+    for m in re.finditer(r"\b([A-Za-z_]\w*)\s*=\s*" + PY_CWD, code):
+        if re.search(r"\b" + re.escape(m.group(1)) + PY_METHOD, code):
+            out.append(".")
+    return [s.rstrip("\\") for s in out if s]
+
+
+def move_sources(p):
+    """Part が動かす・消すもの：(元の文字列のリスト, mv の行き先 or None, 基準の場所)。"""
+    c, a, base = p.cmd, p.args, p.cwd
+    if c == "git":
+        i, sub = 0, ""
+        while i < len(a):
+            if a[i] == "-C" and i + 1 < len(a):
+                base = os.path.join(base, a[i + 1])
+                i += 2
+            elif a[i].startswith("-C") and len(a[i]) > 2:
+                base = os.path.join(base, a[i][2:])
+                i += 1
+            elif a[i] in ("-c", "--git-dir", "--work-tree") and i + 1 < len(a):
+                i += 2
+            elif a[i].startswith("-"):
+                i += 1
+            else:
+                sub = a[i]
+                break
+        if sub in ("mv", "rm"):
+            c, a = sub, a[i + 1:]
+        else:
+            return [], None, base
+    srcs, dest = [], None
+    if c in ("mv", "rename"):
+        has_t, skip, plain = False, False, []
+        for x in a:
+            if skip:
+                skip = False
+                continue
+            if x in ("-t", "--target-directory"):
+                has_t, skip = True, True
+                continue
+            if x.startswith("--target-directory="):
+                has_t = True
+                continue
+            plain.append(x)
+        plain = _nonopt(plain)
+        if c == "mv" and not has_t and plain:
+            srcs, dest = plain[:-1], plain[-1]
+        else:
+            srcs = plain
+    elif c in ("rm", "rmdir", "unlink", "trash", "srm", "shred"):
+        srcs = _nonopt(a)
+    elif c == "zip" and any(re.match(r"^-[A-Za-z]*m", x) or x == "--move" for x in a):
+        srcs = _nonopt(a)[1:]
+    elif c == "rsync" and "--remove-source-files" in a:
+        srcs = _nonopt(a)[:-1]
+    elif c == "tar" and "--remove-files" in a:
+        srcs = _nonopt(a)
+    elif c == "find" and any(x in ("-delete", "-exec", "-execdir", "-ok", "-okdir") for x in a):
+        for x in a:
+            if x.startswith("-") or x in ("(", "!"):
+                break
+            srcs.append(x)
+        srcs = srcs or ["."]
+    if re.search(r"\bpython[\d.]*\b", p.text):
+        srcs = srcs + python_sources(p.text)
+        for w in p.words:
+            srcs += python_sources(w)
+    return srcs, dest, base
+
+
+def protected_roots(root=None):
+    """どこからでも動かす・消すのを止めるフォルダ：[(フォルダの形の文字列, 本人のフォルダ or None)]。
+    記録にある本人のフォルダ・今の本人のフォルダ・見張りの記録の置き場所。"""
+    out = [(f, r) for f, r in record_roots()]
+    if root is not None:
+        out += [(f, root) for f in path_forms(root)]
+    out += [(f, None) for f in path_forms(records_dir())]
+    return out
+
+
+def destructive_hit(an, root=None):
+    """本人のフォルダそのもの（やその親）・見張りの記録・印を動かす・消す操作か。(ラベル, 本人のフォルダ) を返す。"""
+    prot = protected_roots(root)
+    owners = {}
+    for f, r in prot:
+        if r is not None:
+            owners.setdefault(str(r), r)
+    marks = []
+    for r in owners.values():
+        for f in path_forms(r):
+            marks += [(nfc(os.path.join(f, *m)), r) for m in OWNER_MARKS]
+    for p in an.parts:
+        srcs, dest, base = move_sources(p)
+        for s in srcs:
+            for t in word_texts(s):
+                for f in to_paths(t, base):
+                    for pr, r in prot:
+                        if is_under(pr, f):
+                            if r is None:
+                                return "見張りの記録（~/.ai-bunshin/）を動かす・消す", None
+                            return "本人のフォルダそのものを動かす・消す", r
+                    for mk, r in marks:
+                        if is_under(mk, f):
+                            return "本人の設定・タスクの正本の移動・削除", r
+        if dest is not None and p.cmd in ("mv", "git"):
+            for f in to_paths(dest, base):
+                for mk, r in marks:
+                    if f == mk:
+                        return "本人の設定・タスクの正本の上書き", r
+    return None
+
+
+RECORD_WRITE = re.compile(r"(?:>>?(?!\s*(?:&|/dev/null\b))|\btee\b|\s-i\b|\b(?:cp|mv|ln|rsync|install|touch|mkdir|rm|rmdir|unlink|shred|trash|rename|"
+                          r"truncate|dd|unzip|tar|zip|patch|chmod|chflags|chown|find|sed|perl|ruby|node|python[\d.]*)\b|"
+                          r"open\(|\.write|write_text|writeFile|\bcd\b|\bpushd\b)")
+
+
+def records_bash_hit(an):
+    """見張りの記録（~/.ai-bunshin/）に書く Bash か。読むだけ（cat・ls など）は通す。
+    記録の名前が出てくる、またはパス・cd の行き先が記録の置き場所の中の区切りに、書き込みの語があれば止める。"""
+    rec = path_forms(records_dir())
+    for p in an.parts:
+        if not RECORD_WRITE.search(p.top):
+            continue
+        if re.search(r"\.ai-bunshin(?=$|[/\s\"';&|)])", p.top) or any(
+                is_under(f, r) for f in part_paths(p) | path_forms(p.cwd) for r in rec):
+            return True
+    return False
+
+
+# 外のセッションで、本人のフォルダを指していても、あとの区切りに影響しない読むだけのコマンド
+READ_ONLY_CMDS = {"cat", "ls", "head", "tail", "wc", "grep", "egrep", "fgrep", "rg", "diff", "stat", "file", "less", "more",
+                  "du", "df", "pwd", "test", "[", "realpath", "readlink", "echo", "printf", "find", "open", "md5", "shasum",
+                  "cd", "pushd"}
+
+
+def _read_only_group(g, parts):
+    if re.search(r"[>`]|\$\(|<\(", g):
+        return False
+    if len(parts) != 1:
+        return False
+    p = parts[0]
+    if p.cmd == "find" and any(x in ("-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint", "-fprintf", "-fls") for x in p.args):
+        return False
+    return p.cmd in READ_ONLY_CMDS
 
 
 def roots_from_input(payload):
-    """起動場所が本人のフォルダの外のとき、操作の中のパス（Write・Edit のパス、Bash の絶対パス・~/・$HOME/）から
-    上にたどって見つかる本人のフォルダ（重複なし）。"""
+    """起動場所が本人のフォルダの外のとき、操作が指している本人のフォルダと、その本人のフォルダで判定する範囲（Bash の
+    コマンドの一部。None なら全部）のリスト。Write・Edit はパス、Bash はパス・cd の行き先・記録にあるフォルダの名前で見つける。
+    外のコマンドの中で、本人のフォルダを指す区切りと、その後ろの区切り（変数や for で受け渡せるため。読むだけのコマンドは除く）を判定する。"""
     tool = payload.get("tool_name", "")
     inp = payload.get("tool_input")
     if not isinstance(inp, dict):
         return []
-    paths = []
+    base = base_cwd(payload)
     if tool in ("Write", "Edit", "MultiEdit", "NotebookEdit"):
         p = inp.get("file_path") or inp.get("notebook_path")
         if isinstance(p, str) and p:
-            if not os.path.isabs(os.path.expanduser(p)):
-                base = payload.get("cwd") if isinstance(payload.get("cwd"), str) else os.getcwd()
-                p = os.path.join(base, p)
-            paths.append(p)
-    elif tool == "Bash" and isinstance(inp.get("command"), str):
-        home = os.path.expanduser("~")
-        for m in PATH_WORD.finditer(normalize(inp["command"])):
-            t = m.group(1).replace("${HOME}", home).replace("$HOME", home)
-            if t.startswith("~") and not t.startswith("~/") and t != "~":
-                continue
-            paths.append(t)
-    roots = []
-    for p in paths[:60]:
-        r = find_owner(p)
-        if r is not None and r not in roots:
-            roots.append(r)
-    return roots
-
-
-def moves_owner_root(flat, payload, root):
-    """mv・git mv・rename で、本人のフォルダそのもの（や、その親）を動かす操作か（最後の語は行き先なので見ない）。"""
-    base = payload.get("cwd") if isinstance(payload.get("cwd"), str) and payload.get("cwd") else str(root)
-    for seg in re.split(r"[;&|\n]+", flat):
-        try:
-            words = shlex.split(seg)
-        except ValueError:
-            words = seg.split()
-        for i, w in enumerate(words):
-            if os.path.basename(w) not in ("mv", "rename"):
-                continue
-            args = words[i + 1:]
-            has_t = any(a in ("-t", "--target-directory") or a.startswith("--target-directory=") for a in args)
-            srcs, skip = [], False
-            for a in args:
-                if skip:
-                    skip = False
-                    continue
-                if a in ("-t", "--target-directory"):
-                    skip = True
-                    continue
-                if a.startswith("-"):
-                    continue
-                srcs.append(a)
-            if not has_t:
-                srcs = srcs[:-1]
-            for a in srcs:
-                t = os.path.join(base, os.path.expanduser(a))
-                try:
-                    qs = (Path(os.path.abspath(t)), Path(t).resolve())
-                except (OSError, ValueError, RuntimeError):
-                    continue
-                if any(q == root or q in root.parents for q in qs):
-                    return True
-    return False
+            for f in sorted(path_forms(p, base)):
+                r = find_owner(f)
+                if r is not None:
+                    return [(r, None)]
+        return []
+    if tool != "Bash" or not isinstance(inp.get("command"), str):
+        return []
+    flat = normalize(inp["command"])
+    an = analyze(flat, base)
+    recs = record_roots()
+    if an.too_long:  # 確かめきれない長さ：記録にあるすべての本人のフォルダで、全体を判定する（止める側）
+        seen, out = set(), []
+        for _, r in recs:
+            if str(r) not in seen:
+                seen.add(str(r))
+                out.append((r, None))
+        return out
+    names = {}
+    for f, r in recs:
+        nm = nfc(os.path.basename(f.rstrip(os.sep)))
+        if nm:
+            names.setdefault(nm, []).append(r)
+    # 区切りごとのコマンド（bash -c・eval の中身も、その区切りに含める）
+    groups = [(g, [p for p in an.parts if p.top == g]) for g, _ in an.groups]
+    refs = []  # 区切りごとの、指している本人のフォルダ（解いた形の文字列 → Path）
+    for g, parts in groups:
+        hit = {}
+        for p in parts:
+            cands = set()
+            for w in p.words:
+                for t in word_texts(w):
+                    cands |= to_paths(t, p.cwd)
+            cands_anc = set(cands) if p.cmd not in ("cd", "pushd") else set()  # 今いる場所は親とみなさない（cd ~ など）
+            cands |= path_forms(p.cwd)
+            for f in cands:
+                r = find_owner(f)
+                if r is not None:
+                    hit[str(r)] = r
+            for f in cands_anc:  # 本人のフォルダの親を指す（chmod -R ~/workspace など）
+                for rf, r in recs:
+                    if is_under(rf, f):
+                        hit[str(r)] = r
+            for w in p.words:
+                wn = nfc(w)
+                for nm, rs in names.items():
+                    if nm in wn:
+                        for r in rs:
+                            hit[str(r)] = r
+        refs.append(hit)
+    roots = {}
+    for hit in refs:
+        roots.update(hit)
+    out = []
+    for key, r in roots.items():
+        chosen, tainted = [], False
+        for (g, parts), hit in zip(groups, refs):
+            cd_only = all(p.cmd in ("cd", "pushd") for p in parts)
+            if key in hit or tainted or cd_only:
+                chosen.append(g)
+            if key in hit and not _read_only_group(g, parts):
+                tainted = True
+        out.append((r, "\n".join(chosen)))
+    return out
 
 
 def allow_patterns(root):
@@ -339,12 +808,15 @@ def plugin_bash_check(command, root):
     return None
 
 
-# プラグインの保護は、本人の許可する例外（ng_allow）でも外さない
-NO_EXCEPTION_LABELS = ("プラグインのコピーの書き換え", "共通部分（プラグインの元）の書き換え")
+# プラグイン・見張りの記録・本人のフォルダそのものの保護は、本人の許可する例外（ng_allow）でも外さない
+NO_EXCEPTION_LABELS = ("プラグインのコピーの書き換え", "共通部分（プラグインの元）の書き換え", "見張りの記録",
+                       "本人のフォルダそのものを動かす・消す")
+RECORDS_LABEL = "見張りの記録（~/.ai-bunshin/）の書き換え（本人のフォルダを覚えておく所。消すと見張りが外れる）"
 
 
-def check(payload, root):
-    """root が None（本人のフォルダの外）のときは、プラグインのコピーの保護だけ効かせ、ほかは止めない。"""
+def global_check(payload, root):
+    """どこからでも効かせる保護：プラグインのコピー、見張りの記録、本人のフォルダそのもの・印を動かす・消す操作。
+    (ラベル, 対象, ログを書く本人のフォルダ) を返す。"""
     tool = payload.get("tool_name", "")
     inp = payload.get("tool_input") or {}
     if tool == "Bash":
@@ -352,31 +824,56 @@ def check(payload, root):
         flat = normalize(command)
         plugin_label = plugin_bash_check(flat, root)
         if plugin_label:
-            return plugin_label, command
-        if root is None:
-            return None
-        if moves_owner_root(flat, payload, root):
-            return "本人の設定・タスクの正本の移動（本人のフォルダそのものを動かす）", command
+            return plugin_label, command, root
+        an = analyze(flat, base_cwd(payload, root))
+        if records_bash_hit(an):
+            return RECORDS_LABEL, command, root
+        hit = destructive_hit(an, root)
+        if hit:
+            label, r = hit
+            return label, command, (r if r is not None else root)
+    elif tool in ("Write", "Edit", "MultiEdit", "NotebookEdit"):
+        path = inp.get("file_path") or inp.get("notebook_path") or ""
+        if path:
+            if plugin_area(path) == "copy":
+                return "プラグインのコピーの書き換え（Claude Code が読み込む共通部分。元を直して更新する）", path, root
+            rec = path_forms(records_dir())
+            if any(is_under(f, r) for f in path_forms(path, base_cwd(payload, root)) for r in rec):
+                return RECORDS_LABEL, path, root
+    return None
+
+
+def rel_in_root(path, root, base):
+    """path が root の中なら、root からの相対パス（NFC）。リンクを解かない道と解いた道の両方で比べる。"""
+    rforms = path_forms(root)
+    for f in sorted(path_forms(path, base)):
+        for r in rforms:
+            if is_under(f, r) and f != r:
+                return f[len(r.rstrip(os.sep)) + 1:].replace(os.sep, "/")
+    return None
+
+
+def check(payload, root, command=None):
+    """本人のフォルダ root の規則で判定する。command を渡したら、Bash はその部分だけを見る（外のセッション）。"""
+    tool = payload.get("tool_name", "")
+    inp = payload.get("tool_input") or {}
+    if tool == "Bash":
+        full = inp.get("command", "")
+        flat = normalize(full if command is None else command)
         for label, pat in BASH_RULES:
             if re.search(pat, flat):
                 if (label in DEV_ALLOWED and not GLOBAL_INSTALL.search(flat) and not pip_outside_venv(flat)
                         and in_dev_area(flat, payload, root)):
                     continue
-                return label, command
+                return label, full
     elif tool in ("Write", "Edit", "MultiEdit", "NotebookEdit"):
         path = inp.get("file_path") or inp.get("notebook_path") or ""
-        area = plugin_area(path) if path else None
-        if area == "copy":
-            return "プラグインのコピーの書き換え（Claude Code が読み込む共通部分。元を直して更新する）", path
-        if root is None:
+        if not path:
             return None
-        if area == "source" and not is_maintainer(root):
+        if plugin_area(path) == "source" and not is_maintainer(root):
             return "共通部分（プラグインの元）の書き換え（メンテする人だけ。提案の下書きにする）", path
-        for q in (Path(os.path.abspath(path)), Path(path).resolve()):  # リンクを解かない道と解いた道の両方
-            try:
-                rel = q.relative_to(root).as_posix()
-            except ValueError:
-                continue
+        rel = rel_in_root(path, root, base_cwd(payload, root))
+        if rel is not None:
             for label, pat in PROTECTED_PATHS:
                 if re.search(pat, rel, re.I):
                     return label, rel
@@ -403,22 +900,27 @@ def run_guard():
     if not isinstance(payload, dict):
         raise ValueError("payload is not an object")
     root = project_dir(payload)
-    if root is not None:
-        hit = check(payload, root)
-    else:
-        hit = check(payload, None)  # プラグインのコピーの保護
-        if not hit:  # 外で始めたセッション：操作の中のパスが本人のフォルダを指すなら、その本人のフォルダを基準に判定
-            for r in roots_from_input(payload):
-                hit = check(payload, r)
-                if hit:
-                    root = r
-                    break
+    hit = global_check(payload, root)  # プラグイン・見張りの記録・本人のフォルダそのもの（どこからでも）
+    log_root = root
+    if hit:
+        label, target, log_root = hit
+    elif root is not None:
+        h = check(payload, root)
+        if h:
+            label, target = h
+            hit = True
+    else:  # 外で始めたセッション：操作が本人のフォルダを指すなら、その本人のフォルダを基準に、指している部分を判定
+        for r, part in roots_from_input(payload):
+            h = check(payload, r, part)
+            if h:
+                label, target = h
+                hit, log_root = True, r
+                break
     if not hit:
         return 0
-    label, target = hit
-    if root is not None and not label.startswith(NO_EXCEPTION_LABELS) and any(p.search(target) for p in allow_patterns(root)):
+    if log_root is not None and not label.startswith(NO_EXCEPTION_LABELS) and any(p.search(target) for p in allow_patterns(log_root)):
         return 0
-    deny(label, target, root, payload.get("tool_name"))
+    deny(label, target, log_root, payload.get("tool_name"))
     return 0
 
 
