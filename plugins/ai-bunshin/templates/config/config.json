@@ -1,0 +1,32 @@
+{
+  "owner": "{{名前}}",
+  "owner_call": "{{呼び方}}",
+  "ai_name": "{{AIの名前}}",
+  "departments": [
+    "{{部署1}}",
+    "{{部署2}}"
+  ],
+  "work_hours": {
+    "start": "09:00",
+    "end": "18:00"
+  },
+  "schedule": {
+    "plan": "09:00",
+    "review": "17:00"
+  },
+  "path": "{{setup が調べた PATH（claude と openpyxl 入りの python3 が見えるもの）}}",
+  "ng_allow": [],
+  "dev": {
+    "default_mode": "local",
+    "projects": []
+  },
+  "design": {
+    "systems": []
+  },
+  "team": {
+    "max": 7,
+    "off": [],
+    "joined": {}
+  },
+  "maintainer": false
+}
