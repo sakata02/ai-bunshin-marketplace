@@ -18,7 +18,7 @@ Bash は `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/update_dashboard.py" …` だ�
 1. `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/update_dashboard.py" --plan-context` を実行する（日付を指定するときは `--today YYYY-MM-DD` も付ける）
 2. 1行目が `SKIP: …` なら、何もせずに終わる
 3. `04_ナレッジ/判断基準.md`、改善ログの「実施中の Try」、前日の `daily/*_振り返り.md`（「明日の要件確認」を含む）を読む
-4. 前日に出した要件確認のお願い（kind 確認）に、本人の返事があるかを tasks.json と会話の記録で確かめる
+4. 前日に出した要件確認のお願い（kind 確認）に、本人の返事があるかを tasks.json の note と受け入れ条件で確かめる（朝の自動計画は会話を読めないため、tasks.json に書かれたものだけが伝わる）
 
 ## 1. 今日の容量を決める
 
