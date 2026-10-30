@@ -48,6 +48,14 @@ notify() {
   osascript -e "display notification \"$msg\" with title \"$AI_NAME\" subtitle \"$LABEL\""
 }
 
+# この実行の ID。ロックの3行目に書き、環境変数で claude にも渡す。
+# 中の Claude（daily-plan/do/review）は、ロックの ID が自分の AI_BUNSHIN_AUTO_RUN と一致すれば「自分のロック」とみなし、
+# 一致しなければ「ほかの実行が動いている」と判断して開かない（scripts/lock_check.py。T080）
+RUN_ID="$$.$(date +%s)"
+export AI_BUNSHIN_AUTO_RUN="$RUN_ID"
+# ロックの形：1行目 PID／2行目 段階の名前と開始時刻／3行目 実行の ID
+write_lock() { printf '%s\n%s\n%s\n' "$$" "${LABEL}（$(date '+%H:%M')開始）" "$RUN_ID" > "$LOCK"; }
+
 log "開始"
 # 共通ルールの写し（.claude/rules/ai-bunshin-common.md）を、Claude を起動する前に最新にする
 CLAUDE_PROJECT_DIR="$ROOT" python3 "$DASH" --session < /dev/null > /dev/null 2>> "$LOG"
@@ -68,19 +76,19 @@ WAITED=0
 while [ -f "$LOCK" ]; do
   OWNER_PID=$(head -1 "$LOCK")
   if ! kill -0 "$OWNER_PID" 2>/dev/null; then
-    log "古いロック（$(tail -1 "$LOCK")、PID $OWNER_PID は終了済み）を無視して続行"
+    log "古いロック（$(sed -n 2p "$LOCK")、PID $OWNER_PID は終了済み）を無視して続行"
     break
   fi
   if [ $WAITED -ge $MAX_WAIT ]; then
-    log "前の段階（$(tail -1 "$LOCK")）が${MAX_WAIT}分たっても終わらないため中止"
+    log "前の段階（$(sed -n 2p "$LOCK")）が${MAX_WAIT}分たっても終わらないため中止"
     notify "前の段階が終わらないため、${LABEL}を中止しました（ログ参照）"
     exit 1
   fi
-  [ $WAITED -eq 0 ] && log "前の段階（$(tail -1 "$LOCK")）の終了を待機"
+  [ $WAITED -eq 0 ] && log "前の段階（$(sed -n 2p "$LOCK")）の終了を待機"
   sleep 60
   WAITED=$((WAITED + 1))
 done
-printf '%s\n%s\n' "$$" "${LABEL}（$(date '+%H:%M')開始）" > "$LOCK"
+write_lock
 trap 'rm -f "$LOCK"' EXIT
 
 # 待っている間に状況が変わることがあるので、もう一度確かめる
@@ -122,7 +130,7 @@ case "$PHASE:$HEAD" in
 esac
 
 # 使える道具を絞る（送信・削除・設定やスクリプトの変更はできない）
-TOOLS="Read,Write,Edit,Glob,Grep,Agent,SendMessage,Skill,Bash(python3 *update_dashboard.py*),Bash(python3 $DASH:*),Bash(python3 \"$DASH\":*)"
+TOOLS="Read,Write,Edit,Glob,Grep,Agent,SendMessage,Skill,Bash(python3 *update_dashboard.py*),Bash(python3 *lock_check.py*),Bash(python3 $DASH:*),Bash(python3 \"$DASH\":*)"
 DENY="Bash(rm:*),Bash(curl:*),Edit(.claude/settings.json),Edit(scripts/**),Edit(/$PLUGIN_ROOT/**),Edit(設定/**),Edit(CLAUDE.md),Edit(.claude/**)"
 if [ "$PHASE" = "do" ]; then
   TOOLS="$TOOLS,WebSearch,WebFetch"   # 実行では調査のためにネットを読むことだけ許可
@@ -156,7 +164,7 @@ if [ "$PHASE" = "plan" ]; then
     exit 0
   fi
   PHASE="do"; LABEL="実行"
-  printf '%s\n%s\n' "$$" "${LABEL}（$(date '+%H:%M')開始）" > "$LOCK"
+  write_lock
   log "続けて実行を開始"
   notify "実行を始めました。その間、tasks.json の同時編集に注意してください"
   TOOLS="$TOOLS,WebSearch,WebFetch"

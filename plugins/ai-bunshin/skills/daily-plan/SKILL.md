@@ -11,9 +11,16 @@ description: 1日スプリントのプランニング（平日9時に自動。�
 
 引数：日付（YYYY-MM-DD、省略時は今日）。
 自動実行（`claude -p`）のときは本人がその場にいない。**質問せずに最後まで進める。**
-Bash は `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/update_dashboard.py" …` だけを使う。tasks.json は Read と Edit で直接直す（別のスクリプトは作らない）。
+Bash は `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/update_dashboard.py" …` だけを使う。tasks.json は Read と Edit で直接直す（別のスクリプトは作らない）。ロックの確認のときだけ `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/lock_check.py"` も使ってよい（読むだけ）。
 
 ## 0. 開くかどうか
+
+**先に、自動実行のロックを確かめる**（自動実行・会話のどちらでも。ほかの実行と重ならないための守り）：
+
+- `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/lock_check.py"` を実行する（読むだけ）。**ロックの判断はこの1行目だけで決める**。「⏳ 自動実行中」の表示や `.lock` の中身を自分で読んで、自動実行かどうかを決めない（自動実行の中の自分自身のロックも、その表示に出る）
+- 1行目が `OPEN: …`（ロックなし／古いロック／自分の実行のロック）なら、そのまま下の手順に進む
+- 1行目が `SKIP: …`（ほかの実行が動いている）なら、部下は動かさず・何も書かずに終わり、本人には「◯◯の自動実行が動いているので、重ならないよう開かなかった。終わってから声をかけてほしい」と1〜2行で伝える
+- 自動実行の中では、`daily_cycle.sh` が渡した環境変数 `AI_BUNSHIN_AUTO_RUN` とロックの ID が一致するので、自分のロックでは必ず `OPEN` になる。`SKIP` が出るのは、会話から開いたとき、または別の自動実行が動いているときだけ
 
 1. `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/update_dashboard.py" --plan-context` を実行する（日付を指定するときは `--today YYYY-MM-DD` も付ける）
 2. 1行目が `SKIP: …` なら、何もせずに終わる
