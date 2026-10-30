@@ -340,6 +340,117 @@ def cli_all_estimated_has_no_waiting_message():
     assert "全体完了予定 11/2(月)" in r.stdout.splitlines()[0], r.stdout.splitlines()[0]
 
 
+# ---------- 追加（部下D の確かめへの直し） ----------
+
+def line_of(out, tid):
+    return next(l for l in out.splitlines() if f" {tid} " in l)
+
+
+@case
+def cli_session_summary_has_no_id_lines_but_plain_and_board_do():
+    write_tasks([T("T001", 1, 1, department="総務"), T("T002", 2, None, department="総務"),
+                 T("T003", 3, 1, deps=["T004"], department="総務"), T("T004", 4, 1, deps=["T003"], department="総務")])
+    r = run_cli("--today", "2026-11-02", "--session")
+    assert r.returncode == 0, r.stderr[:300]
+    ctx = json.loads(r.stdout)["hookSpecificOutput"]["additionalContext"]
+    assert "⚠ 見積もり待ち" not in ctx and "⚠ 依存の輪" not in ctx, "起動時のまとめに ID 付きの ⚠ 行が出ている"
+    assert "見積もり待ちが1件あります" in ctx.splitlines()[0] and "依存の輪が2件あります" in ctx.splitlines()[0], "先頭の行に件数が無い"
+    plain = run_cli("--today", "2026-11-02").stdout
+    assert "⚠ 見積もり待ち 1件：T002" in plain, "引数なしの状態表示に ID 付きの行が無い"
+    assert "⚠ 依存の輪" in plain, "引数なしの状態表示に依存の輪の行が無い"
+    board = open(os.path.join(HOME_DIR, "00_タスク管理", "タスクボード.md"), encoding="utf-8").read()
+    assert "⚠ 見積もり待ち 1件：T002" in board and "⚠ 依存の輪" in board, "タスクボードに ID 付きの行が無い"
+
+
+@case
+def hook_summary_has_no_id_lines():
+    write_tasks([T("T001", 1, 1, department="総務"), T("T002", 2, None, department="総務")])
+    payload = json.dumps({"tool_input": {"file_path": os.path.join(HOME_DIR, "00_タスク管理", "data", "tasks.json")}})
+    env = dict(os.environ, AI_BUNSHIN_HOME=HOME_DIR, HOME=FAKE_HOME)
+    r = subprocess.run([sys.executable, SCRIPT, "--hook", "--today", "2026-11-02"], input=payload, capture_output=True, text=True,
+                       cwd=HOME_DIR, env=env)
+    assert r.returncode == 0, r.stderr[:300]
+    ctx = json.loads(r.stdout)["hookSpecificOutput"]["additionalContext"]
+    assert "⚠ 見積もり待ち" not in ctx and "見積もり待ちが1件あります" in ctx, "hook の出力：ID 付きの行は出さず、件数だけ"
+
+
+@case
+def planned_today_but_no_estimate_is_waiting():
+    by, end = run_fc([T("A", 1, None), T("B", 2, 1, deps=["A"]), T("C", 3, 1)], today=D(6), planned={"A", "C"})
+    assert by["A"]["_forecast"] is None and "見積もり待ち" in by["A"]["_flag"], f"今日の計画にある見積もり無しの A: {by['A']['_flag']} {by['A']['_forecast']}"
+    assert by["B"]["_forecast"] is None and "見積もり待ち" in by["B"]["_flag"], "A に依存する B"
+    eq(by["C"]["_forecast"], D(6), "計画にあって見積もりのある C は今日")
+    eq(end, D(6), "全体")
+
+
+@case
+def depends_on_null_and_wrong_types_do_not_crash():
+    by, end = run_fc([T("TA", 1, 1, depends_on=None), T("TB", 2, 1, depends_on="TA"), T("TC", 3, 1, depends_on=5),
+                      T("TD", 4, 1, depends_on={"x": 1}), T("TE", 5, 1)])
+    eq(by["TA"]["_forecast"], D(2), "null は前提なし")
+    for i in ("TB", "TC", "TD"):
+        assert by[i]["_forecast"] is None and "見積もり待ち" in by[i]["_flag"], f"{i}: 書き方が違うタスクは見積もり待ち {by[i]['_flag']}"
+    eq(by["TE"]["_forecast"], D(3), "ほかのタスクは普通に積む")
+    lines = "\n".join(u.unscheduled_lines([by[i] for i in ("TA", "TB", "TC", "TD", "TE")]))
+    for i in ("TB", "TC", "TD"):
+        assert i in lines, f"{i} の警告が出ていない: {lines}"
+    assert "TA" not in lines and "TE" not in lines, f"問題の無いタスクが警告に出ている: {lines}"
+
+
+@case
+def points_text_empty_and_list_are_handled():
+    by, end = run_fc([T("TA", 1, "abc"), T("TB", 2, ""), T("TC", 3, "3"), T("TD", 4, [1]), T("TE", 5, 1)], velocity=1.0)
+    for i in ("TA", "TB", "TD"):
+        assert by[i]["_forecast"] is None and "見積もり待ち" in by[i]["_flag"], f"{i}: {by[i]['_flag']}"
+    eq(by["TC"]["_forecast"], D(4), "数字の文字 '3' は 3pt")
+    eq(by["TE"]["_forecast"], D(5), "TE は TC の後")
+    lines = "\n".join(u.unscheduled_lines([by[i] for i in ("TA", "TB", "TC", "TD", "TE")]))
+    assert "TA" in lines and "TD" in lines, f"数でない points の警告が出ていない: {lines}"
+    assert "TC" not in lines and "TE" not in lines, f"問題の無いタスクが警告に出ている: {lines}"
+
+
+@case
+def cli_points_text_does_not_crash():
+    write_tasks([T("T001", 1, "abc", department="総務"), T("T002", 2, "", department="総務"), T("T003", 3, 1, department="総務")])
+    r = run_cli("--today", "2026-11-02")
+    assert r.returncode == 0, f"points が文字で終了コード {r.returncode}: {r.stderr[:400]}"
+    assert "T001" in r.stdout and "見積もり待ち" in line_of(r.stdout, "T001") and "見積もり待ち" in line_of(r.stdout, "T002")
+    assert "全体完了予定 11/2(月)（見積もり待ちが2件あります）" in r.stdout.splitlines()[0], r.stdout.splitlines()[0]
+
+
+@case
+def long_chain_does_not_hit_recursion_limit():
+    n = 1100
+    tasks = [T(f"T{i:04d}", i, 1, deps=[f"T{i + 1:04d}"] if i < n else []) for i in range(1, n + 1)]
+    by, end = run_fc(tasks, velocity=1000.0)
+    assert by["T1100"]["_forecast"] < by["T0001"]["_forecast"], "1100段の鎖：いちばん奥の前提が先に終わる予定になっていない"
+    assert all(by[f"T{i:04d}"]["_forecast"] is not None for i in range(1, n + 1)), "鎖の途中に予定が出ないものがある"
+
+
+@case
+def prerequisite_is_lifted_to_the_priority_of_its_dependent():
+    # H（優先1）は L（優先3）に依存。X（優先2）は無関係。L は H と同じ優先度まで繰り上がるので、L → H → X の順
+    by, _ = run_fc([T("H", 1, 1, deps=["L"]), T("X", 2, 1), T("L", 3, 1)])
+    eq([by[i]["_forecast"] for i in "LHX"], [D(2), D(3), D(4)], "L→H→X")
+
+
+@case
+def wording_no_duplicate_no_english_and_loop_shows_path():
+    write_tasks([T("T001", 1, None, department="総務"), T("T002", 2, 1, deps=["T003"], department="総務"),
+                 T("T003", 3, 1, deps=["T002"], department="総務"), T("T004", 4, 1, deps=["T002"], department="総務")])
+    out = run_cli("--today", "2026-11-02").stdout
+    l1 = line_of(out, "T001")
+    assert l1.count("見積もり待ち") == 1, f"一覧で「見積もり待ち」が重なっている: {l1}"
+    l2 = line_of(out, "T002")
+    assert l2.count("依存の輪") == 1, f"一覧で「依存の輪」が重なっている: {l2}"
+    assert "前提のタスクが輪になっています（T002→T003→T002）。前提を見直してください" in out, f"輪の中身の行が違う: {out}"
+    for bad in ("points", "depends_on"):
+        assert bad not in "\n".join(l for l in out.splitlines() if l.startswith("[⚠ 見積もり") or l.startswith("[⚠ 前提")
+                                    or l.startswith("[⚠ 依存") or "輪" in l), f"括弧の英語 {bad} が文言に残っている"
+    board = open(os.path.join(HOME_DIR, "00_タスク管理", "タスクボード.md"), encoding="utf-8").read()
+    assert "T002→T003→T002" in board, "タスクボードに輪の中身が無い"
+    assert board.count("| ⏳ 見積もり待ち |") == 1 and "| 見積もり待ち | ⏳" not in board, "ボードの表で「見積もり待ち」が重なっている"
+
 run_all()
 print(f"失敗 {fails} 件（{len(names)} 項目）")
 sys.exit(1 if fails else 0)
