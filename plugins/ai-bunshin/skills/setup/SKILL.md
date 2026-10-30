@@ -5,7 +5,7 @@ description: AI 分身の初回セットアップ。新しく使い始める人�
 
 # 初回セットアップ
 
-> 部下の呼び出しは `subagent_type: ai-bunshin:buka-a`／`ai-bunshin:buka-b`。スクリプトは `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/update_dashboard.py"`。雛形は `${CLAUDE_PLUGIN_ROOT}/templates/`。
+> 部下の呼び出しは `subagent_type: ai-bunshin:<名前>`。資料は `buka-a`（作成）→ `buka-b`（検証）、開発は `dev-a`（部下C・実装）→ `dev-b`（部下D・検証）、分析は `analyst`（部下F）→ `buka-b`、研修は `trainer`（部下G）→ `buka-b`、デザインが入るタスク（`design: true`）は作る人の前に `design`（部下E）。本人設定の `team.off` の部下は使わない。スクリプトは `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/update_dashboard.py"`。雛形は `${CLAUDE_PLUGIN_ROOT}/templates/`。
 
 相手は初めて使う人。**専門用語を避け、1回に2〜3問ずつ、選択肢を付けて聞く**（AskUserQuestion を使う）。答えにくい質問は「あとで」でよいと伝える。すでに `設定/config.json` がある場合は、上書きせずに「作り直しますか？」と確認する。
 

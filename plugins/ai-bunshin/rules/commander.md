@@ -221,7 +221,7 @@ AI では実行できない作業を見つけたら、**必ず assignee を本�
 
 本人設定の時刻（既定は平日 9:00 と 17:00）に、launchd が本人のフォルダの `scripts/auto/run.sh` を実行し、プラグインの `scripts/auto/daily_cycle.sh` を呼ぶ。
 
-- **朝 `/ai-bunshin:daily-plan`**（容量＝直近3日のベロシティ、見積もり、今日のタスク選定、指示書）→ **続けて `/ai-bunshin:daily-do`**（部下A 作成 → 部下B 検証。量で区切る）
+- **朝 `/ai-bunshin:daily-plan`**（容量＝直近3日のベロシティ、見積もり、今日のタスク選定、指示書）→ **続けて `/ai-bunshin:daily-do`**（作る人 → 確かめる人。量で区切る）
 - **夕方 `/ai-bunshin:daily-review`**（Try の検証、タスクごとの KPT、行っている内容の KPT、ベロシティ、明日の Try 2〜3個、明日の要件確認）
 - 記録は `01_スプリント/<スプリント>/daily/`
 - 週のスプリント（S###）は「1週間のゴール」。その中で毎日のスプリントを回す
