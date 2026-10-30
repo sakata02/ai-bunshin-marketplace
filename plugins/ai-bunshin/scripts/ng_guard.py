@@ -4,12 +4,17 @@
 止めたら理由を Claude に返し（permissionDecision: deny）、00_タスク管理/data/ng_log.jsonl に記録する。
 本人が許可した例外は 設定/config.json の "ng_allow"（正規表現のリスト。コマンドやパスに一致したら通す）に書く。
 
-動くのは本人のフォルダ（設定/config.json と 00_タスク管理/data/tasks.json がある。今いる場所から上にたどって探す）の中だけ。
-ほかのプロジェクトでは何も止めない。ただしプラグインのコピー（~/.claude/plugins/ の下）への書き込みだけは、どこでも止める。
+動くのは本人のフォルダの中だけ。印（設定/config.json・00_タスク管理/data/tasks.json・.claude/rules/ai-bunshin-common.md）の
+どれか1つがあれば本人のフォルダ。今いる場所から上にたどって探す（リンクを解いた道と解かない道の両方）。
+ほかのプロジェクトでは何も止めない。ただし、
+- プラグインのコピー（~/.claude/plugins/ の下）への書き込みは、どこでも止める
+- 外で始めたセッションでも、Write・Edit のパスや Bash の中のパス（絶対パス・~/・$HOME/）が本人のフォルダの中を指すなら、その本人のフォルダを基準に判定する
+- 見張りの入力を読めなかったときは、本人のフォルダの中なら止める、外なら通す
 """
 import json
 import os
 import re
+import shlex
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -27,6 +32,10 @@ E = r"(?=$|[\s;&|)`'\"])"
 def cmd(words):
     return B + r"(?:" + words + r")" + E
 
+
+# 本人のフォルダの印・その入れ物（動かすと見張りが外れる）
+PROTECTED_NAMES = (r"(?:設定(?:/config\.json)?|00_タスク管理(?:/data(?:/tasks\.json)?)?|"
+                   r"\.claude(?:/rules(?:/ai-bunshin-common\.md)?)?)/?")
 
 BASH_RULES = [
     ("削除", cmd(r"rm|rmdir|unlink|shred|trash|srm|truncate")),
@@ -51,6 +60,12 @@ BASH_RULES = [
     ("スクリプト経由の削除", r"\bperl\b[^\n]*\s-\w*e\b[^\n]*\b(?:unlink|rmdir|system)\b"),
     ("スクリプト経由の削除", r"\bruby\b[^\n]*\s-\w*e\b[^\n]*(?:File\.delete|FileUtils\.rm|system)"),
     ("スクリプト経由の削除", r"\bnode\b[^\n]*\s-\w*e\b[^\n]*(?:rmSync|unlinkSync|rmdirSync|\.rm\(|\.unlink\(|child_process)"),
+    # 印（設定・タスクの正本）を動かすと見張りが外れるので、移す・名前を変える操作を止める
+    ("本人の設定・タスクの正本の移動",
+     B + r"(?:git\s+mv|mv|rename)(?=\s)[^\n;&|]*[\s\"'/=]" + PROTECTED_NAMES + r"(?=$|[\s\"';&|)])"),
+    ("本人の設定・タスクの正本の移動",
+     r"\bpython3?\b(?=[\s\S]*(?:os\.(?:rename|renames|replace)\b|shutil\.move\b|\.rename\(|\.replace\(\s*[\"'\w/.~$]+[\"']?\s*\)))"
+     r"(?=[\s\S]*(?:設定|00_タスク管理|config\.json|tasks\.json|ai-bunshin-common))"),
     ("空にする・上書き", r"\bdd\b[^\n]*\bof="),
     ("空にする・上書き", r"\b(?:cp|cat)\s+/dev/null\b"),
     ("空にする・上書き", r"\bln\s+-\w*f\w*\s+/dev/null\b"),
@@ -60,7 +75,7 @@ BASH_RULES = [
     ("保護されたファイルの書き換え",
      r"\b(?:sed|perl)\b[^\n]*\s-i\b[^\n]*\s[\"']?(?:\./)?(?:\.claude/|CLAUDE\.md(?=$|[\s\"'])|設定/|03_インプット/)"),
     ("元データの移動・上書き", r"\b(?:mv|cp|tee)\b[^\n]*\s[\"']?(?:\./)?03_インプット/"),
-    ("保護されたファイルの上書き", r">>?\s*[\"']?(?:\./)?(?:03_インプット/|\.claude/settings[^\s]*\.json)"),
+    ("保護されたファイルの上書き", r">>?\s*[\"']?(?:\S*/)?(?:03_インプット/|\.claude/settings[^\s]*\.json)"),
 ]
 
 
@@ -79,28 +94,125 @@ PROTECTED_PATHS = [
 ]
 
 
+OWNER_MARKS = (("設定", "config.json"), ("00_タスク管理", "data", "tasks.json"), (".claude", "rules", "ai-bunshin-common.md"))
+
+
 def is_owner_dir(d):
-    """本人のフォルダか：設定/config.json と 00_タスク管理/data/tasks.json の両方がある。"""
+    """本人のフォルダか：印（設定/config.json・00_タスク管理/data/tasks.json・.claude/rules/ai-bunshin-common.md）の
+    どれか1つがある。「両方」を条件にすると、片方を動かすだけで見張りが外れるので、1つでよい。"""
     try:
-        return (d / "設定" / "config.json").is_file() and (d / "00_タスク管理" / "data" / "tasks.json").is_file()
-    except OSError:
+        return any(d.joinpath(*m).is_file() for m in OWNER_MARKS)
+    except (OSError, ValueError):
         return False
+
+
+def find_owner(path):
+    """path（ファイルでもよい）から上にたどって本人のフォルダを探す。リンクを解かない道（abspath）と解いた道（resolve）の
+    両方を見て、どちらかで見つかれば返す（解いたフォルダ）。"""
+    try:
+        text = os.path.expanduser(os.fspath(path))
+        cands = [Path(os.path.abspath(text))]
+    except (OSError, ValueError, TypeError):
+        return None
+    try:
+        cands.append(Path(text).resolve())
+    except (OSError, ValueError, RuntimeError):
+        pass
+    for q in cands:
+        for d in (q, *q.parents):
+            if is_owner_dir(d):
+                try:
+                    return d.resolve()
+                except (OSError, RuntimeError):
+                    return d
+    return None
 
 
 def project_dir(payload):
     """本人のフォルダを返す。今いる場所（CLAUDE_PROJECT_DIR・payload の cwd・os.getcwd）から上にたどって探す
     （05_開発/ などの下で動いていても本人のフォルダ）。見つからなければ None（＝ほかのプロジェクト。見張りは通す）。"""
-    for c in (os.environ.get("CLAUDE_PROJECT_DIR"), payload.get("cwd"), os.getcwd()):
-        if not c:
+    cwd = payload.get("cwd") if isinstance(payload, dict) else None
+    try:
+        here = os.getcwd()
+    except OSError:
+        here = None
+    for c in (os.environ.get("CLAUDE_PROJECT_DIR"), cwd, here):
+        if not c or not isinstance(c, str):
             continue
-        try:
-            p = Path(c).resolve()
-        except (OSError, ValueError):
-            continue
-        for d in (p, *p.parents):
-            if is_owner_dir(d):
-                return d
+        r = find_owner(c)
+        if r is not None:
+            return r
     return None
+
+
+PATH_WORD = re.compile(r"(?:^|[\s\"'=:(<>])((?:~|\$HOME|\$\{HOME\}|/)[^\s\"';&|()<>`]*)")
+
+
+def roots_from_input(payload):
+    """起動場所が本人のフォルダの外のとき、操作の中のパス（Write・Edit のパス、Bash の絶対パス・~/・$HOME/）から
+    上にたどって見つかる本人のフォルダ（重複なし）。"""
+    tool = payload.get("tool_name", "")
+    inp = payload.get("tool_input")
+    if not isinstance(inp, dict):
+        return []
+    paths = []
+    if tool in ("Write", "Edit", "MultiEdit", "NotebookEdit"):
+        p = inp.get("file_path") or inp.get("notebook_path")
+        if isinstance(p, str) and p:
+            if not os.path.isabs(os.path.expanduser(p)):
+                base = payload.get("cwd") if isinstance(payload.get("cwd"), str) else os.getcwd()
+                p = os.path.join(base, p)
+            paths.append(p)
+    elif tool == "Bash" and isinstance(inp.get("command"), str):
+        home = os.path.expanduser("~")
+        for m in PATH_WORD.finditer(normalize(inp["command"])):
+            t = m.group(1).replace("${HOME}", home).replace("$HOME", home)
+            if t.startswith("~") and not t.startswith("~/") and t != "~":
+                continue
+            paths.append(t)
+    roots = []
+    for p in paths[:60]:
+        r = find_owner(p)
+        if r is not None and r not in roots:
+            roots.append(r)
+    return roots
+
+
+def moves_owner_root(flat, payload, root):
+    """mv・git mv・rename で、本人のフォルダそのもの（や、その親）を動かす操作か（最後の語は行き先なので見ない）。"""
+    base = payload.get("cwd") if isinstance(payload.get("cwd"), str) and payload.get("cwd") else str(root)
+    for seg in re.split(r"[;&|\n]+", flat):
+        try:
+            words = shlex.split(seg)
+        except ValueError:
+            words = seg.split()
+        for i, w in enumerate(words):
+            if os.path.basename(w) not in ("mv", "rename"):
+                continue
+            args = words[i + 1:]
+            has_t = any(a in ("-t", "--target-directory") or a.startswith("--target-directory=") for a in args)
+            srcs, skip = [], False
+            for a in args:
+                if skip:
+                    skip = False
+                    continue
+                if a in ("-t", "--target-directory"):
+                    skip = True
+                    continue
+                if a.startswith("-"):
+                    continue
+                srcs.append(a)
+            if not has_t:
+                srcs = srcs[:-1]
+            for a in srcs:
+                t = os.path.join(base, os.path.expanduser(a))
+                try:
+                    qs = (Path(os.path.abspath(t)), Path(t).resolve())
+                except (OSError, ValueError, RuntimeError):
+                    continue
+                if any(q == root or q in root.parents for q in qs):
+                    return True
+    return False
 
 
 def allow_patterns(root):
@@ -243,6 +355,8 @@ def check(payload, root):
             return plugin_label, command
         if root is None:
             return None
+        if moves_owner_root(flat, payload, root):
+            return "本人の設定・タスクの正本の移動（本人のフォルダそのものを動かす）", command
         for label, pat in BASH_RULES:
             if re.search(pat, flat):
                 if (label in DEV_ALLOWED and not GLOBAL_INSTALL.search(flat) and not pip_outside_venv(flat)
@@ -258,38 +372,68 @@ def check(payload, root):
             return None
         if area == "source" and not is_maintainer(root):
             return "共通部分（プラグインの元）の書き換え（メンテする人だけ。提案の下書きにする）", path
-        try:
-            rel = Path(path).resolve().relative_to(root).as_posix()
-        except ValueError:
-            return None
-        for label, pat in PROTECTED_PATHS:
-            if re.search(pat, rel, re.I):
-                return label, rel
+        for q in (Path(os.path.abspath(path)), Path(path).resolve()):  # リンクを解かない道と解いた道の両方
+            try:
+                rel = q.relative_to(root).as_posix()
+            except ValueError:
+                continue
+            for label, pat in PROTECTED_PATHS:
+                if re.search(pat, rel, re.I):
+                    return label, rel
     return None
 
 
-def main():
+def deny(label, target, root, tool=None):
+    reason = (f"NG（{label}）：この操作は AI 分身では行いません。必要なら止めて、本人へのお願い（手順付き。"
+              f"コマンドは `! …` の形で示す）にしてください。対象：{target[:200]}")
+    log = root / "00_タスク管理" / "data" / "ng_log.jsonl" if root is not None else None
     try:
-        payload = json.load(sys.stdin)
-    except json.JSONDecodeError:
-        return 0
+        if log is not None and log.parent.exists():
+            with log.open("a", encoding="utf-8") as f:
+                f.write(json.dumps({"at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "tool": tool,
+                                    "label": label, "target": target[:500]}, ensure_ascii=False) + "\n")
+    except OSError:
+        pass
+    print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
+                                             "permissionDecisionReason": reason}}, ensure_ascii=False))
+
+
+def run_guard():
+    payload = json.load(sys.stdin)
+    if not isinstance(payload, dict):
+        raise ValueError("payload is not an object")
     root = project_dir(payload)
-    hit = check(payload, root)
+    if root is not None:
+        hit = check(payload, root)
+    else:
+        hit = check(payload, None)  # プラグインのコピーの保護
+        if not hit:  # 外で始めたセッション：操作の中のパスが本人のフォルダを指すなら、その本人のフォルダを基準に判定
+            for r in roots_from_input(payload):
+                hit = check(payload, r)
+                if hit:
+                    root = r
+                    break
     if not hit:
         return 0
     label, target = hit
     if root is not None and not label.startswith(NO_EXCEPTION_LABELS) and any(p.search(target) for p in allow_patterns(root)):
         return 0
-    reason = (f"NG（{label}）：この操作は AI 分身では行いません。必要なら止めて、本人へのお願い（手順付き。"
-              f"コマンドは `! …` の形で示す）にしてください。対象：{target[:200]}")
-    log = root / "00_タスク管理" / "data" / "ng_log.jsonl" if root is not None else None
-    if log is not None and log.parent.exists():
-        with log.open("a", encoding="utf-8") as f:
-            f.write(json.dumps({"at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "tool": payload.get("tool_name"),
-                                "label": label, "target": target[:500]}, ensure_ascii=False) + "\n")
-    print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
-                                             "permissionDecisionReason": reason}}, ensure_ascii=False))
+    deny(label, target, root, payload.get("tool_name"))
     return 0
+
+
+def main():
+    try:
+        return run_guard()
+    except Exception:
+        # 入力が壊れていて読めなかった：本人のフォルダの中（起動場所から上にたどって見つかる）なら止める、外なら通す
+        try:
+            root = project_dir({})
+        except Exception:
+            root = None
+        if root is not None:
+            deny("見張りの入力を読めませんでした", "（入力不明）", root)
+        return 0
 
 
 if __name__ == "__main__":

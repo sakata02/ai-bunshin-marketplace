@@ -3,7 +3,7 @@
 import json,subprocess,sys,os,tempfile
 G=os.path.join(os.path.dirname(os.path.abspath(__file__)),"..","scripts","ng_guard.py")
 R=tempfile.mkdtemp(prefix="ngtest_")
-# R は「本人のフォルダ」：設定/config.json と 00_タスク管理/data/tasks.json の両方がある（見張りはここでだけ動く）
+# R は「本人のフォルダ」：印（設定/config.json・00_タスク管理/data/tasks.json のどれか）がある（見張りはここでだけ動く）
 os.makedirs(os.path.join(R,"設定")); os.makedirs(os.path.join(R,"00_タスク管理","data"))
 open(os.path.join(R,"設定","config.json"),"w").write("{}"); open(os.path.join(R,"00_タスク管理","data","tasks.json"),"w").write("{}")
 def run(tool,inp):
@@ -100,10 +100,18 @@ def run_at(tool,inp,base,env_dir=True,payload_cwd=True):
     p=subprocess.run(["python3",G],input=json.dumps(pl),capture_output=True,text=True,cwd=base,env=env)
     return "STOP" if "deny" in p.stdout else "pass"
 OUT=tempfile.mkdtemp(prefix="ngout_")  # 設定なし＝ほかのプロジェクト
-HALF=tempfile.mkdtemp(prefix="nghalf_"); os.makedirs(os.path.join(HALF,"設定")); open(os.path.join(HALF,"設定","config.json"),"w").write("{}")  # config だけ（tasks.json なし）
+def mk_owner(marks):
+    d=tempfile.mkdtemp(prefix="ngmark_")
+    for m in marks:
+        os.makedirs(os.path.dirname(os.path.join(d,m)),exist_ok=True); open(os.path.join(d,m),"w").write("{}")
+    return d
+M_CFG="設定/config.json"; M_TASK="00_タスク管理/data/tasks.json"; M_RULE=".claude/rules/ai-bunshin-common.md"
 for c in ["rm x","git push","npm install x","curl https://example.com","sudo ls","git clean -fd","pip install x","ssh h","gh pr create","> 03_インプット/x","git reset --hard"]:
-    for base in (OUT,HALF):
-        if run_at("Bash",{"command":c},base)!="pass": fail+=1; print("OUTSIDE FALSEPOS",repr(c),base)
+    if run_at("Bash",{"command":c},OUT)!="pass": fail+=1; print("OUTSIDE FALSEPOS",repr(c),OUT)
+    # 印がどれか1つでもあれば本人のフォルダ（片方を動かして見張りを外す抜け道を塞ぐ）。config だけ・tasks.json だけ・共通ルールの写しだけ
+    for marks in ([M_CFG],[M_TASK],[M_RULE]):
+        d=mk_owner(marks)
+        if run_at("Bash",{"command":c},d)!="STOP": fail+=1; print("HALF MISS",repr(c),marks)
 for t,p in [("Write",OUT+"/03_インプット/x.csv"),("Write",OUT+"/.claude/settings.json"),("Edit",os.path.join(SRC,"plugins","x","rules","r.md"))]:
     if run_at(t,{"file_path":p},OUT)!="pass": fail+=1; print("OUTSIDE PATH FALSEPOS",t,p)
 # 本人のフォルダの外でも、プラグインのコピー（~/.claude/plugins/）への書き込みは止める（読むだけは通す）
@@ -124,4 +132,56 @@ for base,kw in [(R,{}),(SUB,{}),(SUB,{"env_dir":False}),(R,{"env_dir":False,"pay
 if run_at("Write",{"file_path":os.path.join(SUB,"..","..","03_インプット","a")},SUB)!="STOP": fail+=1; print("INSIDE PATH (sub, ..)")
 if run_at("Bash",{"command":"cd 05_開発/x && npm install"},R)!="pass": fail+=1; print("INSIDE DEV FALSEPOS (npm install in 05_開発/x)")
 if run_at("Bash",{"command":"npm install"},SUB)!="pass": fail+=1; print("INSIDE DEV FALSEPOS (cwd=05_開発/x)")
+# 印・設定・タスクの正本を動かす・名前を変える操作は止める（動かすと見張りが外れるため）
+print("## 印の移動")
+for c in ["mv 設定 設定_old","mv 設定/config.json 設定/c.json","git mv 設定/config.json 設定/c.json","mv 00_タスク管理/data/tasks.json 00_タスク管理/data/tasks.bak",
+          "mv 00_タスク管理 x","mv 00_タスク管理/data x","mv x 設定/config.json","mv ./設定 /tmp/x","mv \"設定\" /tmp/x","cd 05_開発 && mv ../設定 x",
+          "mv .claude/rules/ai-bunshin-common.md x","rename s/a/b/ 設定/config.json",
+          "python3 -c \"import os;os.rename('設定','x')\"","python3 -c \"import shutil;shutil.move('00_タスク管理/data/tasks.json','x')\"",
+          "python3 -c \"from pathlib import Path;Path('設定').rename('x')\"","python3 -c \"import os;os.replace('設定/config.json','x')\"",
+          "mv . /tmp/moved","mv "+R+" /tmp/moved","mv "+os.path.dirname(R)+" /tmp/moved2","mv -t /tmp "+R]:
+    if run_at("Bash",{"command":c},R)!="STOP": fail+=1; print("MOVE MISS",repr(c))
+for c in ["mv 02_成果物/a 02_成果物/b","mv 02_成果物/a.md .","mv 02_成果物/a.md ..","ls 設定","cat 設定/config.json","cp 設定/config.json 02_成果物/config.bak","mv 02_成果物/設定_old.md 02_成果物/x.md",
+          "python3 -c \"print('設定'.replace('a','b'))\"","python3 -c \"print(open('設定/config.json').read())\"","git mv 02_成果物/a 02_成果物/b","mv 05_開発/x 05_開発/y"]:
+    if run_at("Bash",{"command":c},R)!="pass": fail+=1; print("MOVE FALSEPOS",repr(c))
+# リンクを解かない道でも本人のフォルダを見つける（本人のフォルダの下のリンクが外を指していても止める）
+print("## リンク")
+LNKTARGET=tempfile.mkdtemp(prefix="nglink_"); LNK=os.path.join(R,"05_開発","ext")
+if not os.path.lexists(LNK): os.symlink(LNKTARGET,LNK)
+for c in ["git push","rm x","curl https://example.com"]:
+    for kw in ({},{"env_dir":False}):
+        if run_at("Bash",{"command":c},LNK,**kw)!="STOP": fail+=1; print("SYMLINK MISS",repr(c),kw)
+# 外で始めたセッションでも、操作の中のパスが本人のフォルダを指すなら、その本人のフォルダを基準に判定する
+print("## 外からのパス")
+HOMED=tempfile.mkdtemp(prefix="nghome_"); OWN=os.path.join(HOMED,"own"); os.makedirs(os.path.join(HOMED,"sub"))
+for m in (M_CFG,M_TASK): os.makedirs(os.path.dirname(os.path.join(OWN,m)),exist_ok=True); open(os.path.join(OWN,m),"w").write("{}")
+def run_home(tool,inp,base):
+    env={k:v for k,v in os.environ.items() if k!="CLAUDE_PROJECT_DIR"}; env["HOME"]=HOMED
+    p=subprocess.run(["python3",G],input=json.dumps({"tool_name":tool,"tool_input":inp,"cwd":base}),capture_output=True,text=True,cwd=base,env=env)
+    return "STOP" if "deny" in p.stdout else "pass"
+for tool,inp,want in [
+    ("Bash",{"command":"cd /tmp && rm -rf "+OWN+"/03_インプット"},"STOP"),("Bash",{"command":"cd "+HOMED+" && rm -rf "+OWN+"/03_インプット"},"STOP"),
+    ("Bash",{"command":"rm -rf ~/own/03_インプット"},"STOP"),("Bash",{"command":"rm -rf $HOME/own/03_インプット"},"STOP"),
+    ("Bash",{"command":"rm -rf \"$HOME/own/03_インプット\""},"STOP"),("Bash",{"command":"rm -rf ${HOME}/own"},"STOP"),
+    ("Bash",{"command":"git -C ~/own push"},"STOP"),("Bash",{"command":"echo x > "+OWN+"/03_インプット/a"},"STOP"),
+    ("Bash",{"command":"mv "+OWN+"/設定 /tmp/x"},"STOP"),("Bash",{"command":"mv ~/own/00_タスク管理/data/tasks.json /tmp/x"},"STOP"),
+    ("Write",{"file_path":OWN+"/03_インプット/a.csv"},"STOP"),("Write",{"file_path":OWN+"/.claude/settings.json"},"STOP"),
+    ("Edit",{"file_path":OWN+"/.claude/hooks/x.sh"},"STOP"),("MultiEdit",{"file_path":OWN+"/03_インプット/a"},"STOP"),
+    ("NotebookEdit",{"notebook_path":OWN+"/03_インプット/a.ipynb"},"STOP"),
+    ("Write",{"file_path":"../own/03_インプット/a"},"STOP"),
+    ("Bash",{"command":"rm -rf build"},"pass"),("Bash",{"command":"git push"},"pass"),("Bash",{"command":"curl https://example.com"},"pass"),
+    ("Bash",{"command":"rm -rf /tmp/build ~/other/x"},"pass"),("Bash",{"command":"cat ~/own/設定/config.json"},"pass"),
+    ("Bash",{"command":"ls ~/own/03_インプット"},"pass"),("Bash",{"command":"echo x > ~/own/02_成果物/a.md"},"pass"),
+    ("Write",{"file_path":OWN+"/02_成果物/a.md"},"pass"),("Write",{"file_path":"/tmp/x.md"},"pass"),("Write",{"file_path":HOMED+"/other/03_インプット/a"},"pass")]:
+    if run_home(tool,inp,os.path.join(HOMED,"sub") if inp.get("file_path","").startswith("..") else "/tmp")!=want: fail+=1; print("FROM-OUTSIDE",want,tool,inp)
+# 見張りの入力が壊れていたら：本人のフォルダの中なら止める、外なら通す（例外で落ちて通る側にならない）
+print("## 壊れた入力")
+def run_raw(text,base):
+    env={k:v for k,v in os.environ.items() if k!="CLAUDE_PROJECT_DIR"}; env["CLAUDE_PROJECT_DIR"]=base
+    p=subprocess.run(["python3",G],input=text,capture_output=True,text=True,cwd=base,env=env)
+    return ("STOP" if "deny" in p.stdout else "pass"), p.returncode
+for text in ["[]","null","123","\"str\"","{broken","","{\"tool_name\":\"Bash\",\"tool_input\":\"rm x\",\"cwd\":5}","{\"tool_name\":\"Write\",\"tool_input\":[1]}"]:
+    for base,want in ((R,"STOP"),(SUB,"STOP"),(OUT,"pass")):
+        got,rc=run_raw(text,base)
+        if got!=want or rc!=0: fail+=1; print("BROKEN INPUT",repr(text),base.replace(R,"<R>"),got,rc,"want",want)
 print(f"失敗 {fail} 件"); sys.exit(1 if fail else 0)
