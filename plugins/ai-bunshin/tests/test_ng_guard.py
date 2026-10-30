@@ -390,6 +390,85 @@ V=[
  ("R4-p5","out",*Bv("ls -la ~/.ai-bunshin 2>/dev/null"),"pass",""),
  ("R4-p6","in",*Bv("git status 2>&1 | head &>/dev/null"),"pass",""),
 ]
+V+=[
+ # R1：止める側（パスとして解いたものが、記録の実体と同じかその下のときだけ当てる）
+ ("R1-s1","out",*Bv(f"cd ~/workspace && {RM} -rf AI坂田/03_インプット"),"deny","削除"),
+ ("R1-s2","ws",*Bv(f"{RM} -rf \"AI坂田/03_インプット\""),"deny","削除"),
+ ("R1-s3","out",*Bv(f"{RM} -rf ../../AI坂田/03_インプット"),"deny","削除"),
+ ("R1-s4","out",*Bv(f"{RM} -rf ~/workspace/work/03_インプット"),"deny","削除"),
+ ("R1-s5","out",*Bv(f"git commit -m 'AI坂田 の件' && {RM} -rf {VR}/03_インプット"),"deny","削除"),
+ # R2：止める側
+ ("R2-s1","in",*Bv(f"find 設定 -exec {RM} {{}} +"),"deny","削除"),
+ ("R2-s2","ws",*Bv(f"find . -name node_modules -prune -exec {RM} -rf {{}} +"),"deny","本人のフォルダそのもの"),  # 起点の workspace が本人のフォルダを含む
+ ("R2-s3","in",*Bv("find 設定 -exec mv {} /tmp/x \\;"),"deny","正本の移動"),
+ ("R2-s4","in",*Bv("find 設定 -delete"),"deny","削除"),
+ ("R2-s5","ws",*Bv("find . -name '*.json' -execdir /bin/mv {} /tmp/ \\;"),"deny","本人のフォルダそのもの"),
+ # R3：止める側（書き込み先と mv の元が 03_インプット の実体の下か）
+ ("R3-s1","in",*Bv("mv 03_インプット /tmp/x"),"deny","元データ"),
+ ("R3-s2","in",*Bv("cp a.csv 03_インプット"),"deny","元データ"),
+ ("R3-s3","in",*Bv("mv a.csv 03_インプット"),"deny","元データ"),
+ ("R3-s4","in",*Bv("unzip -o x.zip -d 03_インプット"),"deny","元データ"),
+ ("R3-s5","in",*Bv("python3 -c \"open('03_インプット/a.csv','w').write('x')\""),"deny","元データ"),
+ ("R3-s6","in",*Bv("cd 03_インプット && touch b.csv"),"deny","元データ"),
+ ("R3-s7","in",*Bv("tee 03_インプット/b.csv < a"),"deny","元データ"),
+ ("R3-s8","in",*Bv("mv 03_インプット/a.csv 02_成果物/"),"deny","元データ"),
+ ("R3-s9","in",*Bv("echo x >> 03_インプット/a.csv"),"deny","元データ"),
+ ("R3-s10","in",*Bv("cp -t 03_インプット a.csv"),"deny","元データ"),
+ ("R3-s11","in",*Bv("cd 03_インプット && tar -xf ../x.tar"),"deny","元データ"),
+ # R4：止める側（/dev/null を除いても書き込みが残るもの）
+ ("R4-s1","in",*Bv("echo x > ~/.claude/plugins/a 2>/dev/null"),"deny","プラグインのコピー"),
+ ("R4-s2","in",*Bv("ls ~/.claude/plugins 2>/dev/null && touch ~/.claude/plugins/a"),"deny","プラグインのコピー"),
+ ("R4-s3","in",*Bv("echo x 2>&1 > 03_インプット/a.csv"),"deny","元データ"),
+ ("R4-s4","out",*Bv("ls ~/.ai-bunshin 2>/dev/null; echo '{}' > ~/.ai-bunshin/owners.json"),"deny","見張りの記録"),
+ # R5：表記違い（大文字小文字・NFD・//・/./・ハードリンク）を実体で解く
+ ("R5-1","in",*Bv("mv ../ai坂田 /tmp/x"),"deny","本人のフォルダそのもの"),
+ ("R5-2","in",*Bv("mv 設定/CONFIG.JSON /tmp/x"),"deny","正本の移動"),
+ ("R5-3","in",*Bv("mv .CLAUDE /tmp/x"),"deny","正本の移動"),
+ ("R5-4","out",*Bv(f"mv {VW}/ai坂田 /tmp/x"),"deny","本人のフォルダそのもの"),
+ ("R5-5","in",*Bv(f"mv {VNFD_T}/data /tmp/x"),"deny","正本の移動"),
+ ("R5-6","in",*Bv("mv 設定//config.json /tmp/x"),"deny","正本の移動"),
+ ("R5-7","in",*Bv("mv 設定/./config.json /tmp/x"),"deny","正本の移動"),
+ ("R5-8","in","Write",{"file_path":VR+"/.CLAUDE/settings.json"},"deny","権限・設定"),
+ ("R5-9","in","Write",{"file_path":VR+"/02_成果物/hl.csv"},"deny","元データ"),
+ ("R5-10","in",*Bv("echo x > 02_成果物/hl.csv"),"deny","元データ"),
+ ("R5-11","in",*Bv("mv x 設定/CONFIG.JSON"),"deny","上書き"),
+ ("R5-12","out","Write",{"file_path":VH+"/.AI-BUNSHIN/owners.json"},"deny","見張りの記録"),
+ ("R5-13","out",*Bv("mv ~/WORKSPACE/AI坂田/設定 /tmp/x"),"deny","正本の移動"),
+ ("R5-14","in","Write",{"file_path":VR+"/設定/../03_インプット//b.csv"},"deny","元データ"),
+ ("R5-p1","in",*Bv("cat 設定/CONFIG.JSON 02_成果物/hl.csv"),"pass",""),
+ ("R5-p2","in",*Bv("mv 02_成果物/A.md 02_成果物/b.md"),"pass",""),
+ ("R5-p3","in","Write",{"file_path":VR+"/02_成果物/A.md"},"pass",""),
+ # R6：同じコマンドの中で作るリンク（元か行き先が保護しているもの、またはその下）・ln -sf で印を差し替え
+ ("R6-1","out",*Bv(f"ln -s {VR} {VO}/L2 && mv {VO}/L2/設定 /tmp/x"),"deny","リンク"),
+ ("R6-2","in",*Bv("ln -s . self && mv self/設定 /tmp/x"),"deny","リンク"),
+ ("R6-3","in",*Bv("ln -s 設定 s2 && mv s2/config.json /tmp/x"),"deny","リンク"),
+ ("R6-4","out",*Bv(f"cd {VW} && ln -s AI坂田 L3 && mv L3/設定 /tmp/x"),"deny","リンク"),
+ ("R6-5","in",*Bv("ln -sf /nonexistent 設定/config.json"),"deny","リンク"),
+ ("R6-6","in",*Bv("ln -sf /tmp/o.json 00_タスク管理/data/tasks.json"),"deny","リンク"),
+ ("R6-7","out",*Bv(f"ln -sf /tmp/o.json {VR}/設定/config.json"),"deny","リンク"),
+ ("R6-8","out",*Bv(f"ln -sfn /tmp/x {VR}"),"deny","リンク"),
+ ("R6-9","out",*Bv("ln -sfn /tmp/x ~/.ai-bunshin"),"deny","見張りの記録"),
+ ("R6-10","in",*Bv("ln -s ../03_インプット 02_成果物/lk2"),"deny","リンク"),
+ ("R6-11","in",*Bv("ln -s 03_インプット/a.csv 02_成果物/a_link.csv"),"deny","リンク"),
+ ("R6-12","in",*Bv("python3 -c \"import os;os.symlink('設定','s3')\""),"deny","リンク"),
+ ("R6-13","in",*Bv("python3 -c \"from pathlib import Path;Path('s4').symlink_to('03_インプット')\""),"deny","リンク"),
+ ("R6-14","in",*Bv("ln -s 03_インプット x && echo hi > x/a.csv"),"deny","リンク"),
+ ("R6-15","out",*Bv(f"ln -sfn {VR}/設定 {VO}/cfg"),"deny","リンク"),
+ ("R6-16","in",*Bv("ln -s ~/.claude/plugins/cache plug"),"deny","プラグインのコピー"),  # プラグインのコピーの規則が先に当たる
+ ("R6-p1","in",*Bv("ln -s 02_成果物/a.md 02_成果物/b.md"),"pass",""),
+ ("R6-p2","in",*Bv("ln -s /tmp/foo 05_開発/x/link"),"pass",""),
+ ("R6-p3","out",*Bv(f"ln -sf ../lib/a.js {VO}/src/a.js"),"pass",""),
+ ("R6-p4","out",*Bv("python3 -c \"import os;os.symlink('a','b')\""),"pass",""),
+ ("R6-p5","out",*Bv("ln -s ~/workspace/other/proj/src s"),"pass",""),
+ # R7：リンク経由の Write・Bash（並びの先頭だけでなく、実体で比べる）
+ ("R7-1","in","Write",{"file_path":VR+"/02_成果物/lk/a.csv"},"deny","元データ"),
+ ("R7-2","in",*Bv("echo x > 02_成果物/lk/a.csv"),"deny","元データ"),
+ ("R7-3","in",*Bv("cp x 02_成果物/lk/"),"deny","元データ"),
+ ("R7-4","out","Write",{"file_path":VO+"/inp/a.csv"},"deny","元データ"),
+ ("R7-5","out",*Bv("echo x > inp/a.csv"),"deny","元データ"),
+ ("R7-p1","in","Write",{"file_path":VR+"/02_成果物/lkok/a.md"},"pass",""),
+ ("R7-p2","in",*Bv("cat 02_成果物/lk/a.csv && echo x > 02_成果物/lkok/b.md"),"pass",""),
+]
 vfail=0
 def check_rows(rows):
     global vfail
@@ -398,5 +477,37 @@ def check_rows(rows):
         ok=(got==want) and (want!="deny" or word in reason)
         if not ok: vfail+=1; print("V2",vid,"got",got,"want",want,word,"|",reason[:80].replace(VH,"<VH>"))
 check_rows(V)
+# R5：ハードリンク（見張りの記録 owners.json）。記録は書き直されると別の実体になるので、確かめる直前に作る
+_hl=VO+"/rec_hl.json"
+os.link(VH+"/.ai-bunshin/owners.json",_hl)
+check_rows([("R5-15","out",*Bv(f"echo '{{}}' > {_hl}"),"deny","見張りの記録"),("R5-16","out","Write",{"file_path":_hl},"deny","見張りの記録"),
+            ("R5-p4","out",*Bv(f"cat {_hl}"),"pass","")])
+# R8：owners.json が読めない（深い入れ子・壊れた JSON など）でも落ちずに、本人のフォルダの中は止める
+for nm,txt in [("深い入れ子","["*200000+"]"*200000),("壊れた JSON","{not json"),("null","null"),("owners が文字列",'{"owners": "/x"}'),
+               ("入れ子リスト",'{"owners": [["/x"], 5, null, "rel/path"]}'),("BOM","﻿{\"owners\": []}"),("バイナリ","\udcff")]:
+    H8=os.path.realpath(tempfile.mkdtemp(prefix="ngr8_")); R8=H8+"/ws/AI坂田"; O8=H8+"/ws/other"
+    for d in ["設定","00_タスク管理/data"]: os.makedirs(R8+"/"+d)
+    open(R8+"/設定/config.json","w").write("{}"); os.makedirs(O8); os.makedirs(H8+"/.ai-bunshin")
+    with open(H8+"/.ai-bunshin/owners.json","w",encoding="utf-8",errors="surrogateescape") as f: f.write(txt)
+    for vid,where,c,want,word in [("R8-in",R8,"mv 設定 /tmp/x","deny","正本の移動"),("R8-out→本人",O8,f"mv {R8}/設定 /tmp/x","deny","正本の移動"),
+                                  ("R8-out",O8,"mv a b","pass",""),("R8-in-rm",R8,f"{RM} x","deny","削除")]:
+        got,reason=run_v("Bash",{"command":c},where,home=H8)
+        if got!=want or (want=="deny" and word not in reason): vfail+=1; print("V2",vid,nm,"got",got,"want",want,reason[:60])
+# R9：長いコマンドでも遅くならない（55KB で 1 秒未満）
+for vid,where,c in [("R9-in","in","python3 x; "*5000),("R9-out","out","python3 x; "*5000),("R9-find","in","find . -name a -print; "*2400),
+                    ("R9-py-rename","in","python3 -c \"os.rename('a','b')\"; "*1700)]:
+    (got,reason),dt=run_v("Bash",{"command":c},where,timeit=True)
+    if got!="pass" or dt>=1.0: vfail+=1; print("V2",vid,"got",got,"秒",round(dt,2),"長さ",len(c))
+# --explain "<コマンド>"：判定（deny／pass）と理由の語を出す（記録は書かない）
+def explain(c,where="in"):
+    base={"in":VR,"out":VO}[where]; env={k:v for k,v in os.environ.items() if k!="CLAUDE_PROJECT_DIR"}; env["HOME"]=VH
+    p=subprocess.run(["python3",G,"--explain",c],capture_output=True,text=True,cwd=base,env=env)
+    return p.returncode,p.stdout
+_log=VR+"/00_タスク管理/data/ng_log.jsonl"; _n=len(open(_log,encoding="utf-8").read().splitlines()) if os.path.exists(_log) else 0
+for c,where,want,word in [("mv 03_インプット /tmp/x","in","deny","元データ"),("ls -la","in","pass",""),(f"{RM} -rf build","out","pass",""),
+                          (f"{RM} -rf {VR}/03_インプット","out","deny","削除"),("ln -s 設定 s2","in","deny","リンク")]:
+    rc,out=explain(c,where)
+    if rc!=0 or ("判定："+want) not in out or (word and word not in out): vfail+=1; print("V2 EXPLAIN",repr(c),rc,out[:120])
+if (len(open(_log,encoding="utf-8").read().splitlines()) if os.path.exists(_log) else 0)!=_n: vfail+=1; print("V2 EXPLAIN が ng_log に書いた")
 fail+=vfail
 print(f"失敗 {fail} 件"); sys.exit(1 if fail else 0)
