@@ -150,6 +150,14 @@ STATUS=$?
 echo "$RESULT" >> "$LOG"
 log "終了 (exit=$STATUS)"
 
+# 振り返りのあとに今日の議事録が無ければ、ログに警告を残す（スキルが SKIP などで何もせず終わったのが分かるように。T080）
+if [ "$PHASE" = "review" ] && [ $STATUS -eq 0 ]; then
+  MINUTES=$(echo "$CONTEXT" | sed -n 's/^議事録の保存先: //p')
+  if [ -n "$MINUTES" ] && [ ! -f "$MINUTES" ]; then
+    log "警告：振り返りの議事録（$MINUTES）が作られていない。スキルが何もせずに終わった可能性がある（出力：$(echo "$RESULT" | head -c 120 | tr '\n' ' ')）"
+  fi
+fi
+
 if [ $STATUS -eq 0 ] && [ -n "$RESULT" ]; then
   notify "$(echo "$RESULT" | tail -3 | tr '\n' ' ')"
 else

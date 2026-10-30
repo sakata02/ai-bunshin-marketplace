@@ -44,8 +44,8 @@ def pid_alive(pid):
         return False
     except PermissionError:
         return True   # 他のユーザーのプロセス＝動いている
-    except OSError:
-        return False
+    except (OverflowError, ValueError, OSError):
+        return False   # 桁あふれ・壊れた値・その他＝動いていない
     return True
 
 
@@ -89,7 +89,7 @@ def main(argv):
         text = lock.read_text(encoding="utf-8")
     except FileNotFoundError:
         text = None
-    except OSError as e:
+    except (OSError, ValueError) as e:   # ValueError には UnicodeDecodeError（文字として読めない）も入る
         # 読めないときは安全側（開かない）。古いロックと決めつけない
         print(f"SKIP: ロックを読めない（{e.__class__.__name__}）。ほかの実行が動いているかもしれないので開かない")
         return 0

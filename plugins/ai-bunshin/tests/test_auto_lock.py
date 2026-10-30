@@ -207,6 +207,10 @@ def make_fake_plugin(name, phase_stub):
   echo "verdict=$({sys.executable} "{os.path.join(plugin, 'scripts', 'lock_check.py')}")"
   echo "--"
 }} >> "{rec}"
+# make_minutes という印があれば、議事録（今日の daily/YYYYMMDD_振り返り.md）を作る（本物の振り返りが書いたつもり）
+if [ -f "$AI_BUNSHIN_HOME/make_minutes" ]; then
+  mkdir -p "$AI_BUNSHIN_HOME/01_スプリント/S1/daily" && echo "# 議事録" > "$AI_BUNSHIN_HOME/01_スプリント/S1/daily/$(date +%Y%m%d)_振り返り.md"
+fi
 echo "done"
 '''
     open(os.path.join(bindir, "claude"), "w").write(fake)
@@ -224,11 +228,12 @@ def run_cycle(plugin, home, bindir, phase):
                           capture_output=True, text=True, env=env, timeout=60)
 
 
-REVIEW_STUB = '''import sys
+REVIEW_STUB = '''import sys, time
 a = sys.argv[1:]
 if "--session" in a:
     sys.exit(0)
 print("OPEN")
+print("議事録の保存先: 01_スプリント/S1/daily/" + time.strftime("%Y%m%d") + "_振り返り.md")
 '''
 
 PLAN_STUB = '''import os, sys
@@ -300,6 +305,117 @@ def s4_guard_in_allowed_tools():
     # 自動実行の中の Claude が lock_check.py を使える（許可リストに入っている）
     src = open(CYCLE, encoding="utf-8").read()
     assert "Bash(python3 *lock_check.py*)" in src
+
+
+# ---------- 直し（部下D の確かめへの対応） ----------
+
+# 1. 起動時のまとめの「⏳ 自動実行中」：ID を見せない・1行・lock_check.py へ案内
+def run_session(root):
+    env = {k: v for k, v in os.environ.items() if k not in (lc.ENV_NAME, "AI_BUNSHIN_HOME", "CLAUDE_PROJECT_DIR")}
+    env["HOME"] = os.path.join(BASE, "fakehome")
+    os.makedirs(env["HOME"], exist_ok=True)
+    env["CLAUDE_PROJECT_DIR"] = root
+    r = subprocess.run([sys.executable, os.path.join(SCRIPTS, "update_dashboard.py"), "--session"],
+                       capture_output=True, text=True, cwd=root, env=env)
+    assert r.returncode == 0, (r.returncode, r.stderr[:300])
+    import json
+    return json.loads(r.stdout)["hookSpecificOutput"]["additionalContext"]
+
+
+def make_session_owner(name):
+    import json
+    root = make_owner(name)
+    os.makedirs(os.path.join(root, "設定"), exist_ok=True)
+    json.dump({"owner": "テスト", "owner_call": "テストさん", "ai_name": "テストAI", "departments": ["総務"]},
+              open(os.path.join(root, "設定", "config.json"), "w", encoding="utf-8"), ensure_ascii=False)
+    json.dump({"project": {"name": "テストAI", "daily_capacity_default": 8.0, "holidays": []}, "daily_sprints": [], "sprints": [],
+               "tasks": [{"id": "T001", "title": "テスト用", "status": "ToDo", "assignee": "dev-a", "type": "開発", "reviewer": "dev-b",
+                          "points": 2, "department": "総務", "priority": 1}]},
+              open(os.path.join(root, "00_タスク管理", "data", "tasks.json"), "w", encoding="utf-8"), ensure_ascii=False)
+    return root
+
+
+def lock_lines(ctx):
+    return [ln for ln in ctx.splitlines() if "自動実行中" in ln]
+
+
+@case
+def d1_session_banner_hides_run_id():
+    root = make_session_owner("sess1")
+    run_id = "98765.1793403910"
+    open(os.path.join(root, "scripts", "auto", ".lock"), "w", encoding="utf-8").write(lock_text(ALIVE, "振り返り（17:00開始）", run_id))
+    ctx = run_session(root)
+    ls = lock_lines(ctx)
+    assert len(ls) == 1, ls
+    line = ls[0]
+    assert run_id not in ctx, "実行の ID が AI に見えている"
+    assert str(ALIVE) in line and "振り返り（17:00開始）" in line, line      # PID と段階名は同じ1行に出す（表示が崩れない）
+    assert "tasks.json の同時編集に注意" in line, line                         # 今までの注意は残す
+    assert "lock_check.py" in line and "1行目" in line, line                 # 自分かどうかは lock_check.py に任せる案内
+
+
+@case
+def d2_session_banner_old_two_line_lock_and_empty_lock():
+    root = make_session_owner("sess2")
+    lock = os.path.join(root, "scripts", "auto", ".lock")
+    open(lock, "w", encoding="utf-8").write(lock_text(ALIVE, "プランニング（09:00開始）"))   # ID の無い古い形式
+    ls = lock_lines(run_session(root))
+    assert len(ls) == 1 and "プランニング（09:00開始）" in ls[0] and "lock_check.py" in ls[0], ls
+    open(lock, "w", encoding="utf-8").write("")                                            # 空のロックでも落ちない
+    assert len(lock_lines(run_session(root))) == 1
+
+
+# 3. 壊れたロックへの強さ
+@case
+def b1_pid_alive_overflow_and_value_errors():
+    for pid in (10 ** 30, 2 ** 63, 2 ** 31, -(10 ** 30)):
+        assert lc.pid_alive(pid) is False, pid
+    ok, kind, _ = lc.judge("99999999999999999999999999\nx\ny\n", "A.1")
+    assert ok and kind == "stale", (ok, kind)
+
+
+@case
+def b2_cli_huge_pid_and_binary_lock():
+    root = make_owner("broken")
+    lock = os.path.join(root, "scripts", "auto", ".lock")
+    open(lock, "w", encoding="utf-8").write("99999999999999999999999999\nx\ny\n")
+    assert run_cli(root).startswith("OPEN: 古いロック"), run_cli(root)       # 落ちずに、古いロックとして開く
+    open(lock, "wb").write(b"\xff\xfe\x80abc\n\x00\n")                       # UTF-8 として読めない
+    out = run_cli(root)                                                      # 終了コード 0（run_cli が確かめる）
+    assert out.startswith("SKIP: ロックを読めない"), out
+
+
+# 4. 振り返りのあとに議事録が無ければ、ログに警告
+def cycle_log(home):
+    d = os.path.join(home, "scripts", "auto", "logs")
+    return open(os.path.join(d, os.listdir(d)[0]), encoding="utf-8").read()
+
+
+@case
+def w1_review_without_minutes_logs_warning():
+    plugin, home, bindir, rec = make_fake_plugin("cycle_nominutes", REVIEW_STUB)
+    r = run_cycle(plugin, home, bindir, "review")
+    assert r.returncode == 0, (r.returncode, r.stderr[:300])
+    warn = [ln for ln in cycle_log(home).splitlines() if "警告" in ln and "議事録" in ln]
+    assert len(warn) == 1, cycle_log(home)
+    assert "_振り返り.md" in warn[0] and warn[0].startswith(tuple("[")), warn
+
+
+@case
+def w2_review_with_minutes_has_no_warning():
+    plugin, home, bindir, rec = make_fake_plugin("cycle_minutes", REVIEW_STUB)
+    open(os.path.join(home, "make_minutes"), "w").write("")
+    r = run_cycle(plugin, home, bindir, "review")
+    assert r.returncode == 0, (r.returncode, r.stderr[:300])
+    assert "警告" not in cycle_log(home), cycle_log(home)
+
+
+@case
+def w3_plan_and_do_never_warn_about_minutes():
+    plugin, home, bindir, rec = make_fake_plugin("cycle_plan_nowarn", PLAN_STUB)
+    r = run_cycle(plugin, home, bindir, "plan")
+    assert r.returncode == 0, (r.returncode, r.stderr[:300])
+    assert "警告" not in cycle_log(home), cycle_log(home)
 
 
 alive_proc.terminate()

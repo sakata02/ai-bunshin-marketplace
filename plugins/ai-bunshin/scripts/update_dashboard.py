@@ -1157,7 +1157,15 @@ def summary_text(ctx, limit=10, with_ids=False):
         lines.append(f"[📅 今日の計画] {'、'.join(tds.get('planned', []))} — 約束 {r['committed']:g}pt／完了 {r['done_planned']:g}pt"
                      f"（{tds.get('status', '')}）")
     if LOCK_FILE.exists():
-        lines.append(f"[⏳ 自動実行中] {LOCK_FILE.read_text(encoding='utf-8').strip()}。tasks.json の同時編集に注意")
+        # ロックの1・2行目（PID と段階名）だけを1行で出す。3行目の実行 ID は AI に見せない
+        # （自分の実行かどうかは、ID を見て決めず lock_check.py の1行目で決める。T080）
+        try:
+            lock_lines = LOCK_FILE.read_text(encoding="utf-8").splitlines()
+        except (OSError, ValueError):
+            lock_lines = []
+        who = "　".join(x.strip() for x in lock_lines[:2] if x.strip()) or "（中身を読めない）"
+        lines.append(f"[⏳ 自動実行中] {who}。tasks.json の同時編集に注意。"
+                     "自分の実行かどうかは lock_check.py の1行目で決める")
     tries = active_tries_text()
     if tries:
         lines.append("[🔁 実施中の Try（今日の作業で意識する。17時の振り返りで検証）]")
