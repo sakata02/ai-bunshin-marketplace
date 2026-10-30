@@ -95,6 +95,7 @@ description: AI 分身の初回セットアップ。新しく使い始める人�
 | `04_ナレッジ/プロダクトゴール.md`・`完成の定義.md`・`スクラムマスターの観察.md` | `templates/knowledge/` の `product_goal.md`・`definition_of_done.md`・`sm_observation.md` |
 | `04_ナレッジ/研修/研修の決まり.md` | `templates/knowledge/training/training_rules.md`（研修を担当する人だけ） |
 | `02_成果物/共通/業務改善の提案.md` | `templates/deliverables/improvement_proposals.md` |
+| `04_ナレッジ/業務の流れ.md` | `templates/knowledge/business_flow.md` |
 | `04_ナレッジ/記事スタイル/書き方.md`・`言い回し.md`・`手直し記録.md`・`お手本/README.md` | `templates/knowledge/article_style/` の `style_guide.md`・`phrases.md`・`revisions.md`・`examples/README.md`（本人名義の記事・コラムを書く人だけ。お手本はまだ空でよい） |
 | 空のフォルダ | `01_スプリント/`、`02_成果物/<部署>/`、`03_インプット/<部署>/`、開発を頼む人は `05_開発/` |
 
@@ -113,6 +114,7 @@ description: AI 分身の初回セットアップ。新しく使い始める人�
 3. 浮く時間が大きい順に **任せる候補リスト** を表で出す（仕事／分類／AI がやること／本人がやること／頼み方の例文）
 4. 上位3つを最初のタスクとして登録してよいか聞く。よければ `/ai-bunshin:intake` の手順で登録する
 5. 判断基準を育てるために、最初のお願い「インタビュー（判断基準・口調・資料の好み）」を本人のタスクとして登録する（期日は1週間後）
+6. 業務の流れの初版も作る：棚卸しの答えから、業務ごとに「どこから来るか・誰が何をするか・どこへ渡すか・頻度と時間・困っていること」を `04_ナレッジ/業務の流れ.md` に書く（雛形は `templates/knowledge/business_flow.md`）。分からないところは「ヒアリングしたいこと」の節に残し、インタビューで聞く
 
 ## 5. 自動実行（Mac のみ）
 
