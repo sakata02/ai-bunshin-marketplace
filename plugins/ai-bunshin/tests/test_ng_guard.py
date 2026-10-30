@@ -266,7 +266,7 @@ probe=[  # (名前, (tool, inp), where, 期待)
  ("p3 out: rm \"${HOME}/workspace",Bc(f"{RM} -rf \"${{HOME}}/workspace/AI坂田/03_インプット\""),"/tmp","STOP"),
  ("p3 out: cd ~/workspace/AI坂田 && rm",Bc(f"cd ~/workspace/AI坂田 && {RM} -rf 03_インプット"),"/tmp","STOP"),
  ("p3 out: cd ~/workspace && rm AI坂田/",Bc(f"cd ~/workspace && {RM} -rf AI坂田/03_インプット"),"/tmp","STOP"),
- ("p3 out: rm ~user/（名前で拾う）",Bc(f"{RM} -rf ~{getpass.getuser()}/workspace/AI坂田/03_インプット"),"/tmp","STOP"),
+ # 「p3 out: rm ~user/（名前で拾う）」は外した（T058）：R1 で名前の部分一致をやめた。~user は本物のホームに広がり、本物の本人のフォルダの ng_log に書いてしまうため。~user の広げ方は下の EXPAND で確かめる
  ("p3 out: find ABS -delete",Bc(f"find {P}/03_インプット -delete"),"/tmp","STOP"),
  ("p3 out: mv \"$HOME/workspace/AI坂田\"",Bc("mv \"$HOME/workspace/AI坂田\" /tmp/x"),"/tmp","STOP"),
  ("p3 in: mv 設? 00_タ* .clau*",Bc("mv 設? 00_タ* .clau* /tmp/x"),"in","STOP"),
@@ -300,6 +300,10 @@ probe=[  # (名前, (tool, inp), where, 期待)
 for name,(tool,inp),where,want in probe:
     got=run_p(tool,inp,where)
     if got!=want: fail+=1; print("PROBE",got,"want",want,name)
+# ~user は、その人の本当のホーム（pw_dir）に広げる（見張りを動かさずに、関数だけ確かめる。本物のフォルダには触れない）
+import importlib.util,pwd
+_sp=importlib.util.spec_from_file_location("ng_guard_mod",G); NGM=importlib.util.module_from_spec(_sp); _sp.loader.exec_module(NGM)
+if NGM.expand("~"+getpass.getuser()+"/x","/")!=os.path.join(pwd.getpwnam(getpass.getuser()).pw_dir,"x"): fail+=1; print("EXPAND ~user")
 # 印が無くなっても、記録にあるフォルダは本人のフォルダとして見張る（印を消す・動かす抜け道を塞ぐ）
 NM=os.path.join(PH,"nomark"); os.makedirs(os.path.join(NM,"05_開発"))
 json.dump({"owners":recs+[NM]},open(REC,"w"))
@@ -329,4 +333,70 @@ for c in [f"mv {P} /tmp/x",f"{RM} ~/.ai-bunshin/owners.json"]:
     if run_p("Bash",{"command":c},"in")!="STOP": fail+=1; print("NO-EXCEPTION",c)
 if run_p("Bash",{"command":f"{RM} x"},"in")!="pass": fail+=1; print("ng_allow が効かない（rm x）")
 json.dump({},open(P+"/設定/config.json","w"))
+# ---- T058 方式 v2：実体（st_dev・st_ino）で比べる・同じコマンドの中で作るリンク・R1〜R9・--explain ----
+# 表の形：(ID, 動く場所, ツール, 入力, 期待 deny/pass, deny の理由に含む語)。R1〜R4 は通す側の行を先に書く
+print("## T058 方式 v2")
+VH=os.path.realpath(tempfile.mkdtemp(prefix="ngv2_"))  # この節のホーム（本物の ~ には触れない）
+VW=VH+"/workspace"; VR=VW+"/AI坂田"; VO=VW+"/other/proj"; VK=VW+"/work"
+for d in ["設定","00_タスク管理/data","05_開発/x","02_成果物/共通","02_成果物/設定","03_インプット",".claude/rules"]: os.makedirs(VR+"/"+d)
+for f,t in [("設定/config.json","{}"),("00_タスク管理/data/tasks.json","{}"),(".claude/rules/ai-bunshin-common.md","x"),("CLAUDE.md","x"),("03_インプット/a.csv","a"),("02_成果物/a.md","x")]:
+    open(VR+"/"+f,"w").write(t)
+os.makedirs(VO+"/src"); os.makedirs(VH+"/.claude/plugins/cache/x/ai-bunshin/scripts")
+for d in ["設定","03_インプット"]: os.makedirs(VK+"/"+d)  # 名前が一般的な語（work）の本人のフォルダ（R1）
+open(VK+"/設定/config.json","w").write("{}")
+os.symlink("../03_インプット",VR+"/02_成果物/lk")          # 本人のフォルダの中のリンク（R7）
+os.symlink("共通",VR+"/02_成果物/lkok")                      # 保護していない所へのリンク（通す）
+os.symlink(VR+"/03_インプット",VO+"/inp")                     # 外から本人の 03_インプット へのリンク（R7）
+os.link(VR+"/03_インプット/a.csv",VR+"/02_成果物/hl.csv")    # ハードリンク（R5）
+VNFD_T=unicodedata.normalize("NFD","00_タスク管理")
+def run_v(tool,inp,where,home=None,timeit=False):
+    """where：in＝本人のフォルダ、out＝外の案件、ws＝本人のフォルダの親（workspace）、それ以外はそのフォルダ。(判定, 理由) を返す。"""
+    import time
+    base={"in":VR,"out":VO,"ws":VW,"home":VH}.get(where,where)
+    env={k:v for k,v in os.environ.items() if k!="CLAUDE_PROJECT_DIR"}; env["HOME"]=home or VH; env["CLAUDE_PROJECT_DIR"]=base
+    t0=time.time()
+    p=subprocess.run(["python3",G],input=json.dumps({"tool_name":tool,"tool_input":inp,"cwd":base}),capture_output=True,text=True,cwd=base,env=env)
+    dt=time.time()-t0
+    try: o=json.loads(p.stdout)["hookSpecificOutput"]; got=(o["permissionDecision"],o.get("permissionDecisionReason",""))
+    except Exception: got=("pass","")
+    if p.returncode!=0: got=("rc%d"%p.returncode,p.stderr[-200:])
+    return (got,dt) if timeit else got
+run_v("Bash",{"command":"ls"},"in"); run_v("Bash",{"command":"ls"},VK)  # 記録に足す
+def Bv(c): return ("Bash",{"command":c})
+V=[
+ # R1：外のセッションで、本人のフォルダの名前が語に含まれるだけでは本人の規則を当てない（通す側を先に）
+ ("R1-p1","out",*Bv("git commit -m 'AI坂田 の件' && npm install"),"pass",""),
+ ("R1-p2","out",*Bv("git commit -m 'AI坂田 の件' && git push origin main"),"pass",""),
+ ("R1-p3","out",*Bv("git commit -m 'work in progress' && git push"),"pass",""),
+ ("R1-p4","out",*Bv(f"{RM} -rf {VO}/build"),"pass",""),
+ ("R1-p5","out",*Bv("echo AI坂田 && npm install && "+RM+" -rf dist"),"pass",""),
+ # R2：find の -exec は、直後が rm・mv などのときだけ「動かす・消す」（通す側を先に）
+ ("R2-p1","in",*Bv("find . -name '*.md' -exec grep -l TODO {} +"),"pass",""),
+ ("R2-p2","ws",*Bv("find . -name '*.md' -exec grep -l TODO {} +"),"pass",""),
+ ("R2-p3","in",*Bv("find 設定 -name '*.json' -exec cat {} \\;"),"pass",""),
+ ("R2-p4","in",*Bv("find 00_タスク管理 -type f -execdir wc -l {} +"),"pass",""),
+ # R3：03_インプット から読み出すのは通す（通す側を先に）
+ ("R3-p1","in",*Bv("cp 03_インプット/a.csv 02_成果物/a.csv"),"pass",""),
+ ("R3-p2","in",*Bv("cp 03_インプット/a.csv 02_成果物/"),"pass",""),
+ ("R3-p3","in",*Bv("cp -r 03_インプット 02_成果物/bk"),"pass",""),
+ ("R3-p4","in",*Bv("ls 03_インプット && head 03_インプット/a.csv"),"pass",""),
+ ("R3-p5","in",*Bv("python3 -c \"print(open('03_インプット/a.csv').read())\""),"pass",""),
+ ("R3-p6","in",*Bv("diff 03_インプット/a.csv 02_成果物/a.md"),"pass",""),
+ # R4：2>/dev/null・2>&1・>/dev/null は書き込みと見ない（通す側を先に）
+ ("R4-p1","in",*Bv(f"ls {VH}/.claude/plugins 2>/dev/null | head"),"pass",""),
+ ("R4-p2","in",*Bv(f"python3 {VH}/.claude/plugins/cache/x/ai-bunshin/scripts/update_dashboard.py --status 2>&1 | tail"),"pass",""),
+ ("R4-p3","in",*Bv("cat ~/.claude/plugins/x >/dev/null 2>&1"),"pass",""),
+ ("R4-p4","in",*Bv("mv 02_成果物/a.md 02_成果物/b.md > /dev/null"),"pass",""),
+ ("R4-p5","out",*Bv("ls -la ~/.ai-bunshin 2>/dev/null"),"pass",""),
+ ("R4-p6","in",*Bv("git status 2>&1 | head &>/dev/null"),"pass",""),
+]
+vfail=0
+def check_rows(rows):
+    global vfail
+    for vid,where,tool,inp,want,word in rows:
+        got,reason=run_v(tool,inp,where)
+        ok=(got==want) and (want!="deny" or word in reason)
+        if not ok: vfail+=1; print("V2",vid,"got",got,"want",want,word,"|",reason[:80].replace(VH,"<VH>"))
+check_rows(V)
+fail+=vfail
 print(f"失敗 {fail} 件"); sys.exit(1 if fail else 0)
