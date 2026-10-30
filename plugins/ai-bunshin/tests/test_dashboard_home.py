@@ -79,7 +79,9 @@ for label, cwd in (("準備前のフォルダ", PREP), ("準備前のフォル�
 
 r = run(["--session"], OTHERDIR)
 c = ctx_of(r)
-check("session：無関係のフォルダ → セットアップを始めてと言わない", r.returncode == 0 and "セットアップ" not in c.replace("仕事用フォルダではない", "") and "初回" not in c, r.stdout + r.stderr)
+# 入口（「セットアップして」と言えば始められる）は示してよいが、セットアップを始めるよう指示しない
+check("session：無関係のフォルダ → セットアップを始めてと言わない", r.returncode == 0 and "初回" not in c and "セットアップを始めて" not in c
+      and "本人が言うまでセットアップは始めない" in c, r.stdout + r.stderr)
 check("session：無関係のフォルダ → フォルダ違いの1行が出る", "仕事用フォルダではない" in c, c)
 check("session：無関係のフォルダに何も作らない", os.listdir(OTHERDIR) == [], str(os.listdir(OTHERDIR)))
 
@@ -118,6 +120,17 @@ check("hook：別のフォルダに何も作らない", not os.path.exists(os.pa
 
 r = hook(OTHER, OTHERDIR)
 check("hook：無関係のフォルダ → 何もしない", r.returncode == 0 and r.stdout == "" and r.stderr == "", r.stdout + r.stderr)
+
+# 日本語のフォルダ名：実際は NFD（濁点が分かれた形）、Claude から来るパスは NFC でも、本人の tasks.json として動く
+import unicodedata
+NFD_HOME = os.path.join(BASE, unicodedata.normalize("NFD", "デイビットAI"))
+os.makedirs(os.path.join(NFD_HOME, "設定"))
+os.makedirs(os.path.join(NFD_HOME, "00_タスク管理", "data"))
+json.dump({"owner": "テスト"}, open(os.path.join(NFD_HOME, "設定", "config.json"), "w", encoding="utf-8"))
+json.dump(TASKS, open(os.path.join(NFD_HOME, "00_タスク管理", "data", "tasks.json"), "w", encoding="utf-8"))
+nfc_path = os.path.join(BASE, unicodedata.normalize("NFC", "デイビットAI"), "00_タスク管理", "data", "tasks.json")
+r = hook(nfc_path, NFD_HOME)
+check("hook：濁点の表し方が違うパス（NFC）でも本人の tasks.json として動く", r.returncode == 0 and "PostToolUse" in r.stdout, r.stdout + r.stderr)
 
 # 手動実行（本人のフォルダが見つからない）
 r = run([], OTHERDIR)

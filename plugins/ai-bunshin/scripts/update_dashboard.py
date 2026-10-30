@@ -1350,7 +1350,8 @@ def main():
             written = Path(path)
             if not written.is_absolute():
                 written = Path(payload.get("cwd") or os.getcwd()) / written
-            if written.resolve() != TASKS_JSON.resolve():
+            # 文字列ではなく「同じファイルか」で比べる（日本語のフォルダ名の濁点の表し方・大文字小文字・リンクの違いに強い）
+            if not os.path.samefile(written, TASKS_JSON):
                 return 0
         except (OSError, ValueError):
             return 0
@@ -1364,7 +1365,9 @@ def main():
                         f"設定/config.json・CLAUDE.md（本人設定）・00_タスク管理/data/tasks.json を作る（/ai-bunshin:setup があればその手順で）。")
             else:
                 text = ("このフォルダは AI分身の仕事用フォルダではないため、AI分身の機能（タスク管理・見張り）は動かしていません。"
-                        "使うときは仕事用フォルダで Claude を開いてください")
+                        "使うときは仕事用フォルダで Claude を開いてください。まだ仕事用フォルダが無いなら、新しいフォルダを開いて"
+                        "「セットアップして」と言えば始められます（本人が言うまでセットアップは始めない）。"
+                        "この案内は、本人に聞かれたとき・AI分身の機能を頼まれたときだけ伝える")
             print(json.dumps({"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": text}},
                              ensure_ascii=False))
             return 0
