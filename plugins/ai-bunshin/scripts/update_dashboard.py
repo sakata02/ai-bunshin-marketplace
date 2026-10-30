@@ -30,7 +30,8 @@ except ImportError:
 
 NO_OPENPYXL_NOTE = ("Excel（タスク管理.xlsx）を作る部品（openpyxl）が入っていないため、Excel の更新を飛ばしました。"
                     "入れるには：`python3 -m pip install --user openpyxl`（Windows は `py -3 -m pip install --user openpyxl`）。"
-                    "タスクボード.md とお願いの一覧は更新しています")
+                    "タスクボード.md とお願いの一覧は更新しています。"
+                    "入れるのは本人（AI は自分で入れない。本人に `! …` の形で打ってもらう）。入れても直らないときは、そのエラーを AI に伝えてもらう")
 
 def find_root():
     """本人のフォルダ（00_タスク管理/data/tasks.json がある場所）。hook は CLAUDE_PROJECT_DIR、手動はカレントから上へ探す。"""
@@ -1347,7 +1348,8 @@ def main():
         print(review_context(today, ctx["cal"], ctx))
         return 0
 
-    text = summary_text(ctx) + (f"\n{note}" if note else "")
+    # 案内は起動時と手動実行のときだけ（tasks.json を書くたびの hook では毎回は出さない）
+    text = summary_text(ctx) + (f"\n{note}" if note and not args.hook else "")
     if args.session:
         # 共通の指揮官ルールは .claude/rules/ai-bunshin-common.md に写す（自動で読み込まれる）
         if sync_rules():
@@ -1358,7 +1360,7 @@ def main():
         print(json.dumps({"hookSpecificOutput": {"hookEventName": event, "additionalContext": text}}, ensure_ascii=False))
     else:
         print(text)
-        done = XLSX if HAVE_OPENPYXL else REQUEST_MD
+        done = REQUEST_MD if note else XLSX   # Excel を作れなかったときは、作れたものだけを名指しする
         print(f"\n→ {done.relative_to(ROOT)} / {BOARD_MD.relative_to(ROOT)} を更新しました")
     return 0
 
