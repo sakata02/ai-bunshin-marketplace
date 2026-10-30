@@ -18,10 +18,19 @@ import sys
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
-from openpyxl import Workbook
-from openpyxl.chart import BarChart, LineChart, Reference
-from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
-from openpyxl.utils import get_column_letter
+# openpyxl は Excel（タスク管理.xlsx）を作るときだけ使う。入っていない環境でも、タスクボード・お願いの一覧・hook の出力は止めない
+try:
+    from openpyxl import Workbook
+    from openpyxl.chart import BarChart, LineChart, Reference
+    from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+    from openpyxl.utils import get_column_letter
+    HAVE_OPENPYXL = True
+except ImportError:
+    HAVE_OPENPYXL = False
+
+NO_OPENPYXL_NOTE = ("Excel（タスク管理.xlsx）を作る部品（openpyxl）が入っていないため、Excel の更新を飛ばしました。"
+                    "入れるには：`python3 -m pip install --user openpyxl`（Windows は `py -3 -m pip install --user openpyxl`）。"
+                    "タスクボード.md とお願いの一覧は更新しています")
 
 def find_root():
     """本人のフォルダ（00_タスク管理/data/tasks.json がある場所）。hook は CLAUDE_PROJECT_DIR、手動はカレントから上へ探す。"""
@@ -118,11 +127,12 @@ STATUS_FILL = {
     "完了": "E2EFDA",
 }
 FLAG_FILL = {FLAG_OVERDUE: "F8CBAD", FLAG_LATE: "FFE699", FLAG_OK: "E2EFDA", FLAG_DONE: "E2EFDA"}
-HEADER_FILL = PatternFill("solid", fgColor="1F4E78")
-HEADER_FONT = Font(name=FONT, bold=True, color="FFFFFF")
-BODY_FONT = Font(name=FONT, size=10)
-THIN = Side(style="thin", color="BFBFBF")
-BORDER = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
+if HAVE_OPENPYXL:  # Excel の書式。openpyxl が無いときは使わない
+    HEADER_FILL = PatternFill("solid", fgColor="1F4E78")
+    HEADER_FONT = Font(name=FONT, bold=True, color="FFFFFF")
+    BODY_FONT = Font(name=FONT, size=10)
+    THIN = Side(style="thin", color="BFBFBF")
+    BORDER = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
 
 
 # ---------- 日付ユーティリティ ----------
@@ -1237,6 +1247,25 @@ def validate(data):
     return errors
 
 
+def write_excel(ctx):
+    """タスク管理.xlsx を作る。作れなかったとき（openpyxl が無い・Excel で開かれている）は、本人向けの案内文を返す。作れたときは空。"""
+    if not HAVE_OPENPYXL:
+        return NO_OPENPYXL_NOTE
+    wb = Workbook()
+    build_dashboard(wb, ctx)
+    build_own_sheet(wb, ctx)
+    build_requests_sheet(wb, ctx)
+    build_daily_sheet(wb, ctx)
+    build_task_list(wb, ctx)
+    build_gantt(wb, ctx)
+    build_sprint_history(wb, ctx)
+    try:
+        wb.save(XLSX)
+    except PermissionError:
+        return "（タスク管理.xlsx が Excel で開かれているため保存できませんでした。閉じてから /status を実行してください）"
+    return ""
+
+
 def run(today):
     data = json.loads(TASKS_JSON.read_text(encoding="utf-8"))
     errors = validate(data)
@@ -1259,19 +1288,7 @@ def run(today):
                open_tasks=open_tasks, project_end=project_end, sprint=current_sprint(data, today),
                now=datetime.now().strftime("%Y-%m-%d %H:%M"))
 
-    wb = Workbook()
-    build_dashboard(wb, ctx)
-    build_own_sheet(wb, ctx)
-    build_requests_sheet(wb, ctx)
-    build_daily_sheet(wb, ctx)
-    build_task_list(wb, ctx)
-    build_gantt(wb, ctx)
-    build_sprint_history(wb, ctx)
-    try:
-        wb.save(XLSX)
-        saved_note = ""
-    except PermissionError:
-        saved_note = "（タスク管理.xlsx が Excel で開かれているため保存できませんでした。閉じてから /status を実行してください）"
+    saved_note = write_excel(ctx)
     BOARD_MD.write_text(build_board_md(ctx), encoding="utf-8")
     REQUEST_MD.write_text(build_requests_md(ctx), encoding="utf-8")
     return ctx, saved_note
@@ -1341,7 +1358,8 @@ def main():
         print(json.dumps({"hookSpecificOutput": {"hookEventName": event, "additionalContext": text}}, ensure_ascii=False))
     else:
         print(text)
-        print(f"\n→ {XLSX.relative_to(ROOT)} / {BOARD_MD.relative_to(ROOT)} を更新しました")
+        done = XLSX if HAVE_OPENPYXL else REQUEST_MD
+        print(f"\n→ {done.relative_to(ROOT)} / {BOARD_MD.relative_to(ROOT)} を更新しました")
     return 0
 
 
