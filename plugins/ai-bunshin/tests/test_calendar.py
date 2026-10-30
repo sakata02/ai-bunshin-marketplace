@@ -5,9 +5,16 @@ from datetime import date, timedelta
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "scripts"))
-os.environ["TZ"] = "Asia/Tokyo"
 import time  # noqa: E402
-time.tzset()
+from datetime import datetime  # noqa: E402
+# このテストの期待値は日本時間（JST）で書いてある。Mac・Linux は TZ で日本時間にそろえる。
+# Windows には time.tzset() が無く、手元の時刻を差し替えられないため、パソコンが日本時間のときだけ動かす（違うときは飛ばす）
+if hasattr(time, "tzset"):
+    os.environ["TZ"] = "Asia/Tokyo"
+    time.tzset()
+elif datetime.now().astimezone().utcoffset() != timedelta(hours=9):
+    print("このパソコンの時刻が日本時間ではなく、時刻を差し替える方法も無いため、予定の読み取りのテストを飛ばしました（失敗 0 件）")
+    sys.exit(0)
 import calendar_today as c  # noqa: E402
 
 text = open(os.path.join(HERE, "sample_calendar.ics"), encoding="utf-8").read()
