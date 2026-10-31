@@ -27,6 +27,7 @@
 - **Python 3** と **openpyxl**（Excel を作るため）。入っていなければ、初回セットアップが入れ方を案内します
   - Python が無いと、NG の見張り（実行前のチェック）も動きません。必ず入れてから使ってください
 - **Windows** の場合：[Git for Windows](https://git-scm.com/downloads/win)（Git Bash）と [Python](https://www.python.org/downloads/)。朝・夕方の自動実行は Mac だけです（Windows では「今日の計画して」「振り返りして」と話しかけます）
+  - Windows で自動に回したいときは、Claude デスクトップアプリの「定期実行（Scheduled）」を使う方法があります（PC が起きていて、アプリが開いているときだけ動きます）。手順は、セットアップ（`/ai-bunshin:setup` の「5. 自動実行」の「Windows の人」）が案内します。うまくいかなければ、手で話しかける方法で十分回ります。【β版・一部は動作未確認】
   - Python は入れるときに「Add python.exe to PATH」にチェックを入れてください。Windows では `python3` が無く `python`・`py` になることがありますが、hook と AI は自動で読み替えます
 
 ## 入れ方
@@ -54,7 +55,7 @@ claude
 # →「セットアップして」（または /ai-bunshin:setup）
 ```
 
-Mac なら、セットアップの最後に案内されるコマンドで、朝・夕方の自動実行を登録できます。
+Mac なら、セットアップの最後に案内されるコマンドで、朝・夕方の自動実行を登録できます。Windows は、デスクトップアプリの定期実行（案内あり）か、朝「今日の計画を立てて」・夕方「今日の振り返り」と話しかける方法で回します。
 
 ## 使い方の例
 

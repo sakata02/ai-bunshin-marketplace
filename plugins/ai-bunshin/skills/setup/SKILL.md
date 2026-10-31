@@ -15,7 +15,7 @@ description: AI 分身の初回セットアップ。新しく使い始める人�
 
 | 確認 | 方法 | 足りないとき |
 |---|---|---|
-| OS | `uname` | Mac 以外は自動実行が使えない（手動で `/ai-bunshin:daily-plan` などを使う）と伝えて続ける。Windows では hook が `python3` を呼べるか（`python3 --version`）も確かめ、無ければ止めて Python の入れ方を案内する |
+| OS | `uname` | Mac 以外は自動実行が使えない（手動で `/ai-bunshin:daily-plan` などを使う）と伝えて続ける。Windows では hook が `python3` を呼べるか（`python3 --version`）も確かめ、無ければ止めて Python の入れ方を案内する。Windows の朝・夕方の自動実行は、手順5の「Windows の人」を案内する |
 | Python 3 | `python3 --version` | `! brew install python`（Mac）など |
 | openpyxl | `python3 -c "import openpyxl"` | `! python3 -m pip install --user openpyxl`。「externally-managed-environment」と出たら、`! python3 -m venv ~/.ai-bunshin-venv && ~/.ai-bunshin-venv/bin/pip install openpyxl` を案内し、config.json の `path` の先頭に `~/.ai-bunshin-venv/bin`（絶対パス）を入れる |
 | 置き場所 | 今のフォルダが空か、仕事用のフォルダか | 新しいフォルダを作り（`! mkdir -p ~/workspace/<名前>-ai`）、そこでプラグインを入れて（`! cd ~/workspace/<名前>-ai && claude plugin install ai-bunshin@ai-bunshin-marketplace --scope project`）、そのフォルダで claude を起動し直すよう案内する |
@@ -136,6 +136,43 @@ description: AI 分身の初回セットアップ。新しく使い始める人�
 ```
 
 打ったあと `! launchctl list | grep ai-bunshin` で2行（daily-plan と daily-review）出れば完了。いいえなら、手動で `/ai-bunshin:daily-plan` などを使うと伝える。
+
+### Windows の人（上の Mac の方法は Windows では動かない。次の A か B を案内する）
+
+上の `install.sh` は zsh と launchd と osascript を使うので、Windows では動かない（zsh・osascript は Windows に標準では無い）。「自動で回したいですか？」と聞き、はいなら A、いいえ・うまくいかないなら B を案内する。**登録は本人が画面で行う**（AI は予定の登録・設定の変更をしない）。公式の説明の確認日：2026-10-31（出典：`code.claude.com/docs/en/desktop-scheduled-tasks`）。
+
+**A. Claude デスクトップアプリの「定期実行」（公式の機能。Windows 版にもある）**
+
+前提：Claude デスクトップアプリ（Windows 版。定期実行は 1.1.5368 以降）を入れていて、仕事用フォルダを **Code** タブで開いたことがあり（フォルダを信頼済み）、セットアップが終わっている。次の2つを作る（朝の計画→実行が1つ、夕方の振り返りが1つ）。
+
+1. **Code** タブの左のメニュー **Scheduled**（「Routines」と出る版は **Routines** → **New routine**）→ **New task**
+2. 「Create with Claude」と「Set up manually」が出たら **Set up manually**
+3. **Only on this computer** をオンにする（画面の上、または「Advanced settings」の中にある。クラウドの方は選ばない。仕事用フォルダはこの PC にあるため）
+4. **Name**：朝は `ai-bunshin-plan-do`、夕方は `ai-bunshin-review`（英小文字とハイフン。ほかの定期実行と重ならない名前）
+5. **Instructions**（指示）に、朝は次を貼る：
+   `/ai-bunshin:daily-plan を実行してください。計画が作られたら、続けて /ai-bunshin:daily-do を実行してください。営業日でない日は何もしないでください。`
+   夕方は次を貼る：
+   `/ai-bunshin:daily-review を実行してください。営業日でない日、または今日の振り返りが済んでいる日は何もしないでください。`
+6. **Local folder**（作業フォルダ）：仕事用フォルダ。モデル：Opus（Mac の自動実行と同じ）。権限モードは、はじめは手動のまま
+7. 頻度：**Weekdays**（平日）、時刻は朝 9:00／夕方 17:00（自分の勤務時間に合わせる）→ **Create**
+8. **Run now** で1回動かす。権限の確認が出たら中身を読み、計画・実行・振り返りに必要なもの（仕事用フォルダの中のファイルの読み書き、`update_dashboard.py` の実行）だけ「always allow」を選ぶ。削除・送信・設定の変更に当たるものは許可しない。朝の分は動かしたあと、`00_タスク管理/` と `01_スプリント/…/daily/` に今日の計画ができたかを見る
+
+守る・伝えること：
+- 【公式】動くのは、**アプリが開いていて、PC が起きているあいだだけ**。スリープしていた時刻の分は飛ぶ。PC が起きたときやアプリを開いたとき、直近7日の取りこぼしを **1回だけ**（一番新しい分）追いかけて動かす。朝9時の計画が夜に動くことがあるので、「Keep computer awake」（設定 → Desktop app）をオンにするか、朝はアプリを開いておく
+- 【公式】決めた時刻から数分遅れて始まる（毎回同じだけ遅れる）。前の実行がまだ続いているときは、次の実行は飛ぶ（朝の実行が夕方まで続くと、振り返りが飛ぶ）。飛んだ理由は詳細ページの **History** にある
+- 【公式】権限の確認で手動モードの実行が止まったら、History から実行のセッションを開いて答える。AI の質問で止まったときも同じ
+- Mac の「自動実行が N日 動いていません」の警告は Windows では出ない（`scripts/auto/run.sh` を作らないため）。ときどき **Scheduled** の History を見て、動いているかを確かめる
+- Mac の自動実行がかけている道具の絞り込み（削除・送信・設定の変更を使えなくする）は、この方法ではかからない。権限モードと、設定（`.claude/settings.json` の deny・NG の見張り）に頼る。【要確認】NG の見張りが定期実行のセッションでも動くか（Run now のあと、`00_タスク管理/data/ng_log.jsonl` が増えるかで見る）
+- 【要確認】指示の中の `/ai-bunshin:…` がスキルとして呼ばれるか。ふつうの文として読まれて動かないときは、朝は「今日の計画を立てて。終わったら続けて今日の分を実行して」、夕方は「今日の振り返りをして」に書き換える（Edit から）。Run now で必ず確かめる
+- 【要確認】この版の画面の名前・並び（版によって違う）。定期実行が使える契約（プラン）の条件は、公式の説明に書かれていない
+- 使わない方法：**クラウドの定期実行**（claude.ai の Routines）は、GitHub のリポジトリを複製して動くので、この PC の仕事用フォルダ（タスク表・入力データ）には触れない。このプラグインが複製だけで動くかは確かめていないので、案内しない。**タスク スケジューラ＋`claude -p`** は、このプラグインの入口（`daily_cycle.sh`）が zsh 前提で Windows 用の入口が無いため、いまは案内しない
+
+**B. 手で回す（A が使えない・うまくいかないときの予備。Mac 以外はこれが基本）**
+
+自動実行は Mac だけと伝え、次のように言うと同じことができる、と案内する（Claude を仕事用フォルダで開いておく）：
+- 朝：「**今日の計画を立てて**」（`/ai-bunshin:daily-plan`）→ 計画ができたら「**続けて今日の分を実行して**」（`/ai-bunshin:daily-do`）
+- 夕方：「**今日の振り返り**」（`/ai-bunshin:daily-review`）
+- 言い忘れた日があっても大丈夫。翌朝にまた言えばよい（営業日でない日や、すでに済んでいる日は、スキルが何もせずに終わることがある）
 
 ## 6. 使い方の案内（最後に短く）
 
