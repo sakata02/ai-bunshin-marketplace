@@ -13,12 +13,17 @@ description: AI 分身の初回セットアップ。新しく使い始める人�
 
 次を確かめ、結果を表で見せる。足りないものは **その場で止め**、本人がコピーして打てるコマンド（`! …` の形）を示す。入れ終わったら「/ai-bunshin:setup」で再開してもらう。
 
+**コマンドの打ち方（最初に1回、この3行をそのまま本人に伝える）**
+- `!` を頭に付けて、Claude の入力欄で打つと、そのコマンドがその場で実行され、結果が会話に出ます（例：`! python3 --version`）。`!` を付けないと、ふつうの文章として AI に送られます
+- Claude を開く前に打つもの（フォルダを作る・プラグインを入れる）や、`!` が効かない画面のときは、`!` を付けずに、Mac は「ターミナル」、Windows は「PowerShell」（Git Bash でもよい）に打つ
+- 例外：カレンダーの URL など **秘密の値を扱うコマンド** は、`!` を使わず、必ずターミナルで打つ（チャットに残さないため）
+
 | 確認 | 方法 | 足りないとき |
 |---|---|---|
-| OS | `uname` | Mac 以外は自動実行が使えない（手動で `/ai-bunshin:daily-plan` などを使う）と伝えて続ける。Windows では hook が `python3` を呼べるか（`python3 --version`）も確かめ、無ければ止めて Python の入れ方を案内する。Windows の朝・夕方の自動実行は、手順5の「Windows の人」を案内する |
-| Python 3 | `python3 --version` | `! brew install python`（Mac）など |
-| openpyxl | `python3 -c "import openpyxl"` | `! python3 -m pip install --user openpyxl`。「externally-managed-environment」と出たら、`! python3 -m venv ~/.ai-bunshin-venv && ~/.ai-bunshin-venv/bin/pip install openpyxl` を案内し、config.json の `path` の先頭に `~/.ai-bunshin-venv/bin`（絶対パス）を入れる |
-| 置き場所 | 今のフォルダが空か、仕事用のフォルダか | 新しいフォルダを作り（`! mkdir -p ~/workspace/<名前>-ai`）、そこでプラグインを入れて（`! cd ~/workspace/<名前>-ai && claude plugin install ai-bunshin@ai-bunshin-marketplace --scope project`）、そのフォルダで claude を起動し直すよう案内する |
+| OS | `uname`（見つからないと出たら Windows とみなす） | Mac 以外は自動実行が使えない（手動で `/ai-bunshin:daily-plan` などを使う）と伝えて続ける。Windows では hook が `python3` を呼べるか（`python3 --version`）も確かめ、無ければ止めて Python の入れ方を案内する。Windows の朝・夕方の自動実行は、手順5の「Windows の人」を案内する |
+| Python 3 | `python3 --version`（Windows で `python3` が無いときは `python --version`、`py -3 --version`） | `! brew install python`（Mac）など。**Windows** は https://www.python.org/downloads/ からインストーラを入れる（入れるとき「Add python.exe to PATH」にチェック）。入れたら Claude を開き直す |
+| openpyxl | `python3 -c "import openpyxl"`（Windows は `py -3 -c "import openpyxl"`） | `! python3 -m pip install --user openpyxl`（Windows は `! py -3 -m pip install --user openpyxl`。`py` が無ければ `python -m pip …`）。「externally-managed-environment」と出たら、`! python3 -m venv ~/.ai-bunshin-venv && ~/.ai-bunshin-venv/bin/pip install openpyxl` を案内し、config.json の `path` の先頭に `~/.ai-bunshin-venv/bin`（絶対パス）を入れる（この venv の手順は Mac 向け。Windows で同じ表示が出たら、`bin` を `Scripts` に読み替えるのが基本だが【未確認】なので、本人と確かめながら進める） |
+| 置き場所 | 今のフォルダが空か、仕事用のフォルダか | 新しいフォルダを作り（`mkdir -p ~/workspace/<名前>-ai`）、そこでプラグインを入れて（`cd ~/workspace/<名前>-ai && claude plugin install ai-bunshin@ai-bunshin-marketplace --scope project`）、そのフォルダで claude を起動し直すよう案内する。**Claude を開き直す前の作業なので、`!` を付けずにターミナル（Windows は PowerShell か Git Bash）で打ってもらう**。古い PowerShell は `&&` が使えないので、1行ずつに分ける。デスクトップアプリの人は、README の「A. デスクトップアプリ」（starter フォルダを開くだけ）の方が簡単 |
 
 ※ インストールのコマンドは AI が実行しない（NG）。本人に打ってもらう。
 
@@ -54,11 +59,11 @@ description: AI 分身の初回セットアップ。新しく使い始める人�
   - **チャットだけで使う人**：claude.ai の設定 → コネクタ（Connectors）→ Google Calendar をオンにして、Google アカウントでログインする。オンにしたら「今日の予定を見せて」で確かめる。config の `calendar` は `{"type": "connector"}`
   - **CLI の人・Mac で朝の自動実行にも予定を入れたい人**：
     1. Google カレンダーの設定 → 対象のカレンダー →「カレンダーの統合」→「iCal 形式の非公開 URL」をコピー（会社の管理者が止めている場合は表示されない。その場合はコネクタの方法にする）
-    2. 先に 1. の URL をコピーしておき、**Claude の入力欄ではなく、Mac の「ターミナル」アプリ** で、コピーした直後に次を打って Enter（URL は合言葉と同じなので、チャットに貼らない。この打ち方なら URL は画面にも履歴にも残らず、末尾に見えない文字が付かない）：`security add-generic-password -a "$USER" -s ai-bunshin-calendar -w "$(pbpaste | tr -d '[:space:]')"`。`-U`（上書き）は付けない（2026-10-30 に `-U` では上書きされなかった。入れ直すときは下の「入れ直すとき」のとおり、消してから入れる）
+    2. 先に 1. の URL をコピーしておき、**Claude の入力欄ではなく（`!` も付けず）、Mac の「ターミナル」アプリ** で、コピーした直後に次を打って Enter（URL は合言葉と同じなので、チャットに貼らない。この打ち方なら URL は画面にも履歴にも残らず、末尾に見えない文字が付かない）：`security add-generic-password -a "$USER" -s ai-bunshin-calendar -w "$(pbpaste | tr -d '[:space:]')"`。`-U`（上書き）は付けない（2026-10-30 に `-U` では上書きされなかった。入れ直すときは下の「入れ直すとき」のとおり、消してから入れる）
        - 入れたあとは、URL がクリップボードに残らないよう、続けて `pbcopy < /dev/null` を打って空にする
     3. config に `"calendar": {"type": "ics", "keychain": "ai-bunshin-calendar", "show": "title"}` を書く（件名を出したくなければ `"show": "time"`）
     4. `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/update_dashboard.py"` を実行し、起動時のまとめに「今日の予定」が出るか確かめる
-    - **入れ直すとき（消してから入れる。消すのは本人が打つ）**：すでに入っていて予定を読めないとき（以前の手順は `-w` の入力欄に URL を貼っていて、URL の末尾に見えない文字が付いて読めなくなった。2026-10-30 に起きた）。次の2つを、Mac の「ターミナル」で **本人が** 打つ（AI は打たない。消すコマンドは本人だけが打つ）：
+    - **入れ直すとき（消してから入れる。消すのは本人が打つ）**：すでに入っていて予定を読めないとき（以前の手順は `-w` の入力欄に URL を貼っていて、URL の末尾に見えない文字が付いて読めなくなった。2026-10-30 に起きた）。次の2つを、Mac の「ターミナル」で（`!` なしで）**本人が** 打つ（AI は打たない。消すコマンドは本人だけが打つ）：
       1. 消す：`security delete-generic-password -s ai-bunshin-calendar`
       2. 入れる：上の 2. と同じ（先に URL をコピーしておき、コピーした直後に打って Enter）：`security add-generic-password -a "$USER" -s ai-bunshin-calendar -w "$(pbpaste | tr -d '[:space:]')"`。そのあと `pbcopy < /dev/null` でクリップボードを空にする
   - **Windows の人**（キーチェーンが無いので、置き場所が違う）：URL を、ユーザーのフォルダ（`C:\Users\<ユーザー名>\`）の直下の `ai-bunshin-calendar-url.txt` に書く。本人のフォルダの外なので、同期や Git に載らない。URL は合言葉と同じなので、チャットには貼らない：
@@ -181,3 +186,4 @@ description: AI 分身の初回セットアップ。新しく使い始める人�
 - お願いへの返事：「T0XX やった」「T0XX は無い」「T0XX はこう変えて」
 - 見る場所：`00_タスク管理/タスク管理.xlsx` と `<呼び方>へのお願い.md`
 - 最初の3日は使用量を測る期間。ときどき `/usage` で残りを見てほしい
+- 分からない言葉（スプリント・ベロシティ・約束pt など）が出たら、「言葉の意味を教えて」と聞けば説明する（`/ai-bunshin:status` の最後の「ことばの説明」）

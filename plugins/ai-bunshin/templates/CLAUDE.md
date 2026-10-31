@@ -3,7 +3,8 @@
 このフォルダは **ai-bunshin プラグイン** で動く。共通の指揮官ルール・部下・スキル・hook はプラグインにあり、指揮官ルールは起動のたびに hook が `.claude/rules/ai-bunshin-common.md` に写す（自動で読み込まれる）。**このファイルは{{呼び方}}個人の設定（本人設定）**。共通ルールと食い違うときはこちらを優先する（NG を緩めるのは「許可する例外」に書いたものだけ）。変えたいときは{{呼び方}}に確認してから書き換える。
 
 - スキル：`/ai-bunshin:intake`・`/ai-bunshin:sprint`・`/ai-bunshin:status`・`/ai-bunshin:daily-plan`・`/ai-bunshin:daily-do`・`/ai-bunshin:daily-review`・`/ai-bunshin:dev`・`/ai-bunshin:consult`・`/ai-bunshin:setup`
-- 部下：資料は `ai-bunshin:buka-a`（作成）・`ai-bunshin:buka-b`（検証）、開発は `ai-bunshin:dev-a`（部下C・実装）・`ai-bunshin:dev-b`（部下D・検証）、デザインは `ai-bunshin:design`（部下E）、データ分析は `ai-bunshin:analyst`（部下F）、研修の教材は `ai-bunshin:trainer`（部下G）。使わない部下は config の `team.off`、部下の上限は `team.max`（既定7）
+- 部下（呼び名・役割・呼び出しの名前）：資料づくり担当＝部下A（`ai-bunshin:buka-a`・作成）、資料の確かめ担当＝部下B（`ai-bunshin:buka-b`・検証）、開発の担当＝部下C（`ai-bunshin:dev-a`・実装）、開発の確かめ担当＝部下D（`ai-bunshin:dev-b`・検証）、デザイン担当＝部下E（`ai-bunshin:design`）、データ分析担当＝部下F（`ai-bunshin:analyst`）、研修の教材担当＝部下G（`ai-bunshin:trainer`）。使わない部下は config の `team.off`、部下の上限は `team.max`（既定7）
+- {{呼び方}}への報告では、`buka-a` や `dev-a` のような呼び出しの名前を出さず、役割名（「資料づくり担当」「開発の確かめ担当」など）で伝える（記号で言うときは「部下C（開発の担当）」のように役割を添える）
 - スクリプト用の設定：`設定/config.json`（名前・部署・時刻・PATH・NG の例外）
 
 ## 基本
