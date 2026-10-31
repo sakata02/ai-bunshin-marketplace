@@ -22,29 +22,47 @@
 （またはその下）なら、作る時点で止める（作ったあとのリンクは、見張りが動く時点ではまだ無く、たどれないため）。
 確かめ方：python3 ng_guard.py --explain "<コマンド>"（今いる場所で判定し、deny／pass と理由を出す。記録も ng_log も書かない）
 
-読み方：先にヒアドキュメントの本文を取り除いてから区切る（本文はデータ。python3 -・bash・sh に渡す本文だけコードとして読む）。
-起動役（xargs・timeout・nice・env・time・nohup・caffeinate・parallel・find -exec など）はほどいて、中のコマンドを読む。
-cd の行き先は to_paths と同じ解き方にし、ワイルドカードの当たりが0個か2個以上・今いる場所が 1024 文字を超えた・cd - のときは
-読み切れない扱いにして、そのあとの読むだけでない操作を止める。
+方式（T058 の決め。2026-10-31 坂田さん「凍結して小さく終える」）：見張りは「前の版（4560a92）より悪くしない」。
+- 前の版の判定（ng_guard_legacy.py。4560a92 の写し）を、すべてのコマンドに当てる。前の版が止めたものは止める
+- 新しい判定（構造で読む・実体で比べる）が止めたものも止める
+- 前の版が止めて新しい判定が通すものは、前の版の当たり方が R1〜R4 だけで、構造で読み切れて、行き先が守っているものの外だと
+  確かめられた形（R1〜R4 の通す側）のときだけ通す。確かめ方は、前の版から R1〜R4 の当たり方だけを外して判定し直し、それでも通ること
+  （R1：名前の部分一致、R2：find -exec の後ろが読むだけ、R3：03_インプット を読むだけ（コマンドが構造で読めるときだけ）、
+  R4：2>/dev/null・2>&1。プラグインのコピーを読むだけ（cat・ls・diff、コピーの中のスクリプトを動かすだけ）も同じ扱い）
+読み方：ヒアドキュメントの本文は、TAG を語全体として読んで取り除いてから区切る（本文はデータ。python3 -・bash・sh に渡す本文だけ
+コードとして読む）。コメント・$(( )) の中の << は見ない。読み切れない形（TAG が読めない・終わりの行が無い・本文をパイプで
+シェルや言語に渡す）は取り除かずに、前の版と同じ全体の判定に任せる。外のセッションでは、本人のフォルダを探すときだけ、
+すべての本文のパスも候補に入れ、見つかったら本文を含めた全体で判定する。
+起動役（xargs・timeout・nice・env・time・nohup・caffeinate・parallel・sudo・find -exec・env -S）はほどいて中のコマンドを読む。
+表に無いコマンドの引数に、書き込み・移動のコマンドの名前が出てきたら、そこから先も中のコマンドとして読む（表に名前を足していかない）。
+cd の行き先は to_paths と同じ解き方にする。ワイルドカードの当たりが2つ以上で守っているものに関わるとき・今いる場所が 1024 文字を
+超えたときは、読み切れない扱いにして、そのあとの読むだけでない操作を止める。
+プラグインのコピー：書き込み先・移動の元・今いる場所を、実体で ~/.claude/plugins と比べる。claude plugin install|update|uninstall と
+claude plugin marketplace add|update|remove は、メンテする人でも止める（本人へのお願い（`! claude plugin update …`）にする）。
 締め切り：5 秒（hooks.json の timeout 10 秒より短い）。hook が時間切れになると Claude Code はコマンドを実行してしまうため。
 超えたら、本人のフォルダの中は止める。外は、記録にある本人のフォルダが文面に出ていれば止め、出ていなければ通す。
+本番では環境変数などで締め切りを変えられない（テストは decide(…, deadline=) の引数で短くする）。
 
-既知の残り（止まらない・誤って止まるのが今の仕様。見張りは AI のうっかりと外からの指示を止める安全ベルトで、完全ではない）
-- 変数・展開・ヒアドキュメントやパイプでシェルに渡す中身・python の変数や書き方違い・書き込みのコマンドの列挙の抜け
-  （sort -o・gzip・split・git checkout <版> -- <ファイル>・git clone・cp -R で外から 03_インプット ごと上書き など）は読み切れない（T092 で ask にする）
-- プラグインのコピーのパスを変数で受け渡してから書く形（X=~/.claude/plugins; echo > $X/a）は止まらない（T092）
-- ~$(whoami) のような展開を含む ~user は解かない（T092）
+既知の残り（止まらない・誤って止まるのが今の仕様。見張りは AI のうっかりと外からの指示を止める安全ベルトで、完全ではない。
+凍結したので、ここから先は強くしない。強くするなら、別に OS の力で守る調べものをする）
+- やらないと決めたもの（T092 にも回さない）：外での `ln -s <親> L && mv L/…`（リンクの元が本人のフォルダの親）、`cd ~+/…`、
+  python の書き方違い（キーワード引数・Path() を挟む・変数や連結）、`Write <外>/<ループするリンク>/../../…` など、部下D の
+  T092 行き・既知の残りの一覧のもの
+- 変数・展開・ヒアドキュメントやパイプでシェルに渡す中身・書き込みのコマンドの列挙の抜け（sort -o・gzip・split・
+  git checkout <版> -- <ファイル>・git clone・cp -R で外から 03_インプット ごと上書き など）は、前の版と同じだけしか止まらない
+- プラグインのコピーのパスを変数で受け渡してから書く形（X=~/.claude/plugins; echo > $X/a）は止まらない（前の版も同じ）
+- ~$(whoami) のような展開を含む ~user は解かない
+- 外のセッションで、node・perl などに本文を渡して本人のフォルダを消す形（node <<EOF … rmSync …）は、前の版と同じく止まらない
+- 外のセッションで、本文に本人のフォルダのパスが出てくるだけのデータ（tee /tmp/s.sh <<EOF … rm -rf <本人のフォルダ> …）も、
+  前の版と同じく本文を含めた全体で判定するので止まる
 - 大文字小文字を区別するディスク（APFS の区別する形式など）では、Write の文字の並びでの比べ方（re.I）が残っているため、
   別物の .CLAUDE/settings.json への Write も止まる。止める側に寄るので許す（指摘10）
 - ハードリンクを探す上限（HARDLINK_SCAN_MAX）は、フォルダの区切りでしか数えていないので、実際には上限を超えて探す
   （20,500 個で 0.11 秒なので速さは問題なし）。上限を超えたところにあるハードリンクは見つからない（指摘12）
-- 外で、本人のフォルダの親（~・~/workspace）へのシンボリックリンクを作るのは止めない（指摘8）。そのリンクを通して、
-  あとの別のコマンドで本人のフォルダを動かす形は、リンクを作った時点では分からない（同じコマンドの中なら、行き先を実体で解いて止める）
-- 本人のフォルダから find . -exec sed -i … のように、起点が 03_インプット を含む形は止めない（起点が 03_インプット の下のときだけ止める）
+- 本人のフォルダから find . -exec sed -i … のように、起点が 03_インプット を含む形は、前の版と同じだけしか止まらない
 - 解けないパス（リンクのループなど）は、動かす・消す元にあるときだけ止める。Write の行き先なら通す（OS も書けないため）
 - Windows など setitimer の無い所では、締め切りを仕掛けられない
-- 外のセッションで、読むだけの区切りの後ろの区切りまで本人の規則を当てる誤停止（T061）。ヒアドキュメントの本文の行頭の語
-  （rm など）で止める誤停止（文書の中の語で止めない。T092）
+- 前の版の誤停止（文書の中の語・外で読み出しの後ろの区切りまで本人の規則を当てるなど）は、R1〜R4 の形のほかは残る（T061）
 """
 import glob
 import json
@@ -61,7 +79,7 @@ DRY_RUN = False  # --explain のとき：見張りの記録（owners.json）に�
 
 # 締め切り（秒）。hook が時間切れになると Claude Code はコマンドを実行してしまう（10/30 指揮官の実験）ので、
 # hooks.json の timeout（10 秒）より短く切り、切れたら fallback_decision で決める（中は止める）。
-# 環境変数 NG_GUARD_DEADLINE は、テストのために短くするときだけ効く（長くはできない）。
+# 本番では環境変数などから変えられない。テストは decide(…, deadline=) の引数で短くする（長くはできない）。
 DEADLINE_SEC = 5.0
 
 
@@ -69,12 +87,13 @@ class DeadlineExceeded(BaseException):
     """締め切りを超えた（except Exception で受けられないよう BaseException にする）。"""
 
 
-def deadline_seconds():
+def deadline_seconds(sec=None):
+    """締め切りの秒。引数で短くできる（テスト用）。DEADLINE_SEC より長く・0 以下・数でない値は DEADLINE_SEC。"""
     try:
-        v = float(os.environ.get("NG_GUARD_DEADLINE", DEADLINE_SEC))
+        v = float(DEADLINE_SEC if sec is None else sec)
     except (TypeError, ValueError):
-        v = DEADLINE_SEC
-    return min(DEADLINE_SEC, v) if v > 0 else DEADLINE_SEC
+        return DEADLINE_SEC
+    return v if 0 < v < DEADLINE_SEC else DEADLINE_SEC
 
 
 def start_deadline(sec):
@@ -238,7 +257,7 @@ def path_forms(p, base=None):
         t = os.path.expanduser(os.fspath(p))
         if base is not None and not os.path.isabs(t):
             t = os.path.join(base, t)
-        a = os.path.abspath(t)
+        a = fast_abspath(t)
         out = {nfc(a)}
         ra = fast_realpath(a)
         out.add(nfc(ra))  # 文字の上で .. をたどった形も見る（止める側）
@@ -248,6 +267,22 @@ def path_forms(p, base=None):
         out = frozenset()
     _FORMS[key] = out
     return out
+
+
+def fast_abspath(t):
+    """os.path.abspath と同じ結果。すでに整った絶対パス（// ・ /. ・ 末尾の / が無い）なら、そのまま返す（長いパスで遅くしない）。"""
+    if t.startswith("/") and "//" not in t and "/." not in t and (len(t) == 1 or not t.endswith("/")):
+        return t
+    return os.path.abspath(t)
+
+
+def join_norm(cwd, dest):
+    """os.path.normpath(os.path.join(cwd, dest)) と同じ結果。cwd が整っていて dest が単純な名前の並びなら、つなぐだけ。"""
+    if (cwd.startswith("/") and "//" not in cwd and "/." not in cwd and (len(cwd) == 1 or not cwd.endswith("/"))
+            and dest and not dest.startswith("/") and "//" not in dest and not dest.endswith("/")
+            and all(x not in (".", "..", "") for x in dest.split("/"))):
+        return cwd.rstrip("/") + "/" + dest
+    return os.path.normpath(os.path.join(cwd, dest))
 
 
 _REAL = {}
@@ -819,8 +854,8 @@ BODY_RECEIVERS = re.compile(r"^(?:python[\d.]*|bash|sh|zsh|dash|ksh)$")  # 本�
 
 def unwrap(words, cwd):
     """頭に付く語と起動役（xargs・timeout・nice・env・time・nohup・caffeinate・parallel・sudo など）をほどく。
-    (中のコマンドの位置, 今いる場所, 起動役があったか)。env -C／--chdir は今いる場所を変える。"""
-    i, launched = 0, False
+    (中のコマンドの位置, 今いる場所, 起動役があったか, env -S の文字列)。env -C／--chdir は今いる場所を変える。"""
+    i, launched, split = 0, False, None
     while i < len(words):
         w = words[i]
         if w in KEYWORDS or ASSIGN.match(w):
@@ -841,6 +876,10 @@ def unwrap(words, cwd):
                 if name == "env" and (x in ("-C", "--chdir") or x.startswith("--chdir=")):
                     d = x.split("=", 1)[1] if "=" in x else (words[i + 1] if i + 1 < len(words) else "")
                     cwd = os.path.normpath(os.path.join(cwd, d)) if d else cwd
+                if name == "env" and (x in ("-S", "--split-string") or x.startswith("--split-string=") or
+                                      (x.startswith("-S") and len(x) > 2)):
+                    split = x.split("=", 1)[1] if x.startswith("--split-string=") else (
+                        x[2:] if x.startswith("-S") and len(x) > 2 else (words[i + 1] if i + 1 < len(words) else ""))
                 i += 2 if (x in vals and "=" not in x) else 1
                 continue
             if name == "env" and ASSIGN.match(x):
@@ -851,7 +890,30 @@ def unwrap(words, cwd):
                 i += 1
                 continue
             break
-    return i, cwd, launched
+    return i, cwd, launched, split
+
+
+# 起動役の表に無いコマンド（chrt・ionice・doas・script・unbuffer・arch・taskpolicy・sandbox-exec・watch・flock・gtimeout・npx など）の
+# 引数に、書き込み・移動のコマンドの名前が出てきたら、そこから先を中のコマンドとしても読む（表に名前を足していかない。T058 の決め）。
+# 引数を自分で解釈するだけのコマンド（echo・grep・git など）は除く
+INNER_CMDS = {"mv", "cp", "gcp", "rm", "rmdir", "unlink", "ln", "link", "tee", "touch", "mkdir", "install", "ditto", "rsync",
+              "truncate", "dd", "unzip", "tar", "sed", "gsed", "perl", "ruby", "node", "python", "python3", "bash", "sh",
+              "zsh", "dash", "ksh", "fish", "find", "xargs", "chmod", "chown", "chgrp", "chflags", "shred", "srm", "trash",
+              "env", "eval", "rename", "patch", "zip", "gzip", "split", "sort", "git", "curl", "wget", "scp"}
+NON_LAUNCHERS = {"", "echo", "printf", "grep", "egrep", "fgrep", "rg", "git", "man", "which", "type", "help", "whatis",
+                 "apropos", "cat", "less", "more", "head", "tail", "wc", "ls", "diff", "cmp", "comm", "sort", "uniq",
+                 "cut", "tr", "awk", "sed", "gsed", "perl", "ruby", "node", "python", "python3", "bash", "sh", "zsh",
+                 "dash", "ksh", "fish", "cd", "pushd", "popd", "test", "[", "true", "false", "jq", "open", "say",
+                 "osascript", "claude", "gh", "npm", "yarn", "pnpm", "pip", "pip3", "brew", "make", "docker", "kubectl",
+                 "ssh", "tmux", "find", "xargs", "env", "eval", "read", "export", "set", "unset", "source", ".",
+                 "local", "declare", "alias", "history", "date", "sleep", "stat", "file", "du", "df", "pwd", "realpath",
+                 "readlink", "basename", "dirname", "mkdir", "touch", "cp", "mv", "rm", "ln", "tee", "chmod", "tar",
+                 "unzip", "zip", "curl", "wget", "security", "plutil", "launchctl", "defaults", "mdls", "md5", "shasum",
+                 "base64", "od", "xxd", "strings", "nl", "column", "fold", "fmt", "expand", "paste", "join", "seq",
+                 "yes", "for", "case", "function", "return", "exit", "break", "continue", "trap", "wait", "kill",
+                 "time", "nice", "timeout", "nohup", "caffeinate", "parallel", "sudo", "stdbuf", "command", "builtin",
+                 "exec", "printenv", "whoami", "id", "uname", "hostname", "sw_vers", "ps", "pgrep", "lsof", "top",
+                 "code", "vim", "vi", "nano", "emacs", "pbcopy", "pbpaste", "afplay", "mdfind", "shellcheck", "bc"}
 
 
 class Part:
@@ -861,8 +923,9 @@ class Part:
         self.text, self.cwd, self.words = text, cwd, words
         self.cwd_unknown = cwd_unknown
         self.body = body
+        self.guessed = False  # 表に無い起動役の引数から推し量って読んだ部分か
         clean, self.redirs = split_redirs(words)
-        i, self.cwd, self.launched = unwrap(clean, cwd)
+        i, self.cwd, self.launched, self.env_split = unwrap(clean, cwd)
         self.cmd = os.path.basename(clean[i]) if i < len(clean) else ""
         args = [a for a in clean[i + 1:] if a not in (")", "}", ";;")]
         if self.cmd == "parallel" or (self.launched and ":::" in args):
@@ -870,7 +933,7 @@ class Part:
         self.args = args
         self.extra_words = []
         if body and BODY_RECEIVERS.match(self.cmd):
-            # python3 -・bash・sh に渡す本文は、前の版と同じくコードとして読む（ask は T092）
+            # python3 -・bash・sh に渡す本文は、前の版と同じくコードとして読む
             self.text = text + "\n" + body
             self.extra_words = seg_words(body)
         if not lex_ok or (body and BODY_RECEIVERS.match(self.cmd)):  # 語に分けきれない：文字の並びからも向け先を拾う
@@ -894,31 +957,77 @@ class Part:
         return self.words + self.extra_words
 
     def find_starts(self):
-        starts = []
-        for x in self.args:
+        """find の起点。前に付くオプション（-L・-H・-P・-x・-E・-s・-X・-O<n>・-D <値>・-f <起点>）を読み飛ばす（指摘5）。"""
+        a, k, starts = self.args, 0, []
+        while k < len(a):
+            x = a[k]
+            if x in ("-L", "-H", "-P", "-x", "-E", "-s", "-X") or re.match(r"^-O\d*$", x):
+                k += 1
+                continue
+            if x == "-D" and k + 1 < len(a):
+                k += 2
+                continue
+            if x == "-f" and k + 1 < len(a):
+                starts.append(a[k + 1])
+                k += 2
+                continue
+            break
+        for x in a[k:]:
             if x.startswith("-") or x in ("(", "!", ")"):
                 break
             starts.append(x)
         return starts or ["."]
 
+    def find_outputs(self):
+        """find の -fprint・-fprint0・-fprintf・-fls の書き込み先（指摘5）。"""
+        a = self.args
+        return [a[k + 1] for k, x in enumerate(a[:-1]) if x in ("-fprint", "-fprint0", "-fprintf", "-fls")]
+
 
 class Analysis:
     def __init__(self):
         self.groups = []      # [(区切りごとのテキスト, [Part])]
-        self.parts = []       # すべての Part（bash -c・eval の中身、find -exec の中身も）
+        self.parts = []       # すべての Part（bash -c・eval の中身、find -exec の中身、推し量った中身も）
         self.nwords = 0
         self.too_long = False
         self.bodies = []      # ヒアドキュメントの本文
+        self.unreadable = False  # ヒアドキュメントを読み切れない（前の版と同じ全体の判定に任せる）
 
 
-HEREDOC_OP = re.compile(r"(?<!<)<<(?!<)(-?)[ \t]*(?:'([^'\n]+)'|\"([^\"\n]+)\"|\\?([A-Za-z_][\w.-]*))")
+HEREDOC_STOP = set(" \t\n;&|<>()")
+
+
+def _heredoc_word(text, i):
+    """<<（と -）の後ろの語を読む。(終わりの位置, 引用符を外した TAG)。語全体を1つの TAG として読む（<<E"OF" は EOF）。"""
+    n, out = len(text), []
+    while i < n and text[i] in " \t":
+        i += 1
+    while i < n and text[i] not in HEREDOC_STOP:
+        c = text[i]
+        if c in "'\"":
+            j = text.find(c, i + 1)
+            if j < 0:
+                return i, ""
+            out.append(text[i + 1:j])
+            i = j + 1
+            continue
+        if c == "\\" and i + 1 < n:
+            out.append(text[i + 1])
+            i += 2
+            continue
+        if c == "$" or c == "`":
+            return i, ""  # 展開を含む TAG は読み切れない
+        out.append(c)
+        i += 1
+    return i, "".join(out)
 
 
 def strip_heredocs(text):
-    """ヒアドキュメントの本文（<<TAG の次の行から TAG の行まで）を取り除く。(本文を除いたコマンド, 本文のリスト（出てくる順）)。
-    <<< は対象外。引用符の中の << は見ない。終わりの行が無ければ、最後までを本文とする（シェルと同じ）。"""
+    """ヒアドキュメントの本文（<<TAG の次の行から TAG の行まで）を取り除く。(本文を除いたコマンド, 本文のリスト, 読み切れたか)。
+    TAG は語全体（<<E"OF"・<<'E'OF・<<\\EOF は EOF）。<<<・引用符の中・コメント（# の後ろ）・$(( )) と (( )) の中の << は見ない。
+    TAG が読めない・終わりの行が無い・本文をシェルや python にパイプで渡すときは、読み切れない（取り除かない）。"""
     if "<<" not in text:
-        return text, []
+        return text, [], True
     out, bodies, pending = [], [], []
     i, n, q = 0, len(text), None
     while i < n:
@@ -939,40 +1048,83 @@ def strip_heredocs(text):
             continue
         if c in "'\"":
             q = c
+        elif c == "#" and (i == 0 or text[i - 1] in " \t\n;&|("):
+            j = text.find("\n", i)
+            j = n if j < 0 else j
+            out.append(text[i:j])  # コメントは行の終わりまで、そのまま
+            i = j
+            continue
+        elif text.startswith("$((", i) or (text.startswith("((", i) and (i == 0 or text[i - 1] in " \t\n;&|(")):
+            k = i + (3 if text[i] == "$" else 2)
+            depth = 2
+            while k < n and depth > 0:
+                if text[k] == "(":
+                    depth += 1
+                elif text[k] == ")":
+                    depth -= 1
+                k += 1
+            if depth > 0:
+                return text, [], False
+            out.append(text[i:k])  # 計算の中の << は、ヒアドキュメントではない
+            i = k
+            continue
         elif text.startswith("<<", i) and not text.startswith("<<<", i):
-            m = HEREDOC_OP.match(text, i)
-            if m:
-                pending.append((next(g for g in m.groups()[1:] if g is not None), m.group(1) == "-"))
-                out.append(m.group(0))
-                i = m.end()
-                continue
+            j = i + 2
+            dash = j < n and text[j] == "-"
+            j += 1 if dash else 0
+            end, tag = _heredoc_word(text, j)
+            if not tag:
+                return text, [], False
+            pending.append((tag, dash))
+            out.append(text[i:end])
+            i = end
+            continue
         elif c == "\n" and pending:
             out.append("\n")
             i += 1
             for tag, dash in pending:
-                lines = []
+                lines, found = [], False
                 while i < n:
                     j = text.find("\n", i)
                     line = text[i:j] if j >= 0 else text[i:]
                     i = j + 1 if j >= 0 else n
                     if (line.lstrip("\t") if dash else line) == tag:
+                        found = True
                         break
                     lines.append(line)
+                if not found:
+                    return text, [], False
                 bodies.append("\n".join(lines))
             pending = []
             continue
         out.append(c)
         i += 1
-    return "".join(out), bodies
+    if pending:
+        return text, [], False
+    stripped = "".join(out)
+    if bodies and re.search(r"<<[^\n]*\|\s*(?:\S*/)?(?:(?:ba|z|da|k|fi)?sh|python[\d.]*|perl|ruby|node)\b", stripped):
+        return text, [], False  # 本文をパイプでシェル・言語に渡す（前の版と同じ全体の判定に任せる）
+    return stripped, bodies, True
 
 
 MAX_CWD = 1024  # 今いる場所がこれより長くなったら、読み切れない扱い（指摘3）
 UNKNOWN_CWD = "/\x00(今いる場所を読み切れない)"  # このパスの下は解かない（stat も glob も失敗する）
 
 
+def _guarded_place(d):
+    """d が、守っているもの（本人のフォルダの印・03_インプット・.claude の設定・記録・プラグインのコピー）か、それを含むか、その下か。"""
+    owners = owner_roots(None)
+    forms = path_forms(d)
+    for t in content_targets(owners) + holder_targets(owners)[len(owners):]:
+        if any(t.covers(f) or t.within(f) for f in forms):
+            return True
+    return False
+
+
 def resolve_cd(dest, cwd):
     """cd の行き先を to_paths と同じ解き方で決める（~・$HOME・ワイルドカード）。(新しい場所, 読み切れないか)。
-    ワイルドカードの当たりが1つならそれ、0個か2個以上なら読み切れない（止める側に倒す。T092 で ask）。"""
+    ワイルドカードの当たりが1つならそれ。2つ以上なら、どれかが守っているものに関わるときだけ読み切れない（止める側）、
+    関わらなければ1つ目。0個なら、その文字のまま（cd は失敗する）。長すぎるときは読み切れない。"""
     if cwd == UNKNOWN_CWD and not os.path.isabs(os.path.expanduser(dest)):
         return UNKNOWN_CWD, True
     t = os.path.expanduser(dest)
@@ -982,10 +1134,11 @@ def resolve_cd(dest, cwd):
             hits = [h for h in glob.glob(full) if os.path.isdir(h)]
         except (OSError, ValueError, re.error):
             hits = []
-        if len(hits) != 1:
+        if len(hits) >= 2 and any(_guarded_place(h) for h in hits[:50]):
             return UNKNOWN_CWD, True
-        full = hits[0]
-    new = os.path.normpath(full)
+        if hits:
+            full = sorted(hits)[0]
+    new = join_norm(cwd, t) if (full == os.path.join(cwd, t) and not os.path.isabs(t)) else os.path.normpath(full)
     if len(new) > MAX_CWD:
         return UNKNOWN_CWD, True
     return new, False
@@ -994,19 +1147,32 @@ def resolve_cd(dest, cwd):
 _ANALYZED = {}
 
 
+def _add_inner(an, words, cwd, depth, top):
+    """語のリストを、中のコマンドとして読み足す。足した部分は「起動役あり」。"""
+    before = len(an.parts)
+    analyze(" ".join(shlex.quote(w) for w in words), cwd, an, depth + 1, top)
+    for sp in an.parts[before:]:
+        sp.launched = True
+    return an.parts[before:]
+
+
 def analyze(command, cwd, an=None, depth=0, top=None):
     """コマンドを区切り・パイプに分け、cd の行き先を順にたどって、各コマンドの今いる場所と語を出す。
-    先にヒアドキュメントの本文を取り除き（本文はデータ。python3 -・bash・sh に渡すものだけコードとして読む）、
-    起動役（xargs・timeout・find -exec など）をほどく。同じコマンドと場所は1回だけ解く（R9）。"""
+    先にヒアドキュメントの本文を取り除き（本文はデータ。python3 -・bash・sh に渡すものだけコードとして読む。読み切れなければ
+    前の版と同じく全体を1つにする）、起動役（xargs・timeout・find -exec・env -S など）をほどく。同じコマンドと場所は1回だけ解く（R9）。"""
     if an is None and depth == 0 and top is None:
         key = (command, cwd)
         if key not in _ANALYZED:
             _ANALYZED[key] = analyze(command, cwd, Analysis(), 0, None)
         return _ANALYZED[key]
-    stripped, bodies = strip_heredocs(command)
+    stripped, bodies, readable = strip_heredocs(command)
+    if not readable:
+        an.unreadable = True
+        return an  # 前の版と同じ全体の判定（ng_guard_legacy）に任せる。構造の判定はしない
     an.bodies += bodies
     bodies = list(bodies)
     unknown = cwd == UNKNOWN_CWD
+    prev_cwd = cwd
     for g in split_top(stripped):
         parts = []
         for pt in split_top(g, pipes=True):
@@ -1014,26 +1180,33 @@ def analyze(command, cwd, an=None, depth=0, top=None):
             words = [expand(w, cwd) for w in raw]
             an.nwords += len(words)
             an.too_long = an.nwords > MAX_WORDS
-            nb = len(HEREDOC_OP.findall(pt)) if "<<" in pt else 0
+            nb = len(re.findall(r"(?<!<)<<(?!<)", pt)) if "<<" in pt else 0
             body = "\n".join(bodies.pop(0) for _ in range(min(nb, len(bodies))))
             p = Part(pt, cwd, words, ok, body, unknown)
             p.top = top if top is not None else g
             parts.append(p)
             an.parts.append(p)
-            for sub in p.find_execs:  # find -exec の中のコマンドを、別のコマンドとして読む（{} は起点に置き換える）
-                for s in p.find_starts()[:20]:
-                    sw = [x.replace("{}", s) for x in sub]
-                    sp = Part(" ".join(sw), p.cwd, sw, True, "", unknown)
-                    sp.top, sp.launched = p.top, True
-                    an.parts.append(sp)
+            if depth < 4:
+                for sub in p.find_execs:  # find -exec の中のコマンドを、別のコマンドとして読む（{} は起点に置き換える）
+                    for s in p.find_starts()[:20]:
+                        _add_inner(an, [x.replace("{}", s) for x in sub], p.cwd, depth, p.top)
+                if p.env_split:  # env -S '<コマンド>'
+                    _add_inner(an, seg_words(p.env_split) + p.args, p.cwd, depth, p.top)
+                if p.cmd not in NON_LAUNCHERS and p.cmd not in INNER_CMDS and not p.launched:
+                    k = next((k for k, a in enumerate(p.args) if os.path.basename(a) in INNER_CMDS), None)
+                    if k is not None:
+                        for sp in _add_inner(an, p.args[k:], p.cwd, depth, p.top):
+                            sp.guessed = True
             if p.cmd in ("cd", "pushd"):
                 dest = next((a for a in p.args if not a.startswith("-") or a == "-"), None)
+                old = cwd
                 if dest is None:
                     cwd, unknown = os.path.expanduser("~"), False
                 elif dest == "-":
-                    cwd, unknown = UNKNOWN_CWD, True  # cd -（前の場所）は読み切れない
+                    cwd, unknown = prev_cwd, prev_cwd == UNKNOWN_CWD  # cd -：ひとつ前の場所
                 else:
                     cwd, unknown = resolve_cd(dest, cwd)
+                prev_cwd = old
             if depth < 3:
                 if p.cmd in ("bash", "sh", "zsh"):
                     for k, a in enumerate(p.args[:-1]):
@@ -1090,30 +1263,51 @@ PY_CALL = r"(?:os\.(?:rename|renames|replace|remove|unlink|rmdir|removedirs)|shu
 PY_METHOD = r"\s*\.(?:rename|replace|rmdir|unlink)\("
 
 
+_PY_LIT = r"(?:[rbuRBU]{1,2})?(?:'([^'\n]*)'|\"([^\"\n]*)\")"  # 引用符つき文字列（中身は2つの組のどちらか）
+_PY_RX = [re.compile(PY_CALL + r"(?:" + _PY_LIT + r"|(" + PY_CWD + r"))"),
+          re.compile(r"(?:pathlib\.)?Path\(\s*" + _PY_LIT + r"\s*\)" + PY_METHOD),
+          re.compile(PY_CWD + PY_METHOD),
+          re.compile(r"\b([A-Za-z_]\w*)" + PY_METHOD),
+          re.compile(r"\b([A-Za-z_]\w*)\s*=\s*(?:pathlib\.)?Path\(\s*" + _PY_LIT + r"\s*\)"),
+          re.compile(r"\b([A-Za-z_]\w*)\s*=\s*" + PY_CWD)]
+_PY_SOURCES = {}
+
+
 def python_sources(code):
-    """python のコードの中で、動かす・消す対象になっている文字列（今いる場所は "."）。"""
-    lit = r"(?:[rbuRBU]{1,2})?(?:'([^'\n]*)'|\"([^\"\n]*)\")"  # 引用符つき文字列（中身は2つの組のどちらか）
+    """python のコードの中で、動かす・消す対象になっている文字列（今いる場所は "."）。同じコードは1回だけ調べる。"""
+    r = _PY_SOURCES.get(code)
+    if r is not None:
+        return list(r)
     out = []
-    for m in re.finditer(PY_CALL + r"(?:" + lit + r"|(" + PY_CWD + r"))", code):
-        out.append("." if m.group(3) else (m.group(1) if m.group(1) is not None else m.group(2)))
-    for m in re.finditer(r"(?:pathlib\.)?Path\(\s*" + lit + r"\s*\)" + PY_METHOD, code):
-        out.append(m.group(1) if m.group(1) is not None else m.group(2))
-    for m in re.finditer(PY_CWD + PY_METHOD, code):
-        out.append(".")
-    # 変数に入れてからメソッドを呼ぶ形。メソッドを呼んでいる変数を先に1回で集める（変数ごとに全体を探すと長さの2乗になる。指摘3）
-    called = {m.group(1) for m in re.finditer(r"\b([A-Za-z_]\w*)" + PY_METHOD, code)}
-    if called:
-        for m in re.finditer(r"\b([A-Za-z_]\w*)\s*=\s*(?:pathlib\.)?Path\(\s*" + lit + r"\s*\)", code):
-            if m.group(1) in called:
-                out.append(m.group(2) if m.group(2) is not None else m.group(3))
-        for m in re.finditer(r"\b([A-Za-z_]\w*)\s*=\s*" + PY_CWD, code):
-            if m.group(1) in called:
-                out.append(".")
-    return [s.rstrip("\\") for s in out if s]
+    if "(" in code:
+        for m in _PY_RX[0].finditer(code):
+            out.append("." if m.group(3) else (m.group(1) if m.group(1) is not None else m.group(2)))
+        for m in _PY_RX[1].finditer(code):
+            out.append(m.group(1) if m.group(1) is not None else m.group(2))
+        for m in _PY_RX[2].finditer(code):
+            out.append(".")
+        # 変数に入れてからメソッドを呼ぶ形。メソッドを呼んでいる変数を先に1回で集める（長さの2乗にしない。指摘3）
+        called = {m.group(1) for m in _PY_RX[3].finditer(code)}
+        if called:
+            for m in _PY_RX[4].finditer(code):
+                if m.group(1) in called:
+                    out.append(m.group(2) if m.group(2) is not None else m.group(3))
+            for m in _PY_RX[5].finditer(code):
+                if m.group(1) in called:
+                    out.append(".")
+    r = _PY_SOURCES[code] = tuple(x.rstrip("\\") for x in out if x)
+    return list(r)
 
 
 def move_sources(p):
-    """Part が動かす・消すもの：(元の文字列のリスト, mv の行き先 or None, 基準の場所)。"""
+    """Part が動かす・消すもの：(元の文字列のリスト, mv の行き先 or None, 基準の場所)。1つの Part につき1回だけ解く。"""
+    r = getattr(p, "_moves", None)
+    if r is None:
+        r = p._moves = _move_sources(p)
+    return list(r[0]), r[1], r[2]
+
+
+def _move_sources(p):
     c, a, base = p.cmd, p.args, p.cwd
     if c == "git":
         i, sub = 0, ""
@@ -1287,7 +1481,9 @@ def write_targets(p):
             out.append(_opt_value(a, ("-C",), ("--directory",)) or ".")
         if "--remove-files" in a:
             out += na
-    elif c == "find" and any(os.path.basename(sub[0]) not in FIND_READ_ONLY for sub in p.find_execs):
+    if c == "find":
+        out += p.find_outputs()  # -fprint などの書き込み先（指摘5）
+    if c == "find" and any(os.path.basename(sub[0]) not in FIND_READ_ONLY for sub in p.find_execs):
         out += p.find_starts()  # find 03_インプット -exec <読むだけでないコマンド>：起点を書き込み先とみなす（指摘2）
     srcs, dest, _ = move_sources(p)  # 動かす・消す元（mv・git mv・find -delete・zip -m・python の os.rename など）
     out += srcs
@@ -1531,6 +1727,17 @@ def roots_from_input(payload):
         return []
     flat = normalize(inp["command"])
     an = analyze(flat, base)
+    if an.bodies:  # 本人のフォルダを探すときだけ、すべての本文のパスも候補に入れる。見つかれば本文を含めた全体で判定する
+        found = {}
+        for body in an.bodies:
+            for w in seg_words(body)[:MAX_WORDS]:
+                for t in word_texts(w):
+                    for f in to_paths(t, base):
+                        r = find_owner(f) or hardlink_owner(f, recs)
+                        if r is not None:
+                            found[str(r)] = r
+        if found:
+            return [(r, None) for r in found.values()]
     if an.too_long:  # 確かめきれない長さ：記録にあるすべての本人のフォルダで、全体を判定する（止める側）
         seen, out = set(), []
         for _, r in recs:
@@ -1733,7 +1940,7 @@ def _plain_read(g):
         words = split_redirs(seg_words(g))[0]
     except Exception:
         return False
-    i, _, _ = unwrap(words, "/")
+    i, _, _, _ = unwrap(words, "/")
     return i < len(words) and os.path.basename(words[i]) in READ_ONLY_CMDS - {"cd", "pushd"}
 
 
@@ -1756,7 +1963,7 @@ def plugin_bash_check(command, root):
                     parts = g.split()
                     if ".claude/plugins" in parts[-2] and ".claude/plugins" not in parts[-1]:
                         continue
-                return "プラグインのコピーの書き換え（Claude Code が読み込む共通部分。元を直して更新する）"
+                return PLUGIN_COPY_LABEL
             if mentions and not _plain_read(g):
                 tainted = True
     if root is not None and not is_maintainer(root):  # 元の保護は本人のフォルダの中だけ（ほかのプロジェクトでは誰がメンテする人か分からない）
@@ -1772,8 +1979,44 @@ def plugin_bash_check(command, root):
 NO_EXCEPTION_LABELS = ("プラグインのコピーの書き換え", "共通部分（プラグインの元）の書き換え", "見張りの記録",
                        "本人のフォルダそのものを動かす・消す", "保護しているものへのリンク")
 RECORDS_LABEL = "見張りの記録（~/.ai-bunshin/）の書き換え（本人のフォルダを覚えておく所。消すと見張りが外れる）"
-PLUGIN_COPY_LABEL = "プラグインのコピーの書き換え（Claude Code が読み込む共通部分。元を直して更新する）"
+PLUGIN_COPY_LABEL = "プラグインのコピーの書き換え（Claude Code が読み込む共通部分。元を直し、入れ替えは本人へのお願い（`! claude plugin update …`）にする）"
+PLUGIN_UPDATE_LABEL = "プラグインのコピーの書き換え（claude plugin の入れる・更新・外す。本人へのお願い（`! claude plugin update …`）にする）"
 WRITE_TOOLS = ("Write", "Edit", "MultiEdit", "NotebookEdit")
+
+
+GIT_WRITE_SUBS = {"pull", "fetch", "checkout", "switch", "reset", "merge", "rebase", "cherry-pick", "revert", "commit",
+                  "add", "rm", "mv", "restore", "stash", "clean", "apply", "am", "init", "clone", "submodule", "worktree",
+                  "gc", "prune", "update-index", "read-tree", "config"}
+CLAUDE_PLUGIN_CHANGE = re.compile(r"^(?:install|i|update|uninstall|remove|rm)$")
+CLAUDE_MARKET_CHANGE = re.compile(r"^(?:add|update|remove|rm)$")
+
+
+def plugin_write_hit(an):
+    """プラグインのコピー（~/.claude/plugins/）への書き込みを、書き込み先・移動の元・今いる場所を実体で比べて止める（指摘4）。
+    cd してからの touch・~/.claude//plugins・大文字小文字・git -C … pull も止まる。
+    claude plugin install|update|uninstall と claude plugin marketplace add|update|remove は、メンテする人でも止める
+    （コピーを入れ替えるのは本人。本人へのお願い（`! claude plugin update …`）にする）。"""
+    plug = target(plugins_dir())
+    for p in an.parts:
+        if p.cmd == "claude" and p.args[:1] == ["plugin"] and len(p.args) >= 2 and (
+                CLAUDE_PLUGIN_CHANGE.match(p.args[1]) or
+                (p.args[1] == "marketplace" and len(p.args) >= 3 and CLAUDE_MARKET_CHANGE.match(p.args[2]))):
+            return PLUGIN_UPDATE_LABEL
+        texts = list(write_targets(p))
+        if p.cmd == "git":
+            sub = next((a for k, a in enumerate(p.args) if not a.startswith("-") and
+                        (k == 0 or p.args[k - 1] not in ("-C", "-c", "--git-dir", "--work-tree"))), "")
+            if sub in GIT_WRITE_SUBS:
+                cdir = _opt_value(p.args, ("-C",), ())
+                texts.append((cdir or ".", p.cwd))
+        for text, base in texts:
+            for w in word_texts(text):
+                for f in to_paths(w, base):
+                    if plug.covers(f):
+                        return PLUGIN_COPY_LABEL
+        if p.cwd != UNKNOWN_CWD and p.cmd and p.cmd not in READ_ONLY_CMDS and covers_any(plug, path_forms(p.cwd)):
+            return PLUGIN_COPY_LABEL  # コピーの中に入って、読むだけでないコマンドを動かす
+    return None
 
 
 def global_check(payload, root):
@@ -1796,6 +2039,9 @@ def global_check(payload, root):
             return label, command, (r if r is not None else root)
         if link_hit(an, root):
             return LINK_LABEL, command, root
+        plug = plugin_write_hit(an)
+        if plug:
+            return plug, command, root
     elif tool in WRITE_TOOLS:
         path = inp.get("file_path") or inp.get("notebook_path") or ""
         if path:
@@ -1885,8 +2131,8 @@ def deny(label, what, root, tool=None):
                                              "permissionDecisionReason": reason}}, ensure_ascii=False))
 
 
-def judge(payload):
-    """判定する。None（当たらない）か、(判定 "deny"／"allow"（本人の許可する例外で通す）, ラベル, 対象, ログを書く本人のフォルダ)。"""
+def judge_new(payload):
+    """新しい判定（構造で読む）。None（当たらない）か、(判定 "deny"／"allow"（本人の許可する例外で通す）, ラベル, 対象, ログを書く本人のフォルダ)。"""
     root = project_dir(payload)
     _SEEN["root"] = root
     hit = global_check(payload, root)  # プラグイン・見張りの記録・本人のフォルダそのもの・リンク（どこからでも）
@@ -1910,6 +2156,189 @@ def judge(payload):
     if log_root is not None and not label.startswith(NO_EXCEPTION_LABELS) and any(p.search(what) for p in allow_patterns(log_root)):
         return "allow", label, what, log_root
     return "deny", label, what, log_root
+
+
+# ---- 前の版（4560a92）の判定を重ねる（T058 の決め：前の版より悪くしない）----
+# 前の版が止めたものは、原則として止める。通すのは、前の版の当たり方が R1〜R4 だけで、構造で読み切れて、
+# 行き先が守っているものの外だと確かめられた形（R1〜R4 の通す側）だけ。
+
+_LEGACY = None
+_LEGACY_FORMS = {}
+_LEGACY_TO_PATHS = {}
+_LEGACY_OWNER_OF = {}
+
+
+def _legacy_path_forms(p, base=None):
+    """前の版と同じ形（abspath と realpath(abspath)）。深い場所を何度も解いても長さの2乗にしない。"""
+    key = (p if isinstance(p, str) else os.fspath(p) if isinstance(p, os.PathLike) else repr(p), base)
+    r = _LEGACY_FORMS.get(key)
+    if r is None:
+        try:
+            t = os.path.expanduser(os.fspath(p))
+            if base is not None and not os.path.isabs(t):
+                t = os.path.join(base, t)
+            a = fast_abspath(t)
+            r = {nfc(a), nfc(fast_realpath(a))}
+        except (OSError, ValueError, TypeError):
+            r = set()
+        _LEGACY_FORMS[key] = r
+    return set(r)
+
+
+def _legacy_owner_of(d, recs):
+    """前の版の find_owner の1つの道の分（d から上にたどって、印か記録のあるフォルダ）。たどった結果を覚えておく。"""
+    L = _LEGACY
+    chain_, cur = [], d
+    while True:
+        key = str(cur)
+        if key in _LEGACY_OWNER_OF:
+            found = _LEGACY_OWNER_OF[key]
+            break
+        if L.is_owner_dir(cur):
+            found = ("mark", cur)
+            break
+        if nfc(key) in recs:
+            found = ("rec", cur)
+            break
+        chain_.append(key)
+        parent = cur.parent
+        if parent == cur:
+            found = None
+            break
+        cur = parent
+    for k in chain_:
+        _LEGACY_OWNER_OF[k] = found
+    return found
+
+
+def _legacy_find_owner(path):
+    L = _LEGACY
+    recs = set(L.load_records())
+    for f in sorted(L.path_forms(path)):
+        found = _legacy_owner_of(Path(f), recs)
+        if found is not None:
+            kind, d = found
+            if kind == "mark":
+                remember_owner(d)
+            return L._resolved(d)
+    return None
+
+
+def legacy():
+    """前の版の判定（ng_guard_legacy.py）を読み込む。速さと例外への強さの部品だけ、こちらのものに差し替える（判定は同じ）。"""
+    global _LEGACY
+    if _LEGACY is None:
+        sys.dont_write_bytecode = True  # プラグインのフォルダに __pycache__ を作らない
+        here = os.path.dirname(os.path.abspath(__file__))
+        if here not in sys.path:
+            sys.path.insert(0, here)
+        import ng_guard_legacy as L
+        _LEGACY = L
+        L.path_forms = _legacy_path_forms
+        L.os_path_join_norm = join_norm
+        orig_to_paths = L.to_paths
+
+        def memo_to_paths(t, cwd):
+            key = (t, cwd)
+            if key not in _LEGACY_TO_PATHS:
+                _LEGACY_TO_PATHS[key] = orig_to_paths(t, cwd)
+            return set(_LEGACY_TO_PATHS[key])
+        L.to_paths = memo_to_paths
+        L.find_owner = _legacy_find_owner
+        L.allow_patterns = allow_patterns       # 例外への強さ（指摘5）：形の違う設定でも落ちない
+        L.dev_paths = dev_paths
+        L.in_dev_area = in_dev_area
+        L.is_maintainer = is_maintainer
+        L.plugin_area = plugin_area           # リンクのループでも落ちない
+        L.python_sources = python_sources       # 同じ結果を長さの2乗にせずに出す
+    return _LEGACY
+
+
+def _set_flags(L, r1=False, r2=False, s03=False, splug=False):
+    L.R1_NO_NAMES, L.R2_FIND, L.SKIP_03, L.SKIP_PLUGIN_COPY = r1, r2, s03, splug
+
+
+R3_PARSED = {"cp", "gcp", "mv", "tee", "sed", "gsed", "perl", "install", "ditto", "ln", "cat", "head", "tail", "less",
+             "more", "ls", "grep", "egrep", "fgrep", "rg", "wc", "diff", "cmp", "stat", "file", "md5", "shasum",
+             "sha256sum", "du", "find", "touch", "mkdir", "unzip", "tar", "echo", "printf", "realpath", "readlink"}
+
+
+def _risky_text(t):
+    return bool(re.search(r"\$\(|`|<\(|>\(", t))
+
+
+def r3_confirmed(an, flat):
+    """R3 の通す側か：03_インプット が出てくる部分が、すべて構造で読めるコマンドで（起動役の推し量りでない）、
+    今いる場所も読み切れている。構造の判定（input_hit）はすでに通っている。"""
+    if "<<" in flat:
+        return False
+    for p in an.parts:
+        if "03_インプット" not in nfc(p.text):
+            continue
+        if p.cmd not in R3_PARSED or p.cwd_unknown or p.guessed or _risky_text(p.text):
+            return False
+    return True
+
+
+def plugin_confirmed(an, flat):
+    """プラグインのコピーを読むだけか：.claude/plugins が出てくる部分が、すべて読むだけのコマンド（cat・ls・diff など）か、
+    python3 でコピーの中のスクリプトを動かすだけ。今いる場所がコピーの中の部分も無い。構造の判定（書き込み先）はすでに通っている。"""
+    plug = target(plugins_dir())
+    for body in an.bodies:
+        if ".claude/plugins" in body:
+            return False
+    for p in an.parts:
+        if p.cwd != UNKNOWN_CWD and covers_any(plug, path_forms(p.cwd)):
+            return False
+        if ".claude/plugins" not in p.text:
+            continue
+        if p.cwd_unknown or p.guessed or _risky_text(p.text):
+            return False
+        if p.cmd in READ_ONLY_CMDS - {"cd", "pushd", "find", "open"}:
+            continue
+        if re.match(r"^python[\d.]*$", p.cmd) and p.args and ".claude/plugins" in p.args[0] and \
+                not any(".claude/plugins" in a for a in p.args[1:]):
+            continue  # コピーの中のスクリプトを動かすだけ（update_dashboard.py など）
+        return False
+    return True
+
+
+def legacy_decision(payload, root_new):
+    """前の版の判定。止めるなら (ラベル, 対象, ログを書く本人のフォルダ)。R1〜R4 の通す側だと確かめられたら None。"""
+    L = legacy()
+    try:
+        _set_flags(L)
+        v = L.verdict(payload)
+        if v is None:
+            return None
+        relaxed, flat, an = dict(payload), None, None
+        if payload.get("tool_name") == "Bash" and isinstance((payload.get("tool_input") or {}).get("command"), str):
+            flat = normalize(payload["tool_input"]["command"])
+            relaxed["tool_input"] = dict(payload["tool_input"], command=quiet(flat))  # R4：2>/dev/null・2>&1 を除く
+            an = analyze(flat, base_cwd(payload, root_new))
+        s03 = an is not None and r3_confirmed(an, flat)
+        splug = an is not None and plugin_confirmed(an, flat)
+        _set_flags(L, r1=True, r2=True, s03=s03, splug=splug)
+        v2 = L.verdict(relaxed)
+        return v if v2 is not None else None
+    except DeadlineExceeded:
+        raise
+    except Exception:  # 前の版も、読めないときは中を止めた
+        return ("見張りの入力を読めませんでした（前の版の判定）", "（入力不明）", root_new) if root_new is not None else None
+    finally:
+        _set_flags(L)
+
+
+def judge(payload):
+    """新しい判定（構造で読む）と、前の版の判定を重ねる。どちらかが止めれば止める（前の版は R1〜R4 の通す側を除く）。"""
+    res = judge_new(payload)
+    if res is not None and res[0] == "deny":
+        return res
+    old = legacy_decision(payload, _SEEN["root"] if _SEEN["root"] != "unset" else None)
+    if old is not None:
+        label, what, log_root = old
+        return "deny", label, what, log_root
+    return res
 
 
 _SEEN = {"root": "unset"}  # judge が見つけた本人のフォルダ（締め切りを超えたときに使う）
@@ -1969,11 +2398,11 @@ def _disarm():
         pass
 
 
-def decide(payload_text):
+def decide(payload_text, deadline=None):
     """入力の文字列から判定する。締め切り（DEADLINE_SEC）と、思わぬ例外の受け皿つき。
     (deny するか, ラベル, 対象, ログを書く本人のフォルダ, ツール名, 例外の受け皿を通ったか)"""
     payload = None
-    _arm(deadline_seconds())
+    _arm(deadline_seconds(deadline))
     try:
         payload = json.loads(payload_text)
         if not isinstance(payload, dict):

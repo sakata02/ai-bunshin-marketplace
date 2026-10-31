@@ -600,7 +600,7 @@ XF=[
  ("F6-4","in",*Bx("cd 0?_インプット && echo x > a.csv"),"deny","元データ"),
  ("F6-5","in",*Bx("pushd 03_* && touch z"),"deny","元データ"),
  ("F6-6","in",*Bx("cd 0* && touch z"),"deny","cd の行き先を読み切れない"),     # 当たりが2個以上
- ("F6-7","in",*Bx("cd nomatch* && touch z"),"deny","cd の行き先を読み切れない"),  # 当たりが0個
+ ("F6-7","in",*Bx("cd nomatch* && touch z"),"pass",""),  # 当たりが0個：cd が失敗して && の後ろは動かない（前の版・部下D の g-p4 と同じ。T058 の決めで通すに変えた）
  ("F6-p1","in",*Bx("cd 02_* && touch new.md"),"pass",""),
  ("F6-p2","in",*Bx("cd 0* && ls"),"pass",""),
  ("F6-p3","in",*Bx("mkdir -p 02_成果物/new && cd 02_成果物/new && touch a.md"),"pass",""),
@@ -636,15 +636,20 @@ for vid,where,c,want in [("F3-cd","in","cd a; "*1500,"pass"),("F3-cd-tail","in",
     if got!=want or dt>=1.0: xfail+=1; print("FIX",vid,"got",got,"want",want,"秒",round(dt,2))
 (got,reason)=run_x("Bash",{"command":"cd a; "*600+"touch x"},"in")  # 今いる場所が 1024 文字を超えた：読み切れない
 if got!="deny" or "cd の行き先を読み切れない" not in reason: xfail+=1; print("FIX F3-long-cwd",got,reason[:60])
-TINY={"NG_GUARD_DEADLINE":"0.000001"}
+# 締め切り：テストは関数の引数（decide の deadline=）で短くする。本番は環境変数などで変えられない（T058 の直し6）
+_sp2=importlib.util.spec_from_file_location("ng_guard_dl",G); DL=importlib.util.module_from_spec(_sp2); _sp2.loader.exec_module(DL)
+_saved_env,_saved_cwd=dict(os.environ),os.getcwd()
 for vid,where,c,want in [("F3-dl-in","in","ls","deny"),("F3-dl-out","out","ls","pass"),("F3-dl-out-mention","out",f"ls {XR}/02_成果物","deny"),
                          ("F3-dl-out-tilde","out","ls ~/workspace/AI坂田/02_成果物","deny")]:
-    got,reason=run_x("Bash",{"command":c},where,extra=TINY)
-    if got!=want or (want=="deny" and "時間内" not in reason): xfail+=1; print("FIX",vid,"got",got,"want",want,reason[:60])
-_env=dict(os.environ); os.environ["NG_GUARD_DEADLINE"]="100"
-if NGM.deadline_seconds()!=5.0: xfail+=1; print("FIX 締め切りが 5 秒より長くできた")
-os.environ["NG_GUARD_DEADLINE"]="0.5"
-if NGM.deadline_seconds()!=0.5: xfail+=1; print("FIX 締め切りを短くできない")
-os.environ.clear(); os.environ.update(_env)
+    base={"in":XR,"out":XO}[where]
+    os.environ["HOME"]=XH; os.environ["CLAUDE_PROJECT_DIR"]=base; os.chdir(base); DL._SEEN["root"]="unset"
+    d,label,_w,_r,_t,fell=DL.decide(json.dumps({"tool_name":"Bash","tool_input":{"command":c},"cwd":base}),deadline=1e-6)
+    got="deny" if d else "pass"
+    if got!=want or not fell or (want=="deny" and "時間内" not in (label or "")): xfail+=1; print("FIX",vid,"got",got,"want",want,fell,label)
+os.environ.clear(); os.environ.update(_saved_env); os.chdir(_saved_cwd)
+if DL.deadline_seconds(100)!=5.0 or DL.deadline_seconds(0.5)!=0.5 or DL.deadline_seconds("abc")!=5.0 or DL.deadline_seconds(-1)!=5.0:
+    xfail+=1; print("FIX 締め切りの秒の読み方")
+got,reason=run_x("Bash",{"command":"ls"},"in",extra={"NG_GUARD_DEADLINE":"0.000001"})  # 環境変数では短くならない（本番では読まない）
+if got!="pass": xfail+=1; print("FIX NG_GUARD_DEADLINE を読んでいる",got,reason[:60])
 fail+=xfail
 print(f"失敗 {fail} 件"); sys.exit(1 if fail else 0)
