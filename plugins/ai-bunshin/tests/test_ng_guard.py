@@ -510,4 +510,141 @@ for c,where,want,word in [("mv 03_インプット /tmp/x","in","deny","元デー
     if rc!=0 or ("判定："+want) not in out or (word and word not in out): vfail+=1; print("V2 EXPLAIN",repr(c),rc,out[:120])
 if (len(open(_log,encoding="utf-8").read().splitlines()) if os.path.exists(_log) else 0)!=_n: vfail+=1; print("V2 EXPLAIN が ng_log に書いた")
 fail+=vfail
+# ---- T058 の直し（部下D の確かめ：指摘1〜6・8 と、プラグインの規則を区切りごとに見る）----
+# 部下D の試し（p1〜p9）で、直す前に失敗することを確かめた行を写した。期待が deny の行は、理由の語まで見る
+print("## T058 直し（ヒアドキュメント・起動役・締め切り・ハードリンク・例外・cd のワイルドカード）")
+import time as _time
+XH=os.path.realpath(tempfile.mkdtemp(prefix="ngfix_")); XW=XH+"/workspace"; XR=XW+"/AI坂田"; XO=XW+"/other/proj"
+for d in ["設定","00_タスク管理/data","05_開発/x","02_成果物/共通","03_インプット",".claude/rules",".claude/hooks"]: os.makedirs(XR+"/"+d)
+for f,t in [("設定/config.json","{}"),("00_タスク管理/data/tasks.json","{}"),(".claude/rules/ai-bunshin-common.md","x"),(".claude/settings.json","{}"),
+            ("CLAUDE.md","x"),("03_インプット/a.csv","a"),("02_成果物/a.md","x")]:
+    open(XR+"/"+f,"w").write(t)
+os.makedirs(XO+"/src2"); os.makedirs(XH+"/.claude/plugins/cache/x")
+os.link(XR+"/03_インプット/a.csv",XO+"/hl_inp.csv"); os.link(XR+"/.claude/settings.json",XO+"/hl_set.json")
+os.symlink("loopb",XO+"/loopa"); os.symlink("loopa",XO+"/loopb")
+os.symlink(XR+"/.claude",XO+"/cl")
+def run_x(tool,inp,where,extra=None,timeit=False):
+    base={"in":XR,"out":XO,"ws":XW,"home":XH}.get(where,where)
+    env={k:v for k,v in os.environ.items() if k not in ("CLAUDE_PROJECT_DIR","NG_GUARD_DEADLINE")}; env["HOME"]=XH; env["CLAUDE_PROJECT_DIR"]=base
+    env.update(extra or {})
+    t0=_time.time()
+    p=subprocess.run(["python3",G],input=json.dumps({"tool_name":tool,"tool_input":inp,"cwd":base}),capture_output=True,text=True,cwd=base,env=env)
+    dt=_time.time()-t0
+    try: o=json.loads(p.stdout)["hookSpecificOutput"]; got=(o["permissionDecision"],o.get("permissionDecisionReason",""))
+    except Exception: got=("pass","")
+    if p.returncode!=0: got=("rc%d"%p.returncode,p.stderr[-200:])
+    return (got,dt) if timeit else got
+run_x("Bash",{"command":"ls"},"in")  # 記録に足す
+def Bx(c): return ("Bash",{"command":c})
+HD="cat <<'EOF' > 02_成果物/n.md\nhi\nEOF\n"
+XF=[
+ # 指摘1：ヒアドキュメントの本文を取り除いてから区切る。後ろのコマンドを読む。本文の中の * で誤って止めない
+ ("F1-1","in",*Bx(HD+"mv 設定 /tmp/y"),"deny","正本の移動"),
+ ("F1-2","in",*Bx(HD+"ln -s 設定 s"),"deny","リンク"),
+ ("F1-3","in",*Bx(HD+"cp a.csv 03_インプット"),"deny","元データ"),
+ ("F1-4","in",*Bx(HD+"touch 03_インプット/new.csv"),"deny","元データ"),
+ ("F1-5","in",*Bx(HD+"mv ../AI坂田 /tmp/x"),"deny","本人のフォルダそのもの"),
+ ("F1-6","in",*Bx("python3 - <<'EOF'\nprint(1)\nEOF\nmv 00_タスク管理 /tmp/x"),"deny","正本の移動"),
+ ("F1-7","out",*Bx(HD.replace("02_成果物/n.md","notes.md")+f"mv {XR}/設定 /tmp/x"),"deny","正本の移動"),
+ ("F1-8","in",*Bx(HD+"unzip -o x.zip -d 03_インプット"),"deny","元データ"),
+ ("F1-9","in",*Bx("mkdir -p 02_成果物/x && python3 - <<'EOF'\nfrom pathlib import Path\nfor f in Path('.').rglob(\"*\"): pass\nEOF"),"pass",""),
+ ("F1-10","in",*Bx("touch 02_成果物/a.md && python3 - <<'EOF'\nimport glob\nprint(glob.glob('*'))\nEOF"),"pass",""),
+ ("F1-11","in",*Bx("cat > 02_成果物/x.md <<'EOF'\nmv 設定 x / ln -s 03_インプット / chmod\nEOF"),"pass",""),
+ ("F1-12","in",*Bx("python3 - <<'EOF'\nimport shutil\nshutil.rmtree('03_インプット')\nEOF"),"deny","削除"),  # python3 - の本文は前の版と同じくコードとして読む
+ ("F1-13","out",*Bx(f"python3 - <<'EOF'\nimport shutil\nshutil.rmtree('{XR}/03_インプット')\nEOF"),"deny","削除"),
+ ("F1-14","in",*Bx("cat <<-'EOF' > 02_成果物/t.md\n\tx\n\tEOF\ntouch 03_インプット/t.csv"),"deny","元データ"),
+ # 指摘2：起動役（xargs・timeout・nice・parallel・find -exec）をほどいて、中のコマンドを読む
+ ("F2-1","in",*Bx("xargs -I {} cp {} 03_インプット/ < list"),"deny","元データ"),
+ ("F2-2","in",*Bx("xargs -n 1 -I {} mv {} 03_インプット/ < list"),"deny","元データ"),
+ ("F2-3","in",*Bx("timeout 5 cp a.csv 03_インプット/"),"deny","元データ"),
+ ("F2-4","in",*Bx("nice -n 5 cp a.csv 03_インプット/"),"deny","元データ"),
+ ("F2-5","in",*Bx("parallel cp {} 03_インプット/ ::: a b"),"deny","元データ"),
+ ("F2-6","in",*Bx("find . -maxdepth 1 -name '*.csv' -print0 | xargs -0 -I {} cp {} 03_インプット/"),"deny","元データ"),
+ ("F2-7","in",*Bx(f"find {XO}/src2 -name '*.csv' -exec cp {{}} 03_インプット/ \\;"),"deny","元データ"),
+ ("F2-8","in",*Bx(f"find {XO}/src2 -name '*.csv' -exec mv {{}} 03_インプット/ \\;"),"deny","元データ"),
+ ("F2-9","in",*Bx(f"find {XO}/src2 -name '*.csv' -exec cp {{}} {XR}/03_インプット/ \\;"),"deny","元データ"),
+ ("F2-10","in",*Bx("find /tmp -name '*.csv' -exec cp {} 03_インプット/ \\;"),"deny","元データ"),
+ ("F2-11","in",*Bx("find 03_インプット -name '*.csv' -exec sed -i '' s/a/b/ {} +"),"deny","元データ"),
+ ("F2-12","in",*Bx("env -C 03_インプット touch z.csv"),"deny","元データ"),
+ ("F2-p1","in",*Bx("find 03_インプット -name '*.csv' -exec grep -l a {} +"),"pass",""),
+ ("F2-p2","in",*Bx("timeout 5 ls 03_インプット"),"pass",""),
+ ("F2-p3","in",*Bx("ls 02_成果物/*.md | xargs -I {} grep -l x {}"),"pass",""),
+ ("F2-p4","in",*Bx("nice -n 5 python3 x.py > 02_成果物/out.txt"),"pass",""),
+ # 指摘4：ハードリンクを作る操作。元が 03_インプット・.claude の設定・印・記録なら、作る時点で止める
+ ("F4-1","in",*Bx("ln 03_インプット/a.csv 02_成果物/h && echo x > 02_成果物/h"),"deny","リンク"),
+ ("F4-2","in",*Bx("link 03_インプット/a.csv 02_成果物/h2"),"deny","リンク"),
+ ("F4-3","in",*Bx("ln .claude/settings.json 02_成果物/s"),"deny","リンク"),
+ ("F4-4","in",*Bx("python3 -c \"import os;os.link('03_インプット/a.csv','h3')\""),"deny","リンク"),
+ ("F4-5","in",*Bx("cp -l 03_インプット/a.csv 02_成果物/h4"),"deny","リンク"),
+ ("F4-6","in",*Bx("cp -s ../03_インプット/a.csv 02_成果物/h5"),"deny","リンク"),
+ ("F4-7","in",*Bx("cp -al 03_インプット 02_成果物/h6"),"deny","リンク"),
+ ("F4-8","out",*Bx(f"ln {XR}/03_インプット/a.csv h9"),"deny","リンク"),
+ ("F4-9","in",*Bx("ln 03_インプット/a.csv /tmp/h10"),"deny","リンク"),
+ ("F4-10","in",*Bx("python3 -c \"from pathlib import Path;Path('h11').hardlink_to('設定/config.json')\""),"deny","リンク"),
+ ("F4-11","out","Write",{"file_path":XO+"/hl_inp.csv"},"deny","元データ"),     # 外に作ってあるハードリンクへの書き込み
+ ("F4-12","out",*Bx("echo x > hl_inp.csv"),"deny","元データ"),
+ ("F4-13","out","Write",{"file_path":XO+"/hl_set.json"},"deny","権限・設定"),
+ ("F4-14","out",*Bx("echo '{}' > hl_set.json"),"deny","権限・設定"),
+ ("F4-p1","in",*Bx("ln 02_成果物/a.md 02_成果物/b.md"),"pass",""),
+ ("F4-p2","in",*Bx("cp -l 02_成果物/a.md 02_成果物/c.md"),"pass",""),
+ ("F4-p3","out",*Bx("ln ../src2/x y && cp -al src src_bk"),"pass",""),
+ # 指摘5：stat が失敗するパス（リンクのループ）
+ ("F5-1","in",*Bx(f"mv {XO}/loopa/../../../../AI坂田/設定 /tmp/x"),"deny","読み切れない"),
+ ("F5-2","in","Write",{"file_path":XO+"/loopa/x"},"pass",""),
+ ("F5-3","out","Write",{"file_path":XO+"/loopa/x"},"pass",""),
+ ("F5-4","in",*Bx(f"mkdir -p {XO}/cl/hooks && echo x > {XO}/cl/hooks/x.sh"),"deny","hook"),  # リンク経由で .claude の下に書く
+ # 指摘6：cd のワイルドカードを to_paths と同じに解く。当たりが1つならそれ、0個か2個以上なら止める側
+ ("F6-1","in",*Bx("cd 03_*/ && touch new.csv"),"deny","元データ"),
+ ("F6-2","in",*Bx("cd 設* && mv config.json x"),"deny","正本の移動"),
+ ("F6-3","out",*Bx(f"cd {XW}/AI* && {RM} -rf 03_インプット"),"deny","削除"),
+ ("F6-4","in",*Bx("cd 0?_インプット && echo x > a.csv"),"deny","元データ"),
+ ("F6-5","in",*Bx("pushd 03_* && touch z"),"deny","元データ"),
+ ("F6-6","in",*Bx("cd 0* && touch z"),"deny","cd の行き先を読み切れない"),     # 当たりが2個以上
+ ("F6-7","in",*Bx("cd nomatch* && touch z"),"deny","cd の行き先を読み切れない"),  # 当たりが0個
+ ("F6-p1","in",*Bx("cd 02_* && touch new.md"),"pass",""),
+ ("F6-p2","in",*Bx("cd 0* && ls"),"pass",""),
+ ("F6-p3","in",*Bx("mkdir -p 02_成果物/new && cd 02_成果物/new && touch a.md"),"pass",""),
+ # 指摘8：外で、本人のフォルダの親へのリンクは止めない。本人のフォルダの中に親へのリンクを作るのは止める
+ ("F8-p1","out",*Bx("ln -s ~ homelink"),"pass",""),
+ ("F8-p2","out",*Bx(f"ln -s {XW} wslink"),"pass",""),
+ ("F8-1","in",*Bx("ln -s ../../ 02_成果物/up"),"deny","リンク"),
+ ("F8-2","out",*Bx(f"ln -s {XR} rlink"),"deny","リンク"),
+ # プラグインのコピー：区切りごとに見る（読むだけの区切りのあとの別の場所での cd で止めない。指揮官 10/31 の報告）
+ ("FP-p1","in",*Bx("cat ~/.claude/plugins/known_marketplaces.json; echo; cd ~/workspace && git log --oneline -3"),"pass",""),
+ ("FP-p2","in",*Bx("ls ~/.claude/plugins/cache/ && cd 02_成果物 && touch a.md"),"pass",""),
+ # 「X=~/.claude/plugins; echo hi > $X/a」（変数で受け渡してから書く）は前の版でも止まらない。既知の残り（T092 の ask）
+ ("FP-2","in",*Bx("cd ~/.claude/plugins && cp /tmp/x ."),"deny","プラグインのコピー"),
+ ("FP-3","in",*Bx("cat ~/.claude/plugins/a | tee ~/.claude/plugins/b"),"deny","プラグインのコピー"),
+]
+xfail=0
+for vid,where,tool,inp,want,word in XF:
+    got,reason=run_x(tool,inp,where)
+    if got!=want or (want=="deny" and word not in reason): xfail+=1; print("FIX",vid,"got",got,"want",want,word,"|",reason[:70].replace(XH,"<XH>"))
+# 指摘5：config.json の形が違っても、外から本人のフォルダを指す操作は止める。開発の置き場所の中のインストールは通す
+for nm,cfgtxt in [("[]","[]"),("ng_allow に数",'{"ng_allow":[5]}'),("ng_allow が文字列",'{"ng_allow":"x"}'),("dev がリスト",'{"dev":[]}'),
+                  ("path がループ",json.dumps({"dev":{"projects":[{"path":XO+"/loopa"}]}})),("projects に文字列",'{"dev":{"projects":["x"]}}'),("壊れた JSON","{x")]:
+    open(XR+"/設定/config.json","w").write(cfgtxt)
+    for vid,where,c,want in [("out-rm","out",f"{RM} -rf {XR}/03_インプット","deny"),("out-03","out",f"npm install && echo x > {XR}/03_インプット/a.csv","deny"),
+                             ("in-rm","in",f"{RM} x","deny"),("in-dev","in","cd 05_開発/x && npm install","pass"),("in-ls","in","ls","pass")]:
+        got,reason=run_x("Bash",{"command":c},where)
+        if got!=want: xfail+=1; print("FIX F5-config",nm,vid,"got",got,"want",want)
+open(XR+"/設定/config.json","w").write("{}")
+# 指摘3：締め切り。cd×1500・python の変数×3000 は 1 秒未満。締め切りを超えたら、中は止める・外は本人のフォルダが文面にあれば止める
+for vid,where,c,want in [("F3-cd","in","cd a; "*1500,"pass"),("F3-cd-tail","in","cd a; "*1500+f"cd {XR} && {RM} -rf 03_インプット","deny"),
+                         ("F3-py","in","python3 -c \""+"x=Path('a');"*3000+"\"","pass"),("F3-exec","in","find . "+"-exec grep a {} + "*3000,"pass")]:
+    (got,reason),dt=run_x("Bash",{"command":c},where,timeit=True)
+    if got!=want or dt>=1.0: xfail+=1; print("FIX",vid,"got",got,"want",want,"秒",round(dt,2))
+(got,reason)=run_x("Bash",{"command":"cd a; "*600+"touch x"},"in")  # 今いる場所が 1024 文字を超えた：読み切れない
+if got!="deny" or "cd の行き先を読み切れない" not in reason: xfail+=1; print("FIX F3-long-cwd",got,reason[:60])
+TINY={"NG_GUARD_DEADLINE":"0.000001"}
+for vid,where,c,want in [("F3-dl-in","in","ls","deny"),("F3-dl-out","out","ls","pass"),("F3-dl-out-mention","out",f"ls {XR}/02_成果物","deny"),
+                         ("F3-dl-out-tilde","out","ls ~/workspace/AI坂田/02_成果物","deny")]:
+    got,reason=run_x("Bash",{"command":c},where,extra=TINY)
+    if got!=want or (want=="deny" and "時間内" not in reason): xfail+=1; print("FIX",vid,"got",got,"want",want,reason[:60])
+_env=dict(os.environ); os.environ["NG_GUARD_DEADLINE"]="100"
+if NGM.deadline_seconds()!=5.0: xfail+=1; print("FIX 締め切りが 5 秒より長くできた")
+os.environ["NG_GUARD_DEADLINE"]="0.5"
+if NGM.deadline_seconds()!=0.5: xfail+=1; print("FIX 締め切りを短くできない")
+os.environ.clear(); os.environ.update(_env)
+fail+=xfail
 print(f"失敗 {fail} 件"); sys.exit(1 if fail else 0)

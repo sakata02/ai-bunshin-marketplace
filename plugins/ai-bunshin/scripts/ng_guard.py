@@ -21,6 +21,30 @@
 同じコマンドの中で作るリンク（ln -s・ln -sf・ln -sfn・os.symlink・Path.symlink_to）は、元か行き先が保護しているもの
 （またはその下）なら、作る時点で止める（作ったあとのリンクは、見張りが動く時点ではまだ無く、たどれないため）。
 確かめ方：python3 ng_guard.py --explain "<コマンド>"（今いる場所で判定し、deny／pass と理由を出す。記録も ng_log も書かない）
+
+読み方：先にヒアドキュメントの本文を取り除いてから区切る（本文はデータ。python3 -・bash・sh に渡す本文だけコードとして読む）。
+起動役（xargs・timeout・nice・env・time・nohup・caffeinate・parallel・find -exec など）はほどいて、中のコマンドを読む。
+cd の行き先は to_paths と同じ解き方にし、ワイルドカードの当たりが0個か2個以上・今いる場所が 1024 文字を超えた・cd - のときは
+読み切れない扱いにして、そのあとの読むだけでない操作を止める。
+締め切り：5 秒（hooks.json の timeout 10 秒より短い）。hook が時間切れになると Claude Code はコマンドを実行してしまうため。
+超えたら、本人のフォルダの中は止める。外は、記録にある本人のフォルダが文面に出ていれば止め、出ていなければ通す。
+
+既知の残り（止まらない・誤って止まるのが今の仕様。見張りは AI のうっかりと外からの指示を止める安全ベルトで、完全ではない）
+- 変数・展開・ヒアドキュメントやパイプでシェルに渡す中身・python の変数や書き方違い・書き込みのコマンドの列挙の抜け
+  （sort -o・gzip・split・git checkout <版> -- <ファイル>・git clone・cp -R で外から 03_インプット ごと上書き など）は読み切れない（T092 で ask にする）
+- プラグインのコピーのパスを変数で受け渡してから書く形（X=~/.claude/plugins; echo > $X/a）は止まらない（T092）
+- ~$(whoami) のような展開を含む ~user は解かない（T092）
+- 大文字小文字を区別するディスク（APFS の区別する形式など）では、Write の文字の並びでの比べ方（re.I）が残っているため、
+  別物の .CLAUDE/settings.json への Write も止まる。止める側に寄るので許す（指摘10）
+- ハードリンクを探す上限（HARDLINK_SCAN_MAX）は、フォルダの区切りでしか数えていないので、実際には上限を超えて探す
+  （20,500 個で 0.11 秒なので速さは問題なし）。上限を超えたところにあるハードリンクは見つからない（指摘12）
+- 外で、本人のフォルダの親（~・~/workspace）へのシンボリックリンクを作るのは止めない（指摘8）。そのリンクを通して、
+  あとの別のコマンドで本人のフォルダを動かす形は、リンクを作った時点では分からない（同じコマンドの中なら、行き先を実体で解いて止める）
+- 本人のフォルダから find . -exec sed -i … のように、起点が 03_インプット を含む形は止めない（起点が 03_インプット の下のときだけ止める）
+- 解けないパス（リンクのループなど）は、動かす・消す元にあるときだけ止める。Write の行き先なら通す（OS も書けないため）
+- Windows など setitimer の無い所では、締め切りを仕掛けられない
+- 外のセッションで、読むだけの区切りの後ろの区切りまで本人の規則を当てる誤停止（T061）。ヒアドキュメントの本文の行頭の語
+  （rm など）で止める誤停止（文書の中の語で止めない。T092）
 """
 import glob
 import json
@@ -34,6 +58,42 @@ from datetime import datetime
 from pathlib import Path
 
 DRY_RUN = False  # --explain のとき：見張りの記録（owners.json）にも ng_log にも書かない
+
+# 締め切り（秒）。hook が時間切れになると Claude Code はコマンドを実行してしまう（10/30 指揮官の実験）ので、
+# hooks.json の timeout（10 秒）より短く切り、切れたら fallback_decision で決める（中は止める）。
+# 環境変数 NG_GUARD_DEADLINE は、テストのために短くするときだけ効く（長くはできない）。
+DEADLINE_SEC = 5.0
+
+
+class DeadlineExceeded(BaseException):
+    """締め切りを超えた（except Exception で受けられないよう BaseException にする）。"""
+
+
+def deadline_seconds():
+    try:
+        v = float(os.environ.get("NG_GUARD_DEADLINE", DEADLINE_SEC))
+    except (TypeError, ValueError):
+        v = DEADLINE_SEC
+    return min(DEADLINE_SEC, v) if v > 0 else DEADLINE_SEC
+
+
+def start_deadline(sec):
+    """締め切りを仕掛ける。Windows などで setitimer が無いときは仕掛けない（既知の残り）。"""
+    import signal
+    if not hasattr(signal, "setitimer"):
+        return False
+
+    def _fire(signum, frame):
+        raise DeadlineExceeded()
+    signal.signal(signal.SIGALRM, _fire)
+    signal.setitimer(signal.ITIMER_REAL, sec)
+    return True
+
+
+def stop_deadline():
+    import signal
+    if hasattr(signal, "setitimer"):
+        signal.setitimer(signal.ITIMER_REAL, 0)
 
 # コマンドとして実行される位置：行頭・; & | ( ` $( { の後、then/do/else/eval/xargs/env/sudo などの後、
 # bash -c "…"・bash -lc '…'・eval "…" の中身の先頭。/bin/rm のようなパス付きも同じに扱う。
@@ -119,8 +179,14 @@ LEGACY_INPUT_RULES = [
 NULL_REDIR = re.compile(r"(?:\d+|&)?>>?\|?\s*/dev/(?:null|stdout|stderr|tty)(?![\w/.-])|\d*[<>]&\s*(?:\d+|-)(?![\w/.-])")
 
 
+_QUIET = {}
+
+
 def quiet(text):
-    return NULL_REDIR.sub(" ", text)
+    r = _QUIET.get(text)
+    if r is None:
+        r = _QUIET[text] = NULL_REDIR.sub(" ", text)
+    return r
 
 
 def rule_hit(matcher, text):
@@ -174,13 +240,41 @@ def path_forms(p, base=None):
             t = os.path.join(base, t)
         a = os.path.abspath(t)
         out = {nfc(a)}
-        out.add(nfc(os.path.realpath(t)))  # 「リンク/..」は、リンクを解いてから .. をたどる（OS と同じ）
-        out.add(nfc(os.path.realpath(a)))  # 文字の上で .. をたどった形も見る（止める側）
+        ra = fast_realpath(a)
+        out.add(nfc(ra))  # 文字の上で .. をたどった形も見る（止める側）
+        out.add(nfc(ra if t == a else os.path.realpath(t)))  # 「リンク/..」は、リンクを解いてから .. をたどる（OS と同じ）
         out = frozenset(out)
     except (OSError, ValueError, TypeError):
         out = frozenset()
     _FORMS[key] = out
     return out
+
+
+_REAL = {}
+
+
+def fast_realpath(a):
+    """os.path.realpath と同じ結果（a は abspath の形）。まだ無いパスは、親の結果に名前をつなぐ（深い場所を何度も解くときに
+    長さの2乗にしない。指摘3）。"""
+    r = _REAL.get(a)
+    if r is not None:
+        return r
+    cur, names = a, []
+    while True:
+        hit = _REAL.get(cur)
+        if hit is not None:
+            base = hit
+            break
+        parent = os.path.dirname(cur)
+        if parent == cur or os.path.lexists(cur):
+            base = _REAL[cur] = os.path.realpath(cur)
+            break
+        names.append(os.path.basename(cur))
+        cur = parent
+    for name in reversed(names):  # まだ無い名前は、そのままつなぐ（リンクではないので解かない）
+        cur = os.path.join(cur, name)
+        base = _REAL[cur] = os.path.join(base, name)
+    return base
 
 
 def is_under(f, r):
@@ -216,13 +310,17 @@ def locate(p):
     if r is None:
         cur, rest = p, []
         while True:
+            hit = _LOCATE.get(cur) if cur is not p else None
+            if hit is not None:  # 親の結果を使い回す（深い場所を何度も解くときに長さの2乗にしない。指摘3）
+                r = (hit[0], hit[1], hit[2] + tuple(reversed(rest)))
+                break
             i = ident(cur)
             parent = os.path.dirname(cur)
             if i is not None or parent == cur:
+                r = (cur, i, tuple(reversed(rest)))
                 break
             rest.append(nfc(os.path.basename(cur)).casefold())
             cur = parent
-        r = (cur, i, tuple(reversed(rest)))
         _LOCATE[p] = r
     return r
 
@@ -647,6 +745,8 @@ def to_paths(t, cwd):
 def _to_paths(t, cwd):
     if not t or len(t) > 1024 or "\n" in t or "\x00" in t:
         return set()
+    if cwd == UNKNOWN_CWD and not os.path.isabs(os.path.expanduser(t)):
+        return set()  # 今いる場所を読み切れない：相対パスは解かない（check で止める側に倒す）
     t = os.path.expanduser(t)
     full = t if os.path.isabs(t) else os.path.join(cwd, t)
     out = set()
@@ -663,9 +763,32 @@ def _to_paths(t, cwd):
     return out
 
 
-WRAPPERS = {"sudo", "env", "command", "builtin", "nohup", "time", "nice", "exec", "then", "do", "else", "elif",
-            "if", "while", "until", "!", "{", "(", "xargs", "caffeinate", "timeout"}
+# 前に付くだけの語（コマンドの頭に来ても、中のコマンドが本体）
+KEYWORDS = {"then", "do", "else", "elif", "if", "while", "until", "!", "{", "("}
 
+# 起動役（中のコマンドを動かすもの）と、値を1つ取るオプションの表（指摘2）。
+# ここに無いオプションは、値を取らない（-0・-r・-t など）か、値をくっつけて書く形（-I{}・-n5・--max-args=1）として1語で読む
+LAUNCHERS = {
+    "xargs": {"-I", "-J", "-L", "-n", "-P", "-R", "-S", "-s", "-E", "-a", "-d", "--max-args", "--max-procs",
+              "--arg-file", "--delimiter", "--max-chars", "--process-slot-var", "--max-lines", "--replace", "--eof"},
+    "timeout": {"-s", "-k", "--signal", "--kill-after"},
+    "nice": {"-n", "--adjustment"},
+    "env": {"-u", "--unset", "-C", "--chdir", "-S", "--split-string", "-P"},
+    "time": {"-o", "-f", "--output", "--format"},
+    "nohup": set(),
+    "caffeinate": {"-t", "-w"},
+    "parallel": {"-j", "-P", "-S", "-a", "-d", "-I", "-n", "-N", "-E", "-C", "--jobs", "--sshlogin", "--arg-file",
+                 "--delimiter", "--colsep"},
+    "sudo": {"-u", "-g", "-C", "-h", "-p", "-U", "-r", "-t", "-D"},
+    "stdbuf": {"-i", "-o", "-e"},
+    "command": set(), "builtin": set(), "exec": {"-a"},
+}
+LAUNCHER_POSITIONAL = {"timeout": 1}  # オプションのあとに、コマンドの前に来る語の数（timeout 5 cmd）
+FIND_EXEC = ("-exec", "-execdir", "-ok", "-okdir")
+# find -exec の中で、これなら起点に書き込まない（読むだけ）。これ以外は起点を書き込み先とみなす（指摘2）
+FIND_READ_ONLY = {"grep", "egrep", "fgrep", "rg", "cat", "head", "tail", "wc", "ls", "stat", "file", "md5", "md5sum",
+                  "shasum", "sha1sum", "sha256sum", "echo", "printf", "test", "[", "basename", "dirname", "realpath",
+                  "readlink", "du", "diff", "cmp", "less", "more", "jq", "true", "false", "nl", "od", "xxd", "strings"}
 
 REDIR_CHARS = set("<>&|")
 
@@ -690,34 +813,182 @@ def split_redirs(words):
 
 
 RAW_REDIR = re.compile(r"(?:^|[^<>&\d\\])(?:\d*|&)>>?\|?\s*(?:\"([^\"\n]*)\"|'([^'\n]*)'|([^\s\"';&|()<>]+))")
+ASSIGN = re.compile(r"^[A-Za-z_]\w*=")
+BODY_RECEIVERS = re.compile(r"^(?:python[\d.]*|bash|sh|zsh|dash|ksh)$")  # 本文をコードとして読むコマンド
 
 
-class Part:
-    """パイプでつながった1つのコマンド。"""
-
-    def __init__(self, text, cwd, words, lex_ok=True):
-        self.text, self.cwd, self.words = text, cwd, words
-        clean, self.redirs = split_redirs(words)
-        if not lex_ok or "<<" in text:  # 語に分けきれない（ヒアドキュメント・閉じない引用符）：文字の並びからも向け先を拾う
-            for m in RAW_REDIR.finditer(quiet(text)):
-                self.redirs.append(next(g for g in m.groups() if g is not None))
-        i = 0
-        while i < len(clean):
-            w = clean[i]
-            if w in WRAPPERS or re.match(r"^[A-Za-z_]\w*=", w) or (w.startswith("-") and i and clean[i - 1] in WRAPPERS):
+def unwrap(words, cwd):
+    """頭に付く語と起動役（xargs・timeout・nice・env・time・nohup・caffeinate・parallel・sudo など）をほどく。
+    (中のコマンドの位置, 今いる場所, 起動役があったか)。env -C／--chdir は今いる場所を変える。"""
+    i, launched = 0, False
+    while i < len(words):
+        w = words[i]
+        if w in KEYWORDS or ASSIGN.match(w):
+            i += 1
+            continue
+        name = os.path.basename(w)
+        if name not in LAUNCHERS:
+            break
+        launched = launched or name not in ("command", "builtin", "exec")
+        vals, pos = LAUNCHERS[name], LAUNCHER_POSITIONAL.get(name, 0)
+        i += 1
+        while i < len(words):
+            x = words[i]
+            if x == "--":
+                i += 1
+                break
+            if x.startswith("-") and len(x) > 1:
+                if name == "env" and (x in ("-C", "--chdir") or x.startswith("--chdir=")):
+                    d = x.split("=", 1)[1] if "=" in x else (words[i + 1] if i + 1 < len(words) else "")
+                    cwd = os.path.normpath(os.path.join(cwd, d)) if d else cwd
+                i += 2 if (x in vals and "=" not in x) else 1
+                continue
+            if name == "env" and ASSIGN.match(x):
+                i += 1
+                continue
+            if pos:
+                pos -= 1
                 i += 1
                 continue
             break
+    return i, cwd, launched
+
+
+class Part:
+    """パイプでつながった1つのコマンド。起動役はほどいて、中のコマンドを cmd・args にする。"""
+
+    def __init__(self, text, cwd, words, lex_ok=True, body="", cwd_unknown=False):
+        self.text, self.cwd, self.words = text, cwd, words
+        self.cwd_unknown = cwd_unknown
+        self.body = body
+        clean, self.redirs = split_redirs(words)
+        i, self.cwd, self.launched = unwrap(clean, cwd)
         self.cmd = os.path.basename(clean[i]) if i < len(clean) else ""
-        self.args = [a for a in clean[i + 1:] if a not in (")", "}", ";;")]
+        args = [a for a in clean[i + 1:] if a not in (")", "}", ";;")]
+        if self.cmd == "parallel" or (self.launched and ":::" in args):
+            args = args[:args.index(":::")] if ":::" in args else args
+        self.args = args
+        self.extra_words = []
+        if body and BODY_RECEIVERS.match(self.cmd):
+            # python3 -・bash・sh に渡す本文は、前の版と同じくコードとして読む（ask は T092）
+            self.text = text + "\n" + body
+            self.extra_words = seg_words(body)
+        if not lex_ok or (body and BODY_RECEIVERS.match(self.cmd)):  # 語に分けきれない：文字の並びからも向け先を拾う
+            for m in RAW_REDIR.finditer(quiet(self.text)):
+                self.redirs.append(next(g for g in m.groups() if g is not None))
+        self.find_execs = []  # find の -exec の中のコマンド（語のリスト）
+        if self.cmd == "find":
+            a, k = self.args, 0
+            while k < len(a):
+                if a[k] in FIND_EXEC:
+                    j = k + 1
+                    while j < len(a) and a[j] not in (";", "+", "\\;"):
+                        j += 1
+                    if j > k + 1:
+                        self.find_execs.append(a[k + 1:j])
+                    k = j
+                k += 1
+
+    @property
+    def all_words(self):
+        return self.words + self.extra_words
+
+    def find_starts(self):
+        starts = []
+        for x in self.args:
+            if x.startswith("-") or x in ("(", "!", ")"):
+                break
+            starts.append(x)
+        return starts or ["."]
 
 
 class Analysis:
     def __init__(self):
         self.groups = []      # [(区切りごとのテキスト, [Part])]
-        self.parts = []       # すべての Part（bash -c・eval の中身も）
+        self.parts = []       # すべての Part（bash -c・eval の中身、find -exec の中身も）
         self.nwords = 0
         self.too_long = False
+        self.bodies = []      # ヒアドキュメントの本文
+
+
+HEREDOC_OP = re.compile(r"(?<!<)<<(?!<)(-?)[ \t]*(?:'([^'\n]+)'|\"([^\"\n]+)\"|\\?([A-Za-z_][\w.-]*))")
+
+
+def strip_heredocs(text):
+    """ヒアドキュメントの本文（<<TAG の次の行から TAG の行まで）を取り除く。(本文を除いたコマンド, 本文のリスト（出てくる順）)。
+    <<< は対象外。引用符の中の << は見ない。終わりの行が無ければ、最後までを本文とする（シェルと同じ）。"""
+    if "<<" not in text:
+        return text, []
+    out, bodies, pending = [], [], []
+    i, n, q = 0, len(text), None
+    while i < n:
+        c = text[i]
+        if q:
+            out.append(c)
+            if c == "\\" and q == '"' and i + 1 < n:
+                out.append(text[i + 1])
+                i += 2
+                continue
+            if c == q:
+                q = None
+            i += 1
+            continue
+        if c == "\\" and i + 1 < n:
+            out.append(text[i:i + 2])
+            i += 2
+            continue
+        if c in "'\"":
+            q = c
+        elif text.startswith("<<", i) and not text.startswith("<<<", i):
+            m = HEREDOC_OP.match(text, i)
+            if m:
+                pending.append((next(g for g in m.groups()[1:] if g is not None), m.group(1) == "-"))
+                out.append(m.group(0))
+                i = m.end()
+                continue
+        elif c == "\n" and pending:
+            out.append("\n")
+            i += 1
+            for tag, dash in pending:
+                lines = []
+                while i < n:
+                    j = text.find("\n", i)
+                    line = text[i:j] if j >= 0 else text[i:]
+                    i = j + 1 if j >= 0 else n
+                    if (line.lstrip("\t") if dash else line) == tag:
+                        break
+                    lines.append(line)
+                bodies.append("\n".join(lines))
+            pending = []
+            continue
+        out.append(c)
+        i += 1
+    return "".join(out), bodies
+
+
+MAX_CWD = 1024  # 今いる場所がこれより長くなったら、読み切れない扱い（指摘3）
+UNKNOWN_CWD = "/\x00(今いる場所を読み切れない)"  # このパスの下は解かない（stat も glob も失敗する）
+
+
+def resolve_cd(dest, cwd):
+    """cd の行き先を to_paths と同じ解き方で決める（~・$HOME・ワイルドカード）。(新しい場所, 読み切れないか)。
+    ワイルドカードの当たりが1つならそれ、0個か2個以上なら読み切れない（止める側に倒す。T092 で ask）。"""
+    if cwd == UNKNOWN_CWD and not os.path.isabs(os.path.expanduser(dest)):
+        return UNKNOWN_CWD, True
+    t = os.path.expanduser(dest)
+    full = t if os.path.isabs(t) else os.path.join(cwd, t)
+    if GLOB_CHARS.search(t):
+        try:
+            hits = [h for h in glob.glob(full) if os.path.isdir(h)]
+        except (OSError, ValueError, re.error):
+            hits = []
+        if len(hits) != 1:
+            return UNKNOWN_CWD, True
+        full = hits[0]
+    new = os.path.normpath(full)
+    if len(new) > MAX_CWD:
+        return UNKNOWN_CWD, True
+    return new, False
 
 
 _ANALYZED = {}
@@ -725,30 +996,44 @@ _ANALYZED = {}
 
 def analyze(command, cwd, an=None, depth=0, top=None):
     """コマンドを区切り・パイプに分け、cd の行き先を順にたどって、各コマンドの今いる場所と語を出す。
-    ヒアドキュメント（<<）があるときは区切らない（中身が別の言語のため）。同じコマンドと場所は1回だけ解く（R9）。"""
+    先にヒアドキュメントの本文を取り除き（本文はデータ。python3 -・bash・sh に渡すものだけコードとして読む）、
+    起動役（xargs・timeout・find -exec など）をほどく。同じコマンドと場所は1回だけ解く（R9）。"""
     if an is None and depth == 0 and top is None:
         key = (command, cwd)
         if key not in _ANALYZED:
             _ANALYZED[key] = analyze(command, cwd, Analysis(), 0, None)
         return _ANALYZED[key]
-    groups = [command] if "<<" in command else split_top(command)
-    for g in groups:
+    stripped, bodies = strip_heredocs(command)
+    an.bodies += bodies
+    bodies = list(bodies)
+    unknown = cwd == UNKNOWN_CWD
+    for g in split_top(stripped):
         parts = []
-        for pt in ([g] if "<<" in g else split_top(g, pipes=True)):
+        for pt in split_top(g, pipes=True):
             raw, ok = seg_words_ok(pt)
             words = [expand(w, cwd) for w in raw]
             an.nwords += len(words)
             an.too_long = an.nwords > MAX_WORDS
-            p = Part(pt, cwd, words, ok)
+            nb = len(HEREDOC_OP.findall(pt)) if "<<" in pt else 0
+            body = "\n".join(bodies.pop(0) for _ in range(min(nb, len(bodies))))
+            p = Part(pt, cwd, words, ok, body, unknown)
             p.top = top if top is not None else g
             parts.append(p)
             an.parts.append(p)
+            for sub in p.find_execs:  # find -exec の中のコマンドを、別のコマンドとして読む（{} は起点に置き換える）
+                for s in p.find_starts()[:20]:
+                    sw = [x.replace("{}", s) for x in sub]
+                    sp = Part(" ".join(sw), p.cwd, sw, True, "", unknown)
+                    sp.top, sp.launched = p.top, True
+                    an.parts.append(sp)
             if p.cmd in ("cd", "pushd"):
-                dest = next((a for a in p.args if not a.startswith("-")), None)
+                dest = next((a for a in p.args if not a.startswith("-") or a == "-"), None)
                 if dest is None:
-                    cwd = os.path.expanduser("~")
+                    cwd, unknown = os.path.expanduser("~"), False
+                elif dest == "-":
+                    cwd, unknown = UNKNOWN_CWD, True  # cd -（前の場所）は読み切れない
                 else:
-                    cwd = os.path.normpath(os.path.join(cwd, dest))
+                    cwd, unknown = resolve_cd(dest, cwd)
             if depth < 3:
                 if p.cmd in ("bash", "sh", "zsh"):
                     for k, a in enumerate(p.args[:-1]):
@@ -763,7 +1048,7 @@ def analyze(command, cwd, an=None, depth=0, top=None):
 
 def part_paths(p):
     out = set()
-    for w in p.words:
+    for w in p.all_words:
         for t in word_texts(w):
             out |= to_paths(t, p.cwd)
     return out
@@ -815,12 +1100,15 @@ def python_sources(code):
         out.append(m.group(1) if m.group(1) is not None else m.group(2))
     for m in re.finditer(PY_CWD + PY_METHOD, code):
         out.append(".")
-    for m in re.finditer(r"\b([A-Za-z_]\w*)\s*=\s*(?:pathlib\.)?Path\(\s*" + lit + r"\s*\)", code):
-        if re.search(r"\b" + re.escape(m.group(1)) + PY_METHOD, code):
-            out.append(m.group(2) if m.group(2) is not None else m.group(3))
-    for m in re.finditer(r"\b([A-Za-z_]\w*)\s*=\s*" + PY_CWD, code):
-        if re.search(r"\b" + re.escape(m.group(1)) + PY_METHOD, code):
-            out.append(".")
+    # 変数に入れてからメソッドを呼ぶ形。メソッドを呼んでいる変数を先に1回で集める（変数ごとに全体を探すと長さの2乗になる。指摘3）
+    called = {m.group(1) for m in re.finditer(r"\b([A-Za-z_]\w*)" + PY_METHOD, code)}
+    if called:
+        for m in re.finditer(r"\b([A-Za-z_]\w*)\s*=\s*(?:pathlib\.)?Path\(\s*" + lit + r"\s*\)", code):
+            if m.group(1) in called:
+                out.append(m.group(2) if m.group(2) is not None else m.group(3))
+        for m in re.finditer(r"\b([A-Za-z_]\w*)\s*=\s*" + PY_CWD, code):
+            if m.group(1) in called:
+                out.append(".")
     return [s.rstrip("\\") for s in out if s]
 
 
@@ -999,6 +1287,8 @@ def write_targets(p):
             out.append(_opt_value(a, ("-C",), ("--directory",)) or ".")
         if "--remove-files" in a:
             out += na
+    elif c == "find" and any(os.path.basename(sub[0]) not in FIND_READ_ONLY for sub in p.find_execs):
+        out += p.find_starts()  # find 03_インプット -exec <読むだけでないコマンド>：起点を書き込み先とみなす（指摘2）
     srcs, dest, _ = move_sources(p)  # 動かす・消す元（mv・git mv・find -delete・zip -m・python の os.rename など）
     out += srcs
     if dest:
@@ -1009,69 +1299,117 @@ def write_targets(p):
 
 
 def input_hit(an, root):
-    """03_インプット（元データ。読むだけ）へ書き込む・作る・そこから動かす・消す操作か（R3）。読み出し（cp の元など）は通す。"""
-    t = target(os.path.join(str(root), "03_インプット"))
+    """03_インプット（元データ。読むだけ）と .claude の設定（settings・hooks・共通ルールの写し）へ、Bash で書き込む・作る・
+    そこから動かす・消す操作か（R3。.claude の設定は、ハードリンク・リンク経由も実体で比べる）。読み出し（cp の元など）は通す。"""
+    targets = [("元データの移動・上書き" if rel == ("03_インプット",) else label, target(os.path.join(str(root), *rel)))
+               for label, rel in PROTECTED_TARGETS]
     for p in an.parts:
         for text, base in write_targets(p):
             for w in word_texts(text):
                 for f in to_paths(w, base):
-                    if t.covers(f):
-                        return "元データの移動・上書き"
+                    for label, t in targets:
+                        if t.covers(f):
+                            return label
     return None
+
+
+def unresolvable_source(an):
+    """動かす・消す元のパスが、リンクのループなどで解けない（OS も解けない）か。中では止める側に倒す（st-1）。"""
+    import errno
+    for p in an.parts:
+        srcs, _, base = move_sources(p)
+        for s in srcs:
+            t = os.path.expanduser(s)
+            full = t if os.path.isabs(t) else os.path.join(base, t)
+            try:
+                os.stat(full)
+            except OSError as e:
+                if e.errno == errno.ELOOP:
+                    return True
+            except ValueError:
+                continue
+    return False
 
 
 NO_DEREF = re.compile(r"^-[A-Za-z]*[nhT]")  # ln -n・-h・-T：行き先がリンクやフォルダでも、それ自体を置き換える
 
 
-def link_pairs(p):
-    """リンクを作る操作：[(元の文字列, [行き先の文字列], 基準の場所, シンボリックか, 置き換えるか)]。"""
-    out = []
-    if p.cmd == "ln":
-        a, sym, tdir, plain, skip, repl = p.args, False, None, [], False, False
-        for k, x in enumerate(a):
-            if skip:
-                skip = False
-                continue
-            if x in ("-t", "--target-directory"):
+def _link_args(a, sym_flags="s"):
+    """ln・cp のリンクの引数を読む。(元のリスト, 行き先のフォルダ（-t）, 置き場所の語, シンボリックか, 置き換えるか)。"""
+    sym, tdir, plain, skip, repl = False, None, [], False, False
+    for k, x in enumerate(a):
+        if skip:
+            skip = False
+            continue
+        if x in ("-t", "--target-directory"):
+            tdir = a[k + 1] if k + 1 < len(a) else None
+            skip = True
+        elif x.startswith("--target-directory="):
+            tdir = x.split("=", 1)[1]
+        elif x in ("--symbolic", "--symbolic-link"):
+            sym = True
+        elif x in ("--no-dereference", "--no-target-directory"):
+            repl = True
+        elif x.startswith("--"):
+            continue
+        elif x.startswith("-t") and len(x) > 2:
+            tdir = x[2:]
+        elif x.startswith("-") and len(x) > 1:
+            sym = sym or any(ch in x[1:] for ch in sym_flags)
+            repl = repl or bool(NO_DEREF.match(x))
+            if x.endswith("t"):
                 tdir = a[k + 1] if k + 1 < len(a) else None
                 skip = True
-            elif x.startswith("--target-directory="):
-                tdir = x.split("=", 1)[1]
-            elif x == "--symbolic":
-                sym = True
-            elif x in ("--no-dereference", "--no-target-directory"):
-                repl = True
-            elif x.startswith("--"):
-                continue
-            elif x.startswith("-t") and len(x) > 2:
-                tdir = x[2:]
-            elif x.startswith("-") and len(x) > 1:
-                sym = sym or "s" in x
-                repl = repl or bool(NO_DEREF.match(x))
-                if x.endswith("t"):
-                    tdir = a[k + 1] if k + 1 < len(a) else None
-                    skip = True
-            else:
-                plain.append(x)
-        if tdir is not None:
-            for s in plain:
-                out.append((s, [os.path.join(tdir, os.path.basename(s.rstrip("/")))], sym, repl))
-        elif len(plain) == 1:
-            out.append((plain[0], [os.path.basename(plain[0].rstrip("/")) or plain[0]], sym, repl))
-        elif len(plain) >= 2:
-            d = plain[-1]
-            for s in plain[:-1]:
-                dests = [os.path.join(d, os.path.basename(s.rstrip("/")))]
-                full = os.path.join(p.cwd, os.path.expanduser(d))
-                if repl or not os.path.isdir(full) or os.path.islink(full):
-                    # 行き先がフォルダでなければ、その名前でリンクを作る。リンクや -n・-h・-T なら、行き先そのものを置き換えうる
-                    dests.append(d)
-                out.append((s, dests, sym, len(dests) > 1))
+        else:
+            plain.append(x)
+    return plain, tdir, sym, repl
+
+
+def _link_dests(p, plain, tdir, sym, repl):
+    out = []
+    if tdir is not None:
+        for s in plain:
+            out.append((s, [os.path.join(tdir, os.path.basename(s.rstrip("/")))], sym, repl))
+    elif len(plain) == 1:
+        out.append((plain[0], [os.path.basename(plain[0].rstrip("/")) or plain[0]], sym, repl))
+    elif len(plain) >= 2:
+        d = plain[-1]
+        for s in plain[:-1]:
+            dests = [os.path.join(d, os.path.basename(s.rstrip("/")))]
+            full = os.path.join(p.cwd, os.path.expanduser(d))
+            if repl or not os.path.isdir(full) or os.path.islink(full):
+                # 行き先がフォルダでなければ、その名前でリンクを作る。リンクや -n・-h・-T なら、行き先そのものを置き換えうる
+                dests.append(d)
+            out.append((s, dests, sym, len(dests) > 1))
+    return out
+
+
+def link_pairs(p):
+    """リンクを作る操作：[(元の文字列, [行き先の文字列], シンボリックか, 置き換えるか)]。
+    ln（-s あり・なし）・link・cp -l／-s／-al・os.symlink・os.link・Path.symlink_to・Path.hardlink_to・Path.link_to。"""
+    out = []
+    if p.cmd == "ln":
+        out += _link_dests(p, *_link_args(p.args))
+    elif p.cmd == "link":
+        plain = _nonopt(p.args)
+        if len(plain) >= 2:
+            out.append((plain[0], [plain[1]], False, False))
+    elif p.cmd in ("cp", "gcp"):
+        flags = "".join(x[1:] for x in p.args if re.match(r"^-[A-Za-z]+$", x))
+        if "l" in flags or "s" in flags or "--link" in p.args or "--symbolic-link" in p.args:
+            plain, tdir, sym, repl = _link_args([x for x in p.args if x != "--link"], sym_flags="s")
+            out += _link_dests(p, plain, tdir, sym, repl)
     if re.search(r"\bpython[\d.]*\b", p.text):
         for m in re.finditer(r"\bos\.symlink\(\s*" + PY_STR + r"\s*,\s*" + PY_STR, p.text):
             out.append((_s(m, 1), [_s(m, 3)], True, False))
+        for m in re.finditer(r"\bos\.link\(\s*" + PY_STR + r"\s*,\s*" + PY_STR, p.text):
+            out.append((_s(m, 1), [_s(m, 3)], False, False))
         for m in re.finditer(r"\bPath\(\s*" + PY_STR + r"\s*\)\s*\.\s*symlink_to\(\s*" + PY_STR, p.text):
             out.append((_s(m, 3), [_s(m, 1)], True, False))
+        for m in re.finditer(r"\bPath\(\s*" + PY_STR + r"\s*\)\s*\.\s*hardlink_to\(\s*" + PY_STR, p.text):
+            out.append((_s(m, 3), [_s(m, 1)], False, False))
+        for m in re.finditer(r"\bPath\(\s*" + PY_STR + r"\s*\)\s*\.\s*link_to\(\s*" + PY_STR, p.text):
+            out.append((_s(m, 1), [_s(m, 3)], False, False))
     return [(s, [d for d in ds if d], sym, repl) for s, ds, sym, repl in out if s]
 
 
@@ -1079,36 +1417,50 @@ LINK_LABEL = "保護しているものへのリンク（リンクを通すと見
 
 
 def link_hit(an, root=None):
-    """同じコマンドの中で作るリンク（R6）：元か行き先が、保護しているもの（またはその下）なら止める。
-    元が保護しているものを含む（本人のフォルダ・その親・印のあるフォルダ）ときも止める。
-    リンクの元は、リンクを置く場所から数える（ln -s ../03_インプット 02_成果物/lk）。今いる場所から数えた形も見る。"""
+    """同じコマンドの中で作るリンク（R6）：
+    - 行き先：保護しているもの（またはその下）なら止める。-n・-h・-T で置き換えるときは、本人のフォルダ・記録・印を含む所も止める
+    - シンボリックリンクの元：保護しているもの（またはその下）、本人のフォルダそのもの、本人のフォルダの下で印を含むもの（設定・.claude など）。
+      本人のフォルダの親（~・~/workspace）は止めない（指摘8。既知の残り）。元は、リンクを置く場所から数えた形も見る
+    - ハードリンクの元（ln・link・cp -l・os.link・Path.hardlink_to）：03_インプット・.claude の設定・印・記録（またはその下・それを含む）なら止める（指摘4）"""
     pairs = [(p, x) for p in an.parts for x in link_pairs(p)]
     if not pairs:
         return None
     owners = owner_roots(root)
     content, holders = content_targets(owners), holder_targets(owners)
+    roots_t = [target(str(r)) for r in owners]
+    marks = [(mk, target(str(r))) for r in owners for mk in marks_of(r)]
 
-    def bad(f, as_dest=False, replace=False):
+    def bad_dest(f, replace):
         if any(t.covers(f) for t in content):
             return True
-        if as_dest:
-            return replace and any(t.within(f) for t in holders)
-        return any(t.within(f) for t in holders)
+        return replace and any(t.within(f) for t in holders)
+
+    def bad_sym_src(f, dest_inside):
+        if any(t.covers(f) for t in content):
+            return True
+        if any(t.same(f) for t in roots_t):
+            return True
+        if dest_inside and any(t.within(f) for t in roots_t):
+            return True  # 本人のフォルダの中に、本人のフォルダを含む所（親）へのリンクを作る（ln -s ../../ 02_成果物/up）
+        return any(mk.within(f) and rt.covers(f) for mk, rt in marks)
+
+    def bad_hard_src(f):
+        return any(t.covers(f) or t.within(f) for t in content)
 
     for p, (s, dests, sym, repl) in pairs:
         dpaths = set()
         for d in dests:
             dpaths |= to_paths(d, p.cwd)
         for f in dpaths:
-            if bad(f, as_dest=True, replace=repl):
+            if bad_dest(f, repl):
                 return LINK_LABEL
-        if not sym:
-            continue  # ハードリンクの元は、ここでは見ない（書き込みのときに実体で比べる）
         spaths = set(to_paths(s, p.cwd))
-        for f in dpaths:
-            spaths |= to_paths(s, os.path.dirname(f))
+        if sym:
+            for f in dpaths:
+                spaths |= to_paths(s, os.path.dirname(f))
+        dest_inside = any(t.covers(f) for f in dpaths for t in roots_t)
         for f in spaths:
-            if bad(f):
+            if (bad_sym_src(f, dest_inside) if sym else bad_hard_src(f)):
                 return LINK_LABEL
     return None
 
@@ -1122,11 +1474,19 @@ def records_bash_hit(an):
     """見張りの記録（~/.ai-bunshin/）に書く Bash か。読むだけ（cat・ls など）は通す。
     記録の名前が出てくる、またはパス・cd の行き先が記録の置き場所の中の区切りに、書き込みの語があれば止める。"""
     rec = target(records_dir())
+    if an.bodies:  # ヒアドキュメントのあるコマンドは、前の版と同じく全体（本文を含む）でも見る（本文の中の書き込みを通さないため）
+        whole = quiet("\n".join([g for g, _ in an.groups] + an.bodies))
+        if RECORD_WRITE.search(whole) and re.search(r"\.ai-bunshin(?=$|[/\s\"';&|)])", whole, re.I):
+            return True
+    seen = {}
     for p in an.parts:
         top = quiet(p.top)
-        if not RECORD_WRITE.search(top):
+        if top not in seen:  # 同じ区切りの文字は1回だけ調べる（find -exec が多いときに長さの2乗にしない）
+            seen[top] = (bool(RECORD_WRITE.search(top)), bool(re.search(r"\.ai-bunshin(?=$|[/\s\"';&|)])", top, re.I)))
+        writes, named = seen[top]
+        if not writes:
             continue
-        if re.search(r"\.ai-bunshin(?=$|[/\s\"';&|)])", top, re.I) or any(
+        if named or any(
                 rec.covers(f) for f in part_paths(p) | path_forms(p.cwd)):  # 実体で比べる（大文字小文字・リンク・ハードリンク）
             return True
     return False
@@ -1158,11 +1518,12 @@ def roots_from_input(payload):
     if not isinstance(inp, dict):
         return []
     base = base_cwd(payload)
+    recs = record_roots()
     if tool in ("Write", "Edit", "MultiEdit", "NotebookEdit"):
         p = inp.get("file_path") or inp.get("notebook_path")
         if isinstance(p, str) and p:
             for f in sorted(path_forms(p, base)):
-                r = find_owner(f)
+                r = find_owner(f) or hardlink_owner(f, recs)
                 if r is not None:
                     return [(r, None)]
         return []
@@ -1170,7 +1531,6 @@ def roots_from_input(payload):
         return []
     flat = normalize(inp["command"])
     an = analyze(flat, base)
-    recs = record_roots()
     if an.too_long:  # 確かめきれない長さ：記録にあるすべての本人のフォルダで、全体を判定する（止める側）
         seen, out = set(), []
         for _, r in recs:
@@ -1186,13 +1546,13 @@ def roots_from_input(payload):
         hit = {}
         for p in parts:
             cands = set()
-            for w in p.words:
+            for w in p.all_words:  # python3 -・bash・sh に渡す本文の語も見る（前の版と同じ）
                 for t in word_texts(w):
                     cands |= to_paths(t, p.cwd)
             cands_anc = set(cands) if p.cmd not in ("cd", "pushd") else set()  # 今いる場所は親とみなさない（cd ~ など）
             cands |= path_forms(p.cwd)
             for f in cands:
-                r = find_owner(f)
+                r = find_owner(f) or hardlink_owner(f, recs)
                 if r is not None:
                     hit[str(r)] = r
             for f in cands_anc:  # 本人のフォルダの親を指す（chmod -R ~/workspace など）。実体で比べる
@@ -1212,30 +1572,68 @@ def roots_from_input(payload):
                 chosen.append(g)
             if key in hit and not _read_only_group(g, parts):
                 tainted = True
-        out.append((r, "\n".join(chosen)))
+        # ヒアドキュメントのあるコマンドは、前の版と同じく全体（本文を含む）で判定する（本文を除いた区切りだけでは中のコードが見えない）
+        out.append((r, None if an.bodies else "\n".join(chosen)))
     return out
 
 
-def allow_patterns(root):
+def hardlink_owner(f, recs):
+    """f が、記録にある本人のフォルダの守っているもの（03_インプット・.claude の設定など）のハードリンクなら、その本人のフォルダ。
+    外の場所に作ったハードリンクへの書き込み（指摘4 の c3-15〜18）。ハードリンクでないファイルは調べない。"""
     try:
-        cfg = json.loads((root / "設定" / "config.json").read_text(encoding="utf-8"))
-        return [re.compile(p) for p in cfg.get("ng_allow", [])]
-    except (OSError, ValueError, re.error):
+        st = os.stat(f)
+    except (OSError, ValueError):
+        return None
+    if not stat.S_ISREG(st.st_mode) or st.st_nlink < 2:
+        return None
+    for _, r in recs:
+        if any(t.covers(f) for t in content_targets([r])):
+            return r
+    return None
+
+
+def _read_config(root):
+    """設定/config.json を読む。読めない・形が違う（dict でない）ときは {}。例外はすべて受ける（指摘5）。"""
+    try:
+        cfg = json.loads((Path(root) / "設定" / "config.json").read_text(encoding="utf-8"))
+        return cfg if isinstance(cfg, dict) else {}
+    except Exception:
+        return {}
+
+
+def allow_patterns(root):
+    """本人の許可する例外（ng_allow）。リストの中の文字列だけを使う。形が違う・読めない・正規表現として壊れているものは使わない
+    （例外が無い＝緩まない側。文字列そのものを1文字ずつ例外にしてしまう読み方もしない）。"""
+    items = _read_config(root).get("ng_allow", [])
+    if not isinstance(items, list):
         return []
+    out = []
+    for x in items:
+        if isinstance(x, str):
+            try:
+                out.append(re.compile(x))
+            except Exception:
+                continue
+    return out
 
 
 def dev_paths(root):
-    """本人設定（config の dev.projects）に登録した開発の置き場所（絶対パス）。"""
-    try:
-        cfg = json.loads((root / "設定" / "config.json").read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return []
+    """本人設定（config の dev.projects）に登録した開発の置き場所（絶対パス）。形が違う・解けないものは使わない（指摘5）。"""
+    cfg = _read_config(root)
     out = []
-    for prj in (cfg.get("dev") or {}).get("projects", []):
-        if prj.get("path"):
-            d = Path(os.path.expanduser(prj["path"]))
-            out.append((d if d.is_absolute() else root / d).resolve())
-    out.append((root / "05_開発").resolve())  # local モードの置き場所は登録がなくても対象
+    dev = cfg.get("dev")
+    projects = dev.get("projects", []) if isinstance(dev, dict) else []
+    for prj in projects if isinstance(projects, list) else []:
+        try:
+            if isinstance(prj, dict) and isinstance(prj.get("path"), str) and prj["path"]:
+                d = Path(os.path.expanduser(prj["path"]))
+                out.append(Path(os.path.realpath(d if d.is_absolute() else Path(root) / d)))
+        except Exception:
+            continue
+    try:
+        out.append(Path(os.path.realpath(Path(root) / "05_開発")))  # local モードの置き場所は登録がなくても対象
+    except Exception:
+        pass
     return out
 
 
@@ -1250,11 +1648,14 @@ def in_dev_area(command, payload, root):
     def resolve(base, text):
         t = os.path.expanduser(text.strip("'\""))
         try:
-            return (Path(t) if os.path.isabs(t) else base / t).resolve()
-        except (OSError, ValueError):
+            return Path(os.path.realpath(Path(t) if os.path.isabs(t) else base / t))
+        except Exception:
             return None
 
-    cur = Path(payload.get("cwd") or root).resolve()
+    try:
+        cur = Path(os.path.realpath(payload.get("cwd") or root))
+    except Exception:
+        return False  # 解けないときは置き場所の外とみなす（緩まない側。指摘5）
     cds = re.findall(r"(?:^|[;&|(]\s*)cd\s+(\"[^\"]+\"|'[^']+'|[^\s;&|)]+)", command)
     for t in cds:
         cur = resolve(cur, t)
@@ -1288,32 +1689,52 @@ GLOBAL_INSTALL = re.compile(r"(?:\s-g\b|--global\b|--location[= ]global\b|\bbrew
 
 
 def is_maintainer(root):
+    """メンテする人か。読めない・形が違うときは False（緩まない側。指摘5）。"""
     if root is None:
         return False
     try:
-        return bool(json.loads((root / "設定" / "config.json").read_text(encoding="utf-8")).get("maintainer"))
-    except (OSError, ValueError):
+        return bool(_read_config(root).get("maintainer"))
+    except Exception:
         return False
 
 
 def plugin_area(path_text):
-    """プラグインのコピー（~/.claude/plugins/ の下）か、プラグインの元（.claude-plugin/ を持つフォルダの下）か。"""
+    """プラグインのコピー（~/.claude/plugins/ の下）か、プラグインの元（.claude-plugin/ を持つフォルダの下）か。
+    リンクのループなどで解けないときも例外にしない（realpath を使う）。思わぬ例外のときは "unknown"（中では止める側。指摘5）。"""
     try:
-        q = Path(os.path.expanduser(path_text)).resolve()
-    except (OSError, ValueError):
+        q = Path(os.path.realpath(os.path.expanduser(path_text)))
+        plugins = Path(os.path.realpath(Path.home() / ".claude" / "plugins"))
+        if q == plugins or plugins in q.parents:
+            return "copy"
+        for d in [q, *q.parents]:
+            try:
+                if (d / ".claude-plugin" / "plugin.json").exists() or (d / ".claude-plugin" / "marketplace.json").exists():
+                    return "source"
+            except (OSError, ValueError):
+                continue
         return None
-    plugins = (Path.home() / ".claude" / "plugins").resolve()
-    if q == plugins or plugins in q.parents:
-        return "copy"
-    for d in [q, *q.parents]:
-        if (d / ".claude-plugin" / "plugin.json").exists() or (d / ".claude-plugin" / "marketplace.json").exists():
-            return "source"
-    return None
+    except Exception:
+        return "unknown"
 
 
 WRITE_WORDS = re.compile(r"(?:>|\btee\b|\s-i\b|\b(?:cp|mv|ln|rsync|install|touch|mkdir|rm|truncate|dd|unzip|tar|patch)\b|"
                          r"open\(|\.write|write_text|writeFile|\bcd\b|\bpushd\b)")
 READ_ONLY_CP = re.compile(r"^\s*cp\s+(?:-(?!t\b)[A-Za-su-z]+\s+)*\S+\s+\S+\s*$")  # -t（コピー先の指定）付きは読み出しとみなさない
+
+
+PLUGIN_COPY_WORD = re.compile(r"\.claude/plugins(?:/|$|[\s\"'])")  # 前の版と同じ当て方（広げると新しく止まるものが出る）
+
+
+def _plain_read(g):
+    """区切り g が、読むだけの1つのコマンドか（cat・ls など。向け先・$( )・` ` なし）。"""
+    if re.search(r"[>`]|\$\(|<\(", g):
+        return False
+    try:
+        words = split_redirs(seg_words(g))[0]
+    except Exception:
+        return False
+    i, _, _ = unwrap(words, "/")
+    return i < len(words) and os.path.basename(words[i]) in READ_ONLY_CMDS - {"cd", "pushd"}
 
 
 def plugin_bash_check(command, root):
@@ -1324,17 +1745,23 @@ def plugin_bash_check(command, root):
     if not WRITE_WORDS.search(command):
         return None
     tokens = re.findall(r"[\"']?([^\s\"';&|()]+)[\"']?", command)
-    copy_hit = re.search(r"\.claude/plugins(?:/|$|[\s\"'])", command)
-    if copy_hit:
-        # cp <プラグインのコピー> <外> だけは読み出しなので通す
-        if READ_ONLY_CP.match(command):
-            parts = command.split()
-            if ".claude/plugins" in parts[-2] and ".claude/plugins" not in parts[-1]:
-                return None
-        return "プラグインのコピーの書き換え（Claude Code が読み込む共通部分。元を直して更新する）"
+    if PLUGIN_COPY_WORD.search(command):
+        # 区切り（; && || 改行）ごとに見る。読むだけの区切り（cat ~/.claude/plugins/x）のあとの、別の場所での cd や書き込みでは止めない。
+        # プラグインのコピーを書く区切りと、それを読むだけでない形で受け渡した（変数・cd など）あとの、書き込みの語のある区切りは止める
+        tainted = False
+        for g in split_top(command):
+            mentions = bool(PLUGIN_COPY_WORD.search(g))
+            if (mentions or tainted) and WRITE_WORDS.search(g):
+                if mentions and READ_ONLY_CP.match(g):  # cp <プラグインのコピー> <外> だけは読み出しなので通す
+                    parts = g.split()
+                    if ".claude/plugins" in parts[-2] and ".claude/plugins" not in parts[-1]:
+                        continue
+                return "プラグインのコピーの書き換え（Claude Code が読み込む共通部分。元を直して更新する）"
+            if mentions and not _plain_read(g):
+                tainted = True
     if root is not None and not is_maintainer(root):  # 元の保護は本人のフォルダの中だけ（ほかのプロジェクトでは誰がメンテする人か分からない）
         for tk in tokens:
-            if "/" in tk and plugin_area(tk.replace("$HOME", "~")) == "source":
+            if "/" in tk and plugin_area(tk.replace("$HOME", "~")) in ("source", "unknown"):
                 if READ_ONLY_CP.match(command) and tk == command.split()[-2]:
                     continue
                 return "共通部分（プラグインの元）の書き換え（メンテする人だけ。提案の下書きにする）"
@@ -1396,6 +1823,9 @@ def rel_in_root(path, root, base):
     return rels[0] if rels else None
 
 
+UNKNOWN_CWD_LABEL = "cd の行き先を読み切れない（ワイルドカードの当たりが0個か2個以上・長すぎる・cd -）あとの操作"
+
+
 def check(payload, root, command=None):
     """本人のフォルダ root の規則で判定する。command を渡したら、Bash はその部分だけを見る（外のセッション）。"""
     tool = payload.get("tool_name", "")
@@ -1410,16 +1840,23 @@ def check(payload, root, command=None):
                         and in_dev_area(flat, payload, root)):
                     continue
                 return label, full
-        label = input_hit(analyze(flat, base_cwd(payload, root)), root)
+        an = analyze(flat, base_cwd(payload, root))
+        label = input_hit(an, root)
         if label is None and "<<" in q and any(m(q) for m in LEGACY_INPUT_RULES):
             label = "元データの移動・上書き"
+        if label is None and any(p.launched and any(m(quiet(p.text)) for m in LEGACY_INPUT_RULES) for p in an.parts):
+            label = "元データの移動・上書き"  # 起動役（xargs・find -exec など）のあるコマンドには、前の文字の規則も残す（指摘2）
+        if label is None and unresolvable_source(an):
+            label = "動かす・消す元を読み切れない（リンクのループ）"
+        if label is None and any(p.cwd_unknown and p.cmd and p.cmd not in READ_ONLY_CMDS for p in an.parts):
+            label = UNKNOWN_CWD_LABEL  # cd の行き先を読み切れないあとで、読むだけでない操作をする（止める側。T092 で ask）
         if label:
             return label, full
     elif tool in WRITE_TOOLS:
         path = inp.get("file_path") or inp.get("notebook_path") or ""
         if not path:
             return None
-        if plugin_area(path) == "source" and not is_maintainer(root):
+        if plugin_area(path) in ("source", "unknown") and not is_maintainer(root):
             return "共通部分（プラグインの元）の書き換え（メンテする人だけ。提案の下書きにする）", path
         base = base_cwd(payload, root)
         forms = path_forms(path, base)
@@ -1451,6 +1888,7 @@ def deny(label, what, root, tool=None):
 def judge(payload):
     """判定する。None（当たらない）か、(判定 "deny"／"allow"（本人の許可する例外で通す）, ラベル, 対象, ログを書く本人のフォルダ)。"""
     root = project_dir(payload)
+    _SEEN["root"] = root
     hit = global_check(payload, root)  # プラグイン・見張りの記録・本人のフォルダそのもの・リンク（どこからでも）
     label = what = None
     log_root = root
@@ -1474,19 +1912,107 @@ def judge(payload):
     return "deny", label, what, log_root
 
 
-def run_guard():
-    payload = json.load(sys.stdin)
+_SEEN = {"root": "unset"}  # judge が見つけた本人のフォルダ（締め切りを超えたときに使う）
+TIMEOUT_LABEL = "見張りが時間内に判定できませんでした（長すぎる・複雑すぎるコマンド）"
+BROKEN_LABEL = "見張りの入力を読めませんでした"
+
+
+def mentions_owner(payload):
+    """入力の文面に、記録にある本人のフォルダ（絶対パス・~/ の形・$HOME の形）が出てくるか。出てくればその本人のフォルダ。
+    締め切りを超えたとき・読み切れないときに、外のセッションで止めるかを決める（指摘3・5）。大文字小文字は区別しない。"""
     if not isinstance(payload, dict):
-        raise ValueError("payload is not an object")
-    res = judge(payload)
-    if res and res[0] == "deny":
-        deny(res[1], res[2], res[3], payload.get("tool_name"))
+        return None
+    try:
+        text = nfc(json.dumps(payload.get("tool_input"), ensure_ascii=False)).casefold()
+    except Exception:
+        return None
+    home = nfc(os.path.expanduser("~")).rstrip(os.sep)
+    for f, r in record_roots():
+        forms = {nfc(f), nfc(str(r))}
+        for x in list(forms):
+            if x.startswith(home + os.sep):
+                rel = x[len(home) + 1:]
+                forms |= {"~/" + rel, "$HOME/" + rel, "${HOME}/" + rel}
+        if any(x.casefold() in text for x in forms if x):
+            return r
+    return None
+
+
+def fallback_decision(payload, label):
+    """判定しきれなかったとき（締め切り超え・思わぬ例外）：(deny するか, ラベル, ログを書く本人のフォルダ)。
+    本人のフォルダの中なら止める。外は、記録にある本人のフォルダが文面に出ていれば止め、出ていなければ通す。"""
+    root = _SEEN["root"]
+    if root == "unset":
+        try:
+            root = project_dir(payload if isinstance(payload, dict) else {})
+        except Exception:
+            root = None
+    if root is not None:
+        return True, label, root
+    hit = mentions_owner(payload)
+    if hit is not None:
+        return True, label, hit
+    return False, label, None
+
+
+def _arm(sec):
+    try:
+        return start_deadline(sec)
+    except Exception:
+        return False
+
+
+def _disarm():
+    try:
+        stop_deadline()
+    except Exception:
+        pass
+
+
+def decide(payload_text):
+    """入力の文字列から判定する。締め切り（DEADLINE_SEC）と、思わぬ例外の受け皿つき。
+    (deny するか, ラベル, 対象, ログを書く本人のフォルダ, ツール名, 例外の受け皿を通ったか)"""
+    payload = None
+    _arm(deadline_seconds())
+    try:
+        payload = json.loads(payload_text)
+        if not isinstance(payload, dict):
+            raise ValueError("payload is not an object")
+        res = judge(payload)
+        _disarm()
+        if res is None:
+            return False, None, None, None, payload.get("tool_name"), False
+        decision, label, what, log_root = res
+        return decision == "deny", label, what, log_root, payload.get("tool_name"), False
+    except DeadlineExceeded:
+        label = TIMEOUT_LABEL
+    except Exception:
+        label = BROKEN_LABEL
+    finally:
+        _disarm()
+    tool = payload.get("tool_name") if isinstance(payload, dict) else None
+    _arm(1.0)  # 受け皿にも短い締め切り。超えたら止める側
+    try:
+        d, label, root = fallback_decision(payload, label)
+    except DeadlineExceeded:
+        d, root = True, None
+    except Exception:
+        d, root = True, None
+    finally:
+        _disarm()
+    return d, label, "（入力不明）" if label == BROKEN_LABEL else "（時間切れ）", root, tool, True
+
+
+def run_guard():
+    deny_it, label, what, root, tool, _ = decide(sys.stdin.read())
+    if deny_it:
+        deny(label, what, root, tool)
     return 0
 
 
 def explain(command):
     """--explain "<コマンド>"：今いる場所で Bash のコマンドを判定し、判定（deny／pass）と理由の語を出す。
-    見張りの記録（owners.json）にも ng_log にも書かない。"""
+    見張りの記録（owners.json）にも ng_log にも書かない。締め切りも本物と同じ。"""
     global DRY_RUN
     DRY_RUN = True
     try:
@@ -1494,28 +2020,22 @@ def explain(command):
     except OSError:
         cwd = os.path.expanduser("~")
     payload = {"tool_name": "Bash", "tool_input": {"command": command}, "cwd": cwd}
-    try:
-        res = judge(payload)
-    except Exception as e:  # 本物の見張りと同じく、本人のフォルダの中なら止める側
-        try:
-            root = project_dir({})
-        except Exception:
-            root = None
-        print("判定：" + ("deny" if root is not None else "pass"))
-        print(f"理由：見張りの入力を読めませんでした（{type(e).__name__}）")
+    deny_it, label, what, root, tool, fell = decide(json.dumps(payload, ensure_ascii=False))
+    if fell:
+        print("判定：" + ("deny" if deny_it else "pass"))
+        print(f"理由：{label}")
         return 0
-    if res is None:
+    if label is None:
         print("判定：pass")
         print("理由：当たる規則なし")
         return 0
-    decision, label, what, log_root = res
-    if decision == "allow":
+    if not deny_it:
         print("判定：pass")
         print(f"理由：本人の許可する例外（ng_allow）に一致（当たった規則：{label}）")
     else:
         print("判定：deny")
         print(f"理由：{label}")
-    print(f"本人のフォルダ：{log_root if log_root is not None else '（なし）'}")
+    print(f"本人のフォルダ：{root if root is not None else '（なし）'}")
     return 0
 
 
@@ -1527,14 +2047,17 @@ def main():
         return explain(" ".join(sys.argv[2:]))
     try:
         return run_guard()
-    except Exception:
-        # 入力が壊れていて読めなかった：本人のフォルダの中（起動場所から上にたどって見つかる）なら止める、外なら通す
+    except BaseException:
+        # ここまで来るのは deny の書き出しなどの失敗だけ。中なら止める
         try:
             root = project_dir({})
-        except Exception:
+        except BaseException:
             root = None
         if root is not None:
-            deny("見張りの入力を読めませんでした", "（入力不明）", root)
+            try:
+                deny(BROKEN_LABEL, "（入力不明）", root)
+            except BaseException:
+                pass
         return 0
 
 
