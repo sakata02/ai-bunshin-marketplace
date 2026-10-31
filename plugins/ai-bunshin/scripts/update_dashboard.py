@@ -15,6 +15,7 @@ import json
 import math
 import os
 import re
+import shutil
 import sys
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -99,6 +100,44 @@ except Exception:  # 予定が読めなくても、タスク管理は止めな�
 RULES_COPY = ROOT / ".claude" / "rules" / "ai-bunshin-common.md"   # .claude/rules/ は自動で読み込まれる。起動のたびにプラグインから写す
 
 
+def _tmp_path(path):
+    """同じフォルダの一時ファイル名（置き換えは同じフォルダの中でしかできないため）。"""
+    path = Path(path)
+    return path.with_name(f".{path.name}.{os.getpid()}.tmp")
+
+
+def _drop_tmp(tmp):
+    try:
+        tmp.unlink()
+    except OSError:
+        pass
+
+
+def atomic_write_text(path, text):
+    """一時ファイルに書いてから os.replace で置き換える。書いている途中で止まっても、元のファイルは壊れない（T073）。"""
+    tmp = _tmp_path(path)
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        _drop_tmp(tmp)
+        raise
+
+
+def atomic_save(path, save):
+    """save(一時ファイルのパス) で作ってから置き換える（Excel 用）。失敗したら一時ファイルを残さない。"""
+    tmp = _tmp_path(path)
+    try:
+        save(tmp)
+        os.replace(tmp, path)
+    except BaseException:
+        _drop_tmp(tmp)
+        raise
+
+
 def sync_rules():
     """共通の指揮官ルールを本人のフォルダの .claude/rules/ に写す（hook の出力は長いと切れるため）。
     中身が変わったら True。"""
@@ -110,7 +149,7 @@ def sync_rules():
     text = head + RULES_MD.read_text(encoding="utf-8")
     if RULES_COPY.exists() and RULES_COPY.read_text(encoding="utf-8") == text:
         return False
-    RULES_COPY.write_text(text, encoding="utf-8")
+    atomic_write_text(RULES_COPY, text)
     return True
 TASKS_JSON = ROOT / "00_タスク管理" / "data" / "tasks.json"
 XLSX = ROOT / "00_タスク管理" / "タスク管理.xlsx"
@@ -122,6 +161,10 @@ KAIZEN_MD = ROOT / "04_ナレッジ" / "改善ログ.md"
 SPRINT_DIR = ROOT / "01_スプリント"
 HISTORY_FIELDS = ["title", "status", "progress", "pdca", "due", "assignee", "done_date", "points", "reestimate"]
 LOCK_FILE = ROOT / "scripts" / "auto" / ".lock"
+AUTO_DIR = ROOT / "scripts" / "auto"
+AUTO_RUN_SH = AUTO_DIR / "run.sh"                 # install.sh が作る入口。あれば「自動実行を登録している」とみなす
+AUTO_PHASES = (("plan", "計画"), ("review", "振り返り"))   # launchd が起動する段階。それぞれの「最後に成功した日時」を見る
+AUTO_STALE_DAYS = 2                               # 平日にこの日数以上、成功がなければ起動時に知らせる
 EXTRA_FROM_DAY = 4   # 追加でタスクを取ってよいのは、計画のある日が4日目以降
 EXTRA_POINTS = 4     # 追加で取ってよい量：約束＋4pt まで
 EXTRA_CUTOFF = "16:30"  # この時刻を過ぎたら新しいタスクは取らない
@@ -1130,6 +1173,38 @@ def assignment_warnings(tasks):
     return out
 
 
+def last_success_of(phase):
+    """段階（plan／review／do）の最後に成功した日時（daily_cycle.sh が scripts/auto/last_success_<段階>.txt に書く）。
+    ファイルが無い・読めない・形が違うときは None。"""
+    try:
+        text = (AUTO_DIR / f"last_success_{phase}.txt").read_text(encoding="utf-8").strip()
+        return datetime.strptime(text[:10], "%Y-%m-%d").date()
+    except (OSError, ValueError):
+        return None
+
+
+def auto_run_warning(today, cal):
+    """自動実行が止まっていることに気づくための1行（起動時のまとめの先頭に出す。T073）。
+    登録している（scripts/auto/run.sh がある）フォルダで、計画か振り返りの最後の成功から、今日より前の営業日が
+    AUTO_STALE_DAYS 日以上たっていれば「⚠ 自動実行が N日 動いていません」。土日・祝日は数えない。
+    記録がまだ無い段階（この仕組みを入れる前の登録）は見ない。"""
+    if not AUTO_RUN_SH.exists():
+        return ""
+    missed, seen = 0, []
+    for phase, label in AUTO_PHASES:
+        last = last_success_of(phase)
+        if last is None:
+            continue
+        # last の翌日から today の前日まで（今日の分はまだ動く前かもしれないので数えない）
+        n = cal.workdays_between(last + timedelta(days=1), today - timedelta(days=1))
+        seen.append(f"{label} {last.month}/{last.day}")
+        missed = max(missed, n)
+    if missed < AUTO_STALE_DAYS:
+        return ""
+    return (f"[⚠ 自動実行が {missed}日 動いていません]（最後の成功：{'・'.join(seen)}）"
+            "scripts/auto/logs と launchd.err.log を見て、直らなければ install.sh を実行し直してください")
+
+
 def summary_text(ctx, limit=10, with_ids=False):
     lines = [f"[{AI_NAME} タスク状況 {fmt(ctx['today'])}] 全体完了予定 {project_end_text(ctx)}"
              f"／ベロシティ {ctx['velocity']:.1f}pt/日（{ctx['velocity_src']}）"]
@@ -1209,7 +1284,7 @@ def record_history(data):
             with HISTORY_JSONL.open("a", encoding="utf-8") as f:
                 for e in entries:
                     f.write(json.dumps(e, ensure_ascii=False) + "\n")
-    SNAPSHOT_JSON.write_text(json.dumps(current, ensure_ascii=False, indent=1), encoding="utf-8")
+    atomic_write_text(SNAPSHOT_JSON, json.dumps(current, ensure_ascii=False, indent=1))
 
 
 def history_on(day):
@@ -1527,13 +1602,62 @@ def write_excel(ctx):
     build_gantt(wb, ctx)
     build_sprint_history(wb, ctx)
     try:
-        wb.save(XLSX)
-    except PermissionError:
-        return "（タスク管理.xlsx が Excel で開かれているため保存できませんでした。閉じてから /status を実行してください）"
+        atomic_save(XLSX, lambda tmp: wb.save(tmp))   # 一時ファイルに作ってから置き換える。途中で止まっても、元の Excel は壊れない
+    except OSError:   # Excel が開いている（Windows は PermissionError）ほか、保存先に書けないとき。落ちずに、ほかの生成物は書く
+        return "（タスク管理.xlsx を保存できませんでした。Excel を閉じてから、もう一度 /status を実行してください）"
     return ""
 
 
+# ---------- tasks.json の形の版（schema_version） ----------
+
+SCHEMA_VERSION = 1
+
+
+def _migrate_0_to_1(data):
+    """版が無い tasks.json → 版 1。形は変わらず、schema_version を足すだけ（仕組みだけ作る。T073）。"""
+    return data
+
+
+# 版 n の tasks.json を n+1 に直す関数（n は 0 から）。形を変えるときは、ここに足して SCHEMA_VERSION を上げる
+MIGRATIONS = [_migrate_0_to_1]
+
+
+def schema_version_of(data):
+    v = data.get("schema_version") if isinstance(data, dict) else None
+    return v if isinstance(v, int) and not isinstance(v, bool) and v >= 0 else 0
+
+
+def migrate_tasks_json(path, today):
+    """tasks.json の版が無い・古いときに、新しい形に移す。移したときは案内の1行、移さなかったときは None を返す。
+    移す前の tasks.json は、同じフォルダに .bak_<日付> として残す。書き換えは一時ファイル→置き換え。
+    読んでから書くまでの間に、ほかの人（会話・自動実行）が tasks.json を書き換えていたら、今回は移さない（次の機会に移す）。"""
+    path = Path(path)
+    raw = path.read_bytes()
+    data = json.loads(raw.decode("utf-8"))
+    if not isinstance(data, dict):
+        return None
+    ver = schema_version_of(data)
+    if ver >= SCHEMA_VERSION:
+        return None
+    for step in MIGRATIONS[ver:SCHEMA_VERSION]:
+        data = step(data)
+    data.pop("schema_version", None)
+    data = {"schema_version": SCHEMA_VERSION, **data}   # 版は先頭に置く
+    bak = path.with_name(f"{path.name}.bak_{today.strftime('%Y%m%d')}")
+    n = 2
+    while bak.exists():   # 同じ日にもう一度移すときも、前の控えを上書きしない
+        bak = path.with_name(f"{path.name}.bak_{today.strftime('%Y%m%d')}_{n}")
+        n += 1
+    shutil.copyfile(path, bak)
+    if path.read_bytes() != raw:
+        _drop_tmp(bak)
+        return None
+    atomic_write_text(path, json.dumps(data, ensure_ascii=False, indent=2) + "\n")
+    return f"tasks.json を新しい形式（schema_version {SCHEMA_VERSION}）に移しました（移す前の控え：{bak.name}）"
+
+
 def run(today):
+    migrated = migrate_tasks_json(TASKS_JSON, today)
     data = json.loads(TASKS_JSON.read_text(encoding="utf-8"))
     errors = validate(data)
     if errors:
@@ -1556,11 +1680,11 @@ def run(today):
     ctx = dict(data=data, tasks=tasks, today=today, cal=cal, velocity=velocity, velocity_src=velocity_src, events=events,
                events_error=events_error, events_stale=events_stale,
                open_tasks=open_tasks, project_end=project_end, sprint=current_sprint(data, today),
-               now=datetime.now().strftime("%Y-%m-%d %H:%M"))
+               now=datetime.now().strftime("%Y-%m-%d %H:%M"), migrated=migrated)
 
     saved_note = write_excel(ctx)
-    BOARD_MD.write_text(build_board_md(ctx), encoding="utf-8")
-    REQUEST_MD.write_text(build_requests_md(ctx), encoding="utf-8")
+    atomic_write_text(BOARD_MD, build_board_md(ctx))
+    atomic_write_text(REQUEST_MD, build_requests_md(ctx))
     return ctx, saved_note
 
 
@@ -1623,6 +1747,8 @@ def main():
         print(msg, file=sys.stderr)
         return 1
 
+    if ctx.get("migrated") and (args.today_status or args.plan_context or args.review_context):
+        print(ctx["migrated"], file=sys.stderr)   # 1行目の判定（OPEN/SKIP）を崩さないよう、標準エラーに出す
     if args.today_status:
         print((today_sprint(ctx["data"], today) or {}).get("status", ""))
         return 0
@@ -1635,11 +1761,17 @@ def main():
 
     # 案内は起動時と手動実行のときだけ（tasks.json を書くたびの hook では毎回は出さない）
     text = summary_text(ctx, with_ids=not (args.session or args.hook)) + (f"\n{note}" if note and not args.hook else "")
+    if ctx.get("migrated"):
+        text += f"\n{ctx['migrated']}"
     if args.session:
         # 共通の指揮官ルールは .claude/rules/ai-bunshin-common.md に写す（自動で読み込まれる）
         if sync_rules():
             text = ("[共通ルールが更新されました] .claude/rules/ai-bunshin-common.md を読み直してから作業してください"
                     "（この起動では古い版が読み込まれている可能性があります）\n") + text
+        # 自動実行が止まっている知らせは、いちばん先頭（hook の出力は約2KBで切れるため）
+        stale = auto_run_warning(today, ctx["cal"])
+        if stale:
+            text = stale + "\n" + text
     if args.hook or args.session:
         event = "PostToolUse" if args.hook else "SessionStart"
         print(json.dumps({"hookSpecificOutput": {"hookEventName": event, "additionalContext": text}}, ensure_ascii=False))

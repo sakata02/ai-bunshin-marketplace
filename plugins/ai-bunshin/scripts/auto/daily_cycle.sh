@@ -23,7 +23,7 @@ import json, os, sys
 from pathlib import Path
 root = Path(sys.argv[1])
 try:
-    cfg = json.load(open(root / "設定" / "config.json"))
+    cfg = json.load(open(root / "設定" / "config.json", encoding="utf-8"))
 except Exception:
     sys.exit(0)
 for p in (cfg.get("dev") or {}).get("projects", []):
@@ -34,7 +34,7 @@ PY
 )"})
 ADD_DIR_ARGS=()
 for d in ${(u)ADD_DIRS}; do ADD_DIR_ARGS+=(--add-dir "$d"); done
-AI_NAME=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("ai_name","AI"))' "$ROOT/設定/config.json" 2>/dev/null || echo AI)
+AI_NAME=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1], encoding="utf-8")).get("ai_name","AI"))' "$ROOT/設定/config.json" 2>/dev/null || echo AI)
 LOG_DIR="$ROOT/scripts/auto/logs"
 LOCK="$ROOT/scripts/auto/.lock"
 TODAY=$(date +%Y%m%d)
@@ -42,6 +42,12 @@ LOG="$LOG_DIR/$TODAY.log"
 mkdir -p "$LOG_DIR"
 cd "$ROOT" || exit 1
 
+# 段階ごとの「最後に成功した日時」（scripts/auto/last_success_<段階>.txt）。起動時のまとめが、2営業日以上なければ知らせる（update_dashboard.py。T073）
+# 成功＝その段階が正常に終わったこと（営業日でない・計画や振り返りが済んでいて何もしなかった、も含む）。失敗・中止では書かない
+mark_ok() {
+  local f="$ROOT/scripts/auto/last_success_$1.txt"
+  date '+%Y-%m-%d %H:%M' > "$f.tmp.$$" && mv -f "$f.tmp.$$" "$f"
+}
 log() { echo "[$(date '+%H:%M:%S') $PHASE] $*" >> "$LOG"; }
 notify() {
   local msg=${1//\"/\'}
@@ -65,6 +71,7 @@ CONTEXT=$(python3 "$DASH" $CTX < /dev/null 2>> "$LOG")
 HEAD=$(echo "$CONTEXT" | head -1)
 log "$HEAD"
 if [ "$HEAD" = "SKIP: 営業日ではない" ]; then
+  mark_ok "$PHASE"
   exit 0
 fi
 
@@ -101,6 +108,7 @@ fi
 case "$PHASE:$HEAD" in
   "plan:SKIP: 今日の計画は作成済み")
     # 9時前に手動で計画した日は、まだ実行していなければ実行に入る
+    mark_ok plan
     if [ "$(python3 "$DASH" --today-status < /dev/null 2>> "$LOG")" = "計画済み" ]; then
       log "計画は作成済み・未実行のため、実行に入る"
       PHASE="do"; LABEL="実行"; SKILL="/ai-bunshin:daily-do"
@@ -108,20 +116,22 @@ case "$PHASE:$HEAD" in
       log "スキップ（計画・実行とも済み）"; exit 0
     fi ;;
   plan:SKIP:*)
-    log "スキップ"; exit 0 ;;
+    log "スキップ"; mark_ok plan; exit 0 ;;
   do:OPEN)
     # --plan-context が OPEN＝今日の計画がまだない
     log "今日の計画がないため実行しない"
     notify "今日の計画がないため、実行はしませんでした"
+    mark_ok do
     exit 0 ;;
   "review:SKIP: 振り返り済み")
-    log "今日の振り返りは済んでいる"; exit 0 ;;
+    log "今日の振り返りは済んでいる"; mark_ok review; exit 0 ;;
   review:SKIP:*)
     # 動きがない日は Claude を起動せず、1行だけ残す
     OUT=$(echo "$CONTEXT" | sed -n 's/^議事録の保存先: //p')
     mkdir -p "$(dirname "$OUT")"
     echo "# $(date +%Y-%m-%d) 振り返り — 開催なし（${HEAD#SKIP: }）" > "$OUT"
     notify "今日は動きがなかったので、振り返りは開きませんでした"
+    mark_ok review
     exit 0 ;;
   *:OPEN|do:*) ;;
   *)
@@ -159,6 +169,7 @@ if [ "$PHASE" = "review" ] && [ $STATUS -eq 0 ]; then
 fi
 
 if [ $STATUS -eq 0 ] && [ -n "$RESULT" ]; then
+  mark_ok "$PHASE"
   notify "$(echo "$RESULT" | tail -3 | tr '\n' ' ')"
 else
   notify "${LABEL}に失敗しました（scripts/auto/logs/$TODAY.log）"
@@ -188,6 +199,7 @@ if [ "$PHASE" = "plan" ]; then
   echo "$RESULT" >> "$LOG"
   log "終了 (exit=$STATUS)"
   if [ $STATUS -eq 0 ] && [ -n "$RESULT" ]; then
+    mark_ok do
     notify "$(echo "$RESULT" | tail -3 | tr '\n' ' ')"
   else
     notify "実行に失敗しました（scripts/auto/logs/$TODAY.log）"

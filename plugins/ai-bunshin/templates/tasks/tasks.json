@@ -1,4 +1,5 @@
 {
+  "schema_version": 1,
   "project": {
     "name": "{{AIの名前}}",
     "daily_capacity_default": 8.0,

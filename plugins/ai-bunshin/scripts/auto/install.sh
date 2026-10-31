@@ -14,12 +14,12 @@ HOME_DIR="${1:A}"
 PLUGIN_ROOT="${0:A:h:h:h}"
 read PLAN_H PLAN_M REVIEW_H REVIEW_M <<< "$(python3 - "$HOME_DIR/設定/config.json" <<'PY'
 import json, sys
-c = json.load(open(sys.argv[1])).get("schedule", {})
+c = json.load(open(sys.argv[1], encoding="utf-8")).get("schedule", {})
 p = c.get("plan", "09:00").split(":"); r = c.get("review", "17:00").split(":")
 print(int(p[0]), int(p[1]), int(r[0]), int(r[1]))
 PY
 )"
-CONF_PATH=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("path",""))' "$HOME_DIR/設定/config.json")
+CONF_PATH=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1], encoding="utf-8")).get("path",""))' "$HOME_DIR/設定/config.json")
 RUN_PATH="${CONF_PATH:-$PATH}"
 
 mkdir -p "$HOME_DIR/scripts/auto/logs"
@@ -30,12 +30,25 @@ export PATH="$RUN_PATH"
 export AI_BUNSHIN_HOME="$HOME_DIR"
 # プラグインの場所：Claude Code が実際に読み込んでいる場所（installed_plugins.json の installPath）。更新で変わるので毎回調べる
 PR=\$(python3 -c 'import json,os,sys
-d=json.load(open(os.path.expanduser("~/.claude/plugins/installed_plugins.json"))).get("plugins",{})
+d=json.load(open(os.path.expanduser("~/.claude/plugins/installed_plugins.json"), encoding="utf-8")).get("plugins",{})
 c=[e for k,v in d.items() if k.startswith("ai-bunshin@") for e in v if e.get("projectPath") in (sys.argv[1],None)]
 print(c[-1]["installPath"] if c else "")' "\$AI_BUNSHIN_HOME" 2>/dev/null)
 [ -f "\$PR/scripts/auto/daily_cycle.sh" ] || PR="$PLUGIN_ROOT"
+# ここで失敗すると daily_cycle.sh の通知まで届かない（プラグインの更新でパスが変わったときなど）ので、ここでも知らせる（T073）
+if [ ! -f "\${PR%/}/scripts/auto/daily_cycle.sh" ]; then
+  mkdir -p "\$AI_BUNSHIN_HOME/scripts/auto/logs"
+  echo "[\$(date '+%H:%M:%S') \$1] 自動実行の本体（\${PR%/}/scripts/auto/daily_cycle.sh）が見つかりません。install.sh を実行し直してください" >> "\$AI_BUNSHIN_HOME/scripts/auto/logs/\$(date +%Y%m%d).log"
+  osascript -e 'display notification "自動実行を始められませんでした（プラグインの場所が変わった可能性。install.sh を実行し直してください）" with title "AI分身"' 2>/dev/null
+  exit 1
+fi
 exec /bin/zsh "\${PR%/}/scripts/auto/daily_cycle.sh" "\$1"
 RUN
+
+# 「最後に成功した日時」の最初の値として、登録した日時を置く（無いときだけ）。登録したのに run.sh の途中で毎日失敗する場合も、
+# 起動時のまとめが「自動実行が N日 動いていません」と知らせられるようにする（update_dashboard.py。T073）
+for ph in plan review; do
+  [ -f "$HOME_DIR/scripts/auto/last_success_$ph.txt" ] || date '+%Y-%m-%d %H:%M' > "$HOME_DIR/scripts/auto/last_success_$ph.txt"
+done
 
 for spec in "plan $PLAN_H $PLAN_M" "review $REVIEW_H $REVIEW_M"; do
   set -- ${=spec}
