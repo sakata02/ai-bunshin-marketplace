@@ -44,10 +44,10 @@ fi
 exec /bin/zsh "\${PR%/}/scripts/auto/daily_cycle.sh" "\$1"
 RUN
 
-# 「最後に成功した日時」の最初の値として、登録した日時を置く（無いときだけ）。登録したのに run.sh の途中で毎日失敗する場合も、
-# 起動時のまとめが「自動実行が N日 動いていません」と知らせられるようにする（update_dashboard.py。T073）
+# 「最後に成功した日時」を、実行するたびに「いま」に書き直す（登録し直した日から数え直す）。登録したのに run.sh の途中で
+# 毎日失敗する場合も、起動時のまとめが「自動実行が N日 動いていません」と知らせられるようにする（update_dashboard.py。T073）
 for ph in plan review; do
-  [ -f "$HOME_DIR/scripts/auto/last_success_$ph.txt" ] || date '+%Y-%m-%d %H:%M' > "$HOME_DIR/scripts/auto/last_success_$ph.txt"
+  date '+%Y-%m-%d %H:%M' > "$HOME_DIR/scripts/auto/last_success_$ph.txt"
 done
 
 for spec in "plan $PLAN_H $PLAN_M" "review $REVIEW_H $REVIEW_M"; do

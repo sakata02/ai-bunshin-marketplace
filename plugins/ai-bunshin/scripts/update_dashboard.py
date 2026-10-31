@@ -16,7 +16,9 @@ import math
 import os
 import re
 import shutil
+import subprocess
 import sys
+import time
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
@@ -113,15 +115,45 @@ def _drop_tmp(tmp):
         pass
 
 
-def atomic_write_text(path, text):
-    """一時ファイルに書いてから os.replace で置き換える。書いている途中で止まっても、元のファイルは壊れない（T073）。"""
+class FileChanged(Exception):
+    """置き換える直前に、元のファイルがほかの人に書き換えられていた（移しは見送る）。"""
+
+
+def _keep_mode(path, tmp):
+    """元のファイルの権限を一時ファイルに引き継ぐ（置き換えで権限が既定に戻らないように）。元が無いときは何もしない。"""
+    try:
+        shutil.copymode(path, tmp)
+    except OSError:
+        pass
+
+
+def _replace_with_retry(tmp, path):
+    """os.replace。相手が一瞬つかんでいる（Windows の PermissionError など）ときは、0.2秒おいて最大3回まで試す。"""
+    for attempt in range(3):
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError:
+            if attempt == 2:
+                raise
+            time.sleep(0.2)
+
+
+def atomic_write_text(path, text, expect=None):
+    """一時ファイルに書いてから os.replace で置き換える。書いている途中で止まっても、元のファイルは壊れない（T073）。
+    expect（バイト列）を渡すと、置き換える直前にもう一度元のファイルを読み、expect と違えば FileChanged にして置き換えない。
+    ※ 最後の確認と os.replace の間のごく短い時間は、ほかの人の書き込みを防げない（ファイルの置き換えだけでは「読んで・直して・書く」を
+      丸ごと排他にできないため）。窓を小さくするための確認で、完全には閉じない。"""
     tmp = _tmp_path(path)
     try:
         with open(tmp, "w", encoding="utf-8") as f:
             f.write(text)
             f.flush()
             os.fsync(f.fileno())
-        os.replace(tmp, path)
+        if expect is not None and Path(path).read_bytes() != expect:
+            raise FileChanged(str(path))
+        _keep_mode(path, tmp)
+        _replace_with_retry(tmp, path)
     except BaseException:
         _drop_tmp(tmp)
         raise
@@ -132,10 +164,30 @@ def atomic_save(path, save):
     tmp = _tmp_path(path)
     try:
         save(tmp)
+        _keep_mode(path, tmp)
         os.replace(tmp, path)
     except BaseException:
         _drop_tmp(tmp)
         raise
+
+
+OLD_TMP_DAYS = 1
+
+
+def clean_old_tmp():
+    """強制終了などで残った一時ファイル（.<名前>.<PID>.tmp）を、1日以上たったものだけ片付ける。
+    見るのは 00_タスク管理 と scripts/auto の下だけ。名前が「.」で始まり「.tmp」で終わる普通のファイルだけ（起動時にだけ呼ぶ）。"""
+    limit = time.time() - OLD_TMP_DAYS * 86400
+    for base in (ROOT / "00_タスク管理", ROOT / "scripts" / "auto"):
+        for folder, _dirs, names in os.walk(base):
+            for name in names:
+                if name.startswith(".") and name.endswith(".tmp"):
+                    p = Path(folder) / name
+                    try:
+                        if p.is_file() and not p.is_symlink() and p.stat().st_mtime < limit:
+                            p.unlink()
+                    except OSError:
+                        pass
 
 
 def sync_rules():
@@ -1173,31 +1225,53 @@ def assignment_warnings(tasks):
     return out
 
 
+LAUNCHD_LABEL = "com.ai-bunshin.daily-{}"
+
+
+def launchd_registered(phase):
+    """その段階の自動実行が launchd に登録されているか（launchctl list <ラベル>。読むだけ）。
+    Mac 以外・launchctl が使えない・確かめられないときは False（＝警告を出さない側に倒す）。"""
+    if sys.platform != "darwin":
+        return False
+    try:
+        r = subprocess.run(["launchctl", "list", LAUNCHD_LABEL.format(phase)], capture_output=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return r.returncode == 0
+
+
 def last_success_of(phase):
-    """段階（plan／review／do）の最後に成功した日時（daily_cycle.sh が scripts/auto/last_success_<段階>.txt に書く）。
-    ファイルが無い・読めない・形が違うときは None。"""
+    """段階（plan／review／do）の最後に成功した日付と、記録が無くて代わりを使ったか（True）を返す。
+    daily_cycle.sh が scripts/auto/last_success_<段階>.txt に書く。ファイルが無い・読めない・形が違うときは、
+    run.sh（install.sh が登録のたびに作り直す）の更新日で代える。それも無ければ (None, False)。"""
     try:
         text = (AUTO_DIR / f"last_success_{phase}.txt").read_text(encoding="utf-8").strip()
-        return datetime.strptime(text[:10], "%Y-%m-%d").date()
+        return datetime.strptime(text[:10], "%Y-%m-%d").date(), False
     except (OSError, ValueError):
-        return None
+        pass
+    try:
+        return datetime.fromtimestamp(AUTO_RUN_SH.stat().st_mtime).date(), True
+    except OSError:
+        return None, False
 
 
 def auto_run_warning(today, cal):
     """自動実行が止まっていることに気づくための1行（起動時のまとめの先頭に出す。T073）。
-    登録している（scripts/auto/run.sh がある）フォルダで、計画か振り返りの最後の成功から、今日より前の営業日が
-    AUTO_STALE_DAYS 日以上たっていれば「⚠ 自動実行が N日 動いていません」。土日・祝日は数えない。
-    記録がまだ無い段階（この仕組みを入れる前の登録）は見ない。"""
+    Mac で、登録している段階（launchd に載っている）だけを見る。登録を外した人・Mac 以外には出さない。
+    計画か振り返りの最後の成功（記録が無ければ run.sh の更新日）から、今日より前の営業日が
+    AUTO_STALE_DAYS 日以上たっていれば「⚠ 自動実行が N日 動いていません」。土日・祝日は数えない。"""
     if not AUTO_RUN_SH.exists():
         return ""
     missed, seen = 0, []
     for phase, label in AUTO_PHASES:
-        last = last_success_of(phase)
+        if not launchd_registered(phase):
+            continue
+        last, fallback = last_success_of(phase)
         if last is None:
             continue
         # last の翌日から today の前日まで（今日の分はまだ動く前かもしれないので数えない）
         n = cal.workdays_between(last + timedelta(days=1), today - timedelta(days=1))
-        seen.append(f"{label} {last.month}/{last.day}")
+        seen.append(f"{label} {last.month}/{last.day}" + ("（記録なし・登録した日）" if fallback else ""))
         missed = max(missed, n)
     if missed < AUTO_STALE_DAYS:
         return ""
@@ -1627,37 +1701,116 @@ def schema_version_of(data):
     return v if isinstance(v, int) and not isinstance(v, bool) and v >= 0 else 0
 
 
+MIGRATE_LOCK_STALE_SECONDS = 600
+
+
+def _pid_alive(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True
+    return True
+
+
+def _take_migrate_lock(lock):
+    """移しの lock（.tasks.json.migrate.lock）を O_EXCL で作る。取れたら True、ほかの実行が持っているなら False。
+    持ち主の PID がもう動いていない、または10分以上たった lock は、止まった実行の置き土産として取り直す。"""
+    for _ in range(2):
+        try:
+            fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        except FileExistsError:
+            try:
+                age = time.time() - lock.stat().st_mtime
+                try:
+                    pid = int(lock.read_text(encoding="utf-8").strip())
+                except (OSError, ValueError):
+                    pid = None
+                stale = age > MIGRATE_LOCK_STALE_SECONDS or (pid is not None and not _pid_alive(pid))
+                if not stale:
+                    return False
+                lock.unlink()
+            except OSError:
+                return False
+            continue
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(str(os.getpid()))
+        return True
+    return False
+
+
+def _make_backup(path, today, raw):
+    """移す前の tasks.json の控えを、同じフォルダに .bak_<日付> で作る（open(..., "xb")＝すでにあるファイルは上書きしない。
+    同じ日に何度目でも前の控えを残し、_2, _3 … と番号を付ける）。作った控えのパスを返す。"""
+    stem = f"{path.name}.bak_{today.strftime('%Y%m%d')}"
+    for n in range(1, 1000):
+        bak = path.with_name(stem if n == 1 else f"{stem}_{n}")
+        try:
+            f = open(bak, "xb")
+        except FileExistsError:
+            continue
+        try:
+            with f:
+                f.write(raw)
+                f.flush()
+                os.fsync(f.fileno())
+        except BaseException:
+            _drop_tmp(bak)   # 自分が作った控えだけを消す
+            raise
+        return bak
+    raise OSError("控えの名前が決まりません")
+
+
 def migrate_tasks_json(path, today):
     """tasks.json の版が無い・古いときに、新しい形に移す。移したときは案内の1行、移さなかったときは None を返す。
-    移す前の tasks.json は、同じフォルダに .bak_<日付> として残す。書き換えは一時ファイル→置き換え。
-    読んでから書くまでの間に、ほかの人（会話・自動実行）が tasks.json を書き換えていたら、今回は移さない（次の機会に移す）。"""
+    - 移すあいだは .tasks.json.migrate.lock を持つ（取れなければ、その回は移さない。ほかの実行が移している）
+    - 移す前の tasks.json は、同じフォルダに .bak_<日付> として残す。書き換えは一時ファイル→置き換え
+    - 読んでから書くまでの間（控えを作ったあと・置き換える直前）に、ほかの人（会話・自動実行）が tasks.json を書き換えていたら、
+      今回は移さない（作った控えは消して、次の機会に移す）
+    - 書けないなどで OSError になったときは、作った控えと lock を片付けてから、そのまま投げる（呼び出し側が見送りにする）
+    ※ 最後の確認と置き換えの間のごく短い時間は、ほかの人の書き込みを防げない（atomic_write_text の注を参照）。"""
     path = Path(path)
-    raw = path.read_bytes()
-    data = json.loads(raw.decode("utf-8"))
-    if not isinstance(data, dict):
+
+    def needs_migration(raw):
+        data = json.loads(raw.decode("utf-8"))
+        return data if isinstance(data, dict) and schema_version_of(data) < SCHEMA_VERSION else None
+
+    if needs_migration(path.read_bytes()) is None:   # ふだんはここで終わる（lock にも触らない）
         return None
-    ver = schema_version_of(data)
-    if ver >= SCHEMA_VERSION:
+    lock = path.with_name(f".{path.name}.migrate.lock")
+    if not _take_migrate_lock(lock):
         return None
-    for step in MIGRATIONS[ver:SCHEMA_VERSION]:
-        data = step(data)
-    data.pop("schema_version", None)
-    data = {"schema_version": SCHEMA_VERSION, **data}   # 版は先頭に置く
-    bak = path.with_name(f"{path.name}.bak_{today.strftime('%Y%m%d')}")
-    n = 2
-    while bak.exists():   # 同じ日にもう一度移すときも、前の控えを上書きしない
-        bak = path.with_name(f"{path.name}.bak_{today.strftime('%Y%m%d')}_{n}")
-        n += 1
-    shutil.copyfile(path, bak)
-    if path.read_bytes() != raw:
-        _drop_tmp(bak)
-        return None
-    atomic_write_text(path, json.dumps(data, ensure_ascii=False, indent=2) + "\n")
-    return f"tasks.json を新しい形式（schema_version {SCHEMA_VERSION}）に移しました（移す前の控え：{bak.name}）"
+    bak, done = None, False
+    try:
+        raw = path.read_bytes()   # lock を取ってから読み直す（待っている間にほかの実行が移していることがある）
+        data = needs_migration(raw)
+        if data is None:
+            return None
+        for step in MIGRATIONS[schema_version_of(data):SCHEMA_VERSION]:
+            data = step(data)
+        data.pop("schema_version", None)
+        data = {"schema_version": SCHEMA_VERSION, **data}   # 版は先頭に置く
+        bak = _make_backup(path, today, raw)
+        if path.read_bytes() != raw:
+            return None
+        try:
+            atomic_write_text(path, json.dumps(data, ensure_ascii=False, indent=2) + "\n", expect=raw)
+        except FileChanged:
+            return None
+        done = True
+        return f"tasks.json を新しい形式（schema_version {SCHEMA_VERSION}）に移しました（移す前の控え：{bak.name}）"
+    finally:
+        if bak is not None and not done:
+            _drop_tmp(bak)   # 自分が作った控えだけを消す
+        _drop_tmp(lock)
 
 
 def run(today):
-    migrated = migrate_tasks_json(TASKS_JSON, today)
+    try:
+        migrated = migrate_tasks_json(TASKS_JSON, today)
+    except OSError as e:   # 移せなくても、タスク管理は止めない（元の tasks.json はそのまま。次の機会にまた試す）
+        migrated = f"tasks.json を新しい形式に移せませんでした（今回は見送り）：{type(e).__name__}"
     data = json.loads(TASKS_JSON.read_text(encoding="utf-8"))
     errors = validate(data)
     if errors:
@@ -1769,6 +1922,10 @@ def main():
             text = ("[共通ルールが更新されました] .claude/rules/ai-bunshin-common.md を読み直してから作業してください"
                     "（この起動では古い版が読み込まれている可能性があります）\n") + text
         # 自動実行が止まっている知らせは、いちばん先頭（hook の出力は約2KBで切れるため）
+        try:
+            clean_old_tmp()
+        except OSError:
+            pass
         stale = auto_run_warning(today, ctx["cal"])
         if stale:
             text = stale + "\n" + text

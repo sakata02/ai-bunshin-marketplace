@@ -7,6 +7,7 @@
 - 文字コード：日本語を含む設定を、文字コードを決めない環境（LC_ALL=C・UTF-8 モード無効）でも読める
 本物の自分のフォルダは使わない（すべて一時フォルダ。AI_BUNSHIN_HOME で指定。launchd・claude・通知は作り物）。
 実行：python3 tests/test_robust_files.py（失敗があれば終了コード1）"""
+import datetime
 import json
 import os
 import re
@@ -76,10 +77,28 @@ def read(path):
         return f.read()
 
 
+# 作り物の launchctl（本物の launchd には触らない）。list <ラベル> は、環境変数 FAKE_LAUNCHCTL_REGISTERED（既定 plan,review）に
+# その段階が入っていれば 0（登録あり）、無ければ 113（本物の launchctl list が、登録のないラベルに返す値）
+FAKE_BIN = os.path.join(BASE, "fakebin")
+os.makedirs(FAKE_BIN)
+with open(os.path.join(FAKE_BIN, "launchctl"), "w") as _f:
+    _f.write('''#!/bin/sh
+if [ "$1" = "list" ] && [ -n "$2" ]; then
+  case "$2" in
+    *daily-plan)   case ",${FAKE_LAUNCHCTL_REGISTERED-plan,review}," in *,plan,*) exit 0;; esac; exit 113 ;;
+    *daily-review) case ",${FAKE_LAUNCHCTL_REGISTERED-plan,review}," in *,review,*) exit 0;; esac; exit 113 ;;
+  esac
+fi
+exit 0
+''')
+os.chmod(os.path.join(FAKE_BIN, "launchctl"), 0o755)
+
+
 def env_for(root):
-    env = {k: v for k, v in os.environ.items() if k not in ("AI_BUNSHIN_HOME", "CLAUDE_PROJECT_DIR")}
+    env = {k: v for k, v in os.environ.items() if k not in ("AI_BUNSHIN_HOME", "CLAUDE_PROJECT_DIR", "FAKE_LAUNCHCTL_REGISTERED")}
     env["HOME"] = FAKE_HOME
     env["AI_BUNSHIN_HOME"] = root
+    env["PATH"] = FAKE_BIN + os.pathsep + env.get("PATH", "")
     return env
 
 
@@ -213,6 +232,11 @@ def stale_line(root, today):
     return text, hit
 
 
+def set_run_sh_mtime(root, day):
+    t = datetime.datetime.strptime(day + " 12:00", "%Y-%m-%d %H:%M").timestamp()
+    os.utime(os.path.join(root, "scripts", "auto", "run.sh"), (t, t))
+
+
 def put_success(root, plan, review):
     for ph, d in (("plan", plan), ("review", review)):
         if d:
@@ -268,10 +292,12 @@ def a5_not_registered_or_no_record_is_silent():
     put_success(root, "2026-10-01", "2026-10-01")
     _, hit = stale_line(root, "2026-11-04")
     assert not hit, hit
-    root = make_owner("a5b", run_sh=True)   # 登録はあるが記録がまだ無い（この仕組みを入れる前の登録）
+    root = make_owner("a5b", run_sh=True)   # 登録はあるが記録がまだ無い：run.sh の更新時刻（登録した日）を代わりに使う。登録が最近なら静か
+    set_run_sh_mtime(root, "2026-11-03")
     _, hit = stale_line(root, "2026-11-04")
     assert not hit, hit
-    root = make_owner("a5c", run_sh=True)   # 壊れた記録
+    root = make_owner("a5c", run_sh=True)   # 壊れた記録も「記録なし」と同じ扱い
+    set_run_sh_mtime(root, "2026-11-03")
     put_success(root, "ばらばら", "ばらばら")
     _, hit = stale_line(root, "2026-11-04")
     assert not hit, hit
@@ -334,7 +360,7 @@ def make_cycle(name, stub, claude_exit=0, ai_name="テストAI", config_extra=No
     os.makedirs(bindir)
     notes = os.path.join(d, "notifications.txt")
     with open(os.path.join(bindir, "claude"), "w") as f:
-        f.write(f'#!/bin/sh\necho done\nexit {claude_exit}\n')
+        f.write(f'#!/bin/sh\necho called >> "$AI_BUNSHIN_HOME/claude_calls"\necho done\nexit {claude_exit}\n')
     with open(os.path.join(bindir, "osascript"), "w") as f:
         f.write(f'#!/bin/sh\necho "$@" >> "{notes}"\nexit 0\n')
     os.chmod(os.path.join(bindir, "claude"), 0o755)
@@ -535,13 +561,13 @@ sys.exit(ud.main())
 def m7_concurrent_edit_during_migration_is_not_overwritten():
     root = make_owner("m7")
     r = run_driver(root, '''
-real = ud.shutil.copyfile
-def copy_then_other_writer_edits(src, dst, *a, **k):
-    out = real(src, dst, *a, **k)
-    with open(src, "a", encoding="utf-8") as f:   # 控えを取った直後に、ほかの人が tasks.json に書き足した
+real = ud._make_backup
+def backup_then_other_writer_edits(*a, **k):
+    out = real(*a, **k)
+    with open(ud.TASKS_JSON, "a", encoding="utf-8") as f:   # 控えを取った直後に、ほかの人が tasks.json に書き足した
         f.write("\\n")
     return out
-ud.shutil.copyfile = copy_then_other_writer_edits
+ud._make_backup = backup_then_other_writer_edits
 print("RESULT=" + repr(ud.migrate_tasks_json(ud.TASKS_JSON, ud.date(2026, 11, 2))))
 ''')
     assert "RESULT=None" in r.stdout, r.stdout + r.stderr
@@ -602,6 +628,351 @@ def e3_dashboard_reads_japanese_files_without_locale():
     assert "に移しました" in r.stdout
     assert "テスト用タスク".encode("utf-8") in read(tasks_path(root))
     assert "テスト用タスク" in open(os.path.join(root, "00_タスク管理", "タスクボード.md"), encoding="utf-8").read()
+
+
+# ====================================================================================================
+# 部下D の確かめへの直し（移しの lock・偽の警告・記録の初期値・tmp の掃除・権限・分岐のテスト）
+# ====================================================================================================
+
+def migrate_lock(root):
+    return os.path.join(os.path.dirname(tasks_path(root)), ".tasks.json.migrate.lock")
+
+
+def age_file(path, days):
+    t = datetime.datetime.now().timestamp() - days * 86400
+    os.utime(path, (t, t))
+
+
+# ---------- 移しの lock・再確認・OSError ----------
+
+@case
+def l1_fresh_lock_skips_migration_and_keeps_others_lock():
+    root = make_owner("l1")
+    before = read(tasks_path(root))
+    open(migrate_lock(root), "w").write("")           # ほかの実行が移している最中
+    r = run_dash(root, ["--today", "2026-11-02"])
+    assert r.returncode == 0, r.stderr
+    assert read(tasks_path(root)) == before and not bak_files(root), "lock が取れないのに移した"
+    assert os.path.exists(migrate_lock(root)), "他人の lock を消した"
+    assert os.path.exists(os.path.join(root, "00_タスク管理", "タスクボード.md")), "移さなくても、ほかの生成物は書く"
+
+
+@case
+def l2_stale_lock_is_taken_over_and_released():
+    root = make_owner("l2")
+    open(migrate_lock(root), "w").write("")
+    age_file(migrate_lock(root), 1 / 24)               # 1時間前の lock（持ち主が止まったまま）
+    r = run_dash(root, ["--today", "2026-11-02"])
+    assert "に移しました" in r.stdout, r.stdout + r.stderr
+    assert not os.path.exists(migrate_lock(root)), "移したあとも lock が残っている"
+
+
+@case
+def l3_concurrent_runs_migrate_exactly_once():
+    root = make_owner("l3")
+    before = read(tasks_path(root))
+    procs = [subprocess.Popen([sys.executable, DASH, "--today", "2026-11-02"], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                              text=True, cwd=root, env=env_for(root)) for _ in range(6)]
+    outs = [p.communicate(timeout=120) for p in procs]
+    assert all(p.returncode == 0 for p in procs), [o[1][-200:] for o in outs]
+    assert sum(o[0].count("に移しました") for o in outs) == 1, [o[0].count("に移しました") for o in outs]
+    assert len(bak_files(root)) == 1, bak_files(root)
+    d = os.path.dirname(tasks_path(root))
+    assert read(os.path.join(d, bak_files(root)[0])) == before, "控えが元と違う"
+    assert json.loads(read(tasks_path(root)).decode("utf-8"))["schema_version"] == 1
+    assert not os.path.exists(migrate_lock(root)) and not leftovers(d)
+
+
+@case
+def m9_oserror_during_migration_skips_with_one_line_and_cleans_up():
+    root = make_owner("m9")
+    before = read(tasks_path(root))
+    r = run_driver(root, '''
+real = os.replace
+def full(src, dst, *a, **k):
+    if str(dst).endswith("tasks.json"):
+        raise OSError(28, "No space left on device")
+    return real(src, dst, *a, **k)
+os.replace = full
+sys.argv = ["x", "--today", "2026-11-02"]
+sys.exit(ud.main())
+''')
+    assert r.returncode == 0, f"落ちた: {r.stderr[-300:]}"
+    assert r.stdout.count("移せませんでした（今回は見送り）") == 1, r.stdout
+    assert read(tasks_path(root)) == before
+    assert not bak_files(root), "作った控えが残っている"
+    assert not os.path.exists(migrate_lock(root)), "lock が残っている"
+    assert os.path.exists(os.path.join(root, "00_タスク管理", "タスクボード.md"))
+
+
+@case
+def m10_change_just_before_replace_is_detected():
+    root = make_owner("m10")
+    r = run_driver(root, '''
+state = {"done": False}
+real = os.fsync
+def other_writer_then_fsync(fd):
+    if not state["done"]:                 # 一時ファイルを書き終えて、置き換える直前に、ほかの人が tasks.json に書いた
+        state["done"] = True
+        with open(ud.TASKS_JSON, "a", encoding="utf-8") as f:
+            f.write("\\n")
+    return real(fd)
+os.fsync = other_writer_then_fsync
+print("RESULT=" + repr(ud.migrate_tasks_json(ud.TASKS_JSON, ud.date(2026, 11, 2))))
+''')
+    assert "RESULT=None" in r.stdout, r.stdout + r.stderr
+    assert b"schema_version" not in read(tasks_path(root)), "置き換える直前の書き込みを上書きした"
+    d = os.path.dirname(tasks_path(root))
+    assert not bak_files(root) and not leftovers(d) and not os.path.exists(migrate_lock(root))
+
+
+@case
+def m11_only_own_backup_is_removed():
+    root = make_owner("m11")
+    d = os.path.dirname(tasks_path(root))
+    open(os.path.join(d, "tasks.json.bak_20261102"), "w").write("ほかの控え")
+    r = run_driver(root, '''
+real = ud._make_backup
+def wrapped(*a, **k):
+    out = real(*a, **k)
+    with open(ud.TASKS_JSON, "a", encoding="utf-8") as f:
+        f.write("\\n")
+    return out
+ud._make_backup = wrapped
+print("RESULT=" + repr(ud.migrate_tasks_json(ud.TASKS_JSON, ud.date(2026, 11, 2))))
+''')
+    assert "RESULT=None" in r.stdout, r.stdout + r.stderr
+    assert bak_files(root) == ["tasks.json.bak_20261102"], bak_files(root)     # 自分の控え（_2）だけ消えて、ほかの控えは残る
+    assert open(os.path.join(d, "tasks.json.bak_20261102"), encoding="utf-8").read() == "ほかの控え"
+
+
+@case
+def r1_permission_error_on_replace_is_retried_3_times():
+    root = make_owner("r1")
+    r = run_driver(root, '''
+real = os.replace
+n = [0]
+sleeps = []
+def flaky(src, dst, *a, **k):
+    if str(dst).endswith("tasks.json") and n[0] < 2:
+        n[0] += 1
+        raise PermissionError(13, "busy")
+    return real(src, dst, *a, **k)
+os.replace = flaky
+ud.time.sleep = lambda s: sleeps.append(s)
+ud.atomic_write_text(ud.TASKS_JSON, '{"ok": 1}')
+print("RESULT=%d %r %s" % (n[0], sleeps, open(ud.TASKS_JSON, encoding="utf-8").read()))
+''')
+    assert "RESULT=2 [0.2, 0.2] {\"ok\": 1}" in r.stdout, r.stdout + r.stderr
+    root = make_owner("r1b")
+    before = read(tasks_path(root))
+    r = run_driver(root, '''
+n = [0]
+def always(src, dst, *a, **k):
+    n[0] += 1
+    raise PermissionError(13, "busy")
+os.replace = always
+ud.time.sleep = lambda s: None
+try:
+    ud.atomic_write_text(ud.TASKS_JSON, '{"ok": 1}')
+except PermissionError:
+    print("RAISED attempts=%d" % n[0])
+''')
+    assert "RAISED attempts=3" in r.stdout, r.stdout + r.stderr
+    assert read(tasks_path(root)) == before and not leftovers(os.path.dirname(tasks_path(root)))
+
+
+@case
+def w6_excel_non_permission_oserror_does_not_crash():
+    root = make_owner("w6")
+    r = run_driver(root, '''
+real = os.replace
+def full(src, dst, *a, **k):
+    if str(dst).endswith("タスク管理.xlsx"):
+        raise OSError(28, "No space left on device")
+    return real(src, dst, *a, **k)
+os.replace = full
+sys.argv = ["x", "--today", "2026-11-02"]
+sys.exit(ud.main())
+''')
+    assert r.returncode == 0 and r.stdout.count("Excel を閉じてから、もう一度") == 1, r.stdout + r.stderr[-300:]
+    d = os.path.join(root, "00_タスク管理")
+    assert os.path.exists(os.path.join(d, "タスクボード.md")) and not leftovers(d)
+
+
+# ---------- 偽の警告（登録なし・Mac 以外・記録なし） ----------
+
+@case
+def u1_no_warning_when_launchd_not_registered():
+    root = make_owner("u1", run_sh=True)
+    put_success(root, "2026-10-28", "2026-10-28")
+    r = run_dash(root, ["--session", "--today", "2026-11-04"], env_extra={"FAKE_LAUNCHCTL_REGISTERED": ""})
+    text = json.loads(r.stdout)["hookSpecificOutput"]["additionalContext"]
+    assert "動いていません" not in text, "自動実行を止めた人に警告を出した"
+
+
+@case
+def u2_only_registered_phases_are_judged():
+    root = make_owner("u2", run_sh=True)
+    put_success(root, "2026-10-28", "2026-10-28")
+    r = run_dash(root, ["--session", "--today", "2026-11-04"], env_extra={"FAKE_LAUNCHCTL_REGISTERED": "review"})
+    text = json.loads(r.stdout)["hookSpecificOutput"]["additionalContext"]
+    hit = [ln for ln in text.splitlines() if "動いていません" in ln]
+    assert len(hit) == 1 and "振り返り" in hit[0] and "計画" not in hit[0], hit
+
+
+@case
+def u3_no_warning_off_mac_or_when_launchctl_unknown():
+    root = make_owner("u3", run_sh=True)
+    put_success(root, "2026-10-28", "2026-10-28")
+    r = run_driver(root, '''
+ud.sys.platform = "linux"
+print("LINUX=" + repr(ud.auto_run_warning(ud.date(2026, 11, 4), ud.Calendar([]))))
+''')
+    assert "LINUX=''" in r.stdout, r.stdout + r.stderr
+    r = run_driver(root, '''
+os.environ["PATH"] = "/nonexistent"      # launchctl が見つからない（登録を確かめられない）
+ud.sys.platform = "darwin"
+print("UNKNOWN=" + repr(ud.auto_run_warning(ud.date(2026, 11, 4), ud.Calendar([]))))
+''')
+    assert "UNKNOWN=''" in r.stdout, r.stdout + r.stderr
+
+
+@case
+def f1_missing_record_falls_back_to_run_sh_mtime():
+    root = make_owner("f1", run_sh=True)           # 記録なし。run.sh は 10/28（登録してから動いた記録が無い）
+    set_run_sh_mtime(root, "2026-10-28")
+    _, hit = stale_line(root, "2026-11-04")
+    assert len(hit) == 1 and "4日" in hit[0], hit
+    root = make_owner("f1b", run_sh=True)          # 記録あり：記録を優先（run.sh が古くても）
+    set_run_sh_mtime(root, "2026-10-01")
+    put_success(root, "2026-11-03", "2026-11-03")
+    _, hit = stale_line(root, "2026-11-04")
+    assert not hit, hit
+
+
+@case
+def i1_install_rewrites_records_to_now():
+    if sys.platform != "darwin":
+        return
+    root = make_owner("i1")
+    put_success(root, "2026-10-01", "2026-10-01")   # 前の記録が古く残っている
+    home2 = os.path.join(BASE, "i1home")
+    os.makedirs(os.path.join(home2, "Library", "LaunchAgents"))
+    env = env_for(root)
+    env["HOME"] = home2
+    r = subprocess.run(["/bin/zsh", INSTALL, root], capture_output=True, text=True, env=env, timeout=60)
+    assert r.returncode == 0, r.stderr
+    for ph in ("plan", "review"):
+        s = open(os.path.join(root, "scripts", "auto", f"last_success_{ph}.txt"), encoding="utf-8").read()
+        assert s.startswith(TODAY_ISO), (ph, s)
+    assert os.path.exists(os.path.join(root, "scripts", "auto", "run.sh"))
+
+
+# ---------- tmp の掃除・権限 ----------
+
+@case
+def t1_old_tmp_files_are_cleaned_on_session_only_in_two_folders():
+    root = make_owner("t1")
+    data = os.path.join(root, "00_タスク管理", "data")
+    os.makedirs(os.path.join(root, "04_ナレッジ"))
+    old = [os.path.join(data, ".tasks.json.123.tmp"), os.path.join(root, "00_タスク管理", ".タスク管理.xlsx.9.tmp"),
+           os.path.join(root, "scripts", "auto", ".last_success_plan.txt.5.tmp")]
+    keep_old = [os.path.join(data, "keep.tmp"), os.path.join(root, "04_ナレッジ", ".a.tmp"), os.path.join(data, ".notes.txt")]
+    fresh = os.path.join(root, "scripts", "auto", ".x.1.tmp")
+    for p in old + keep_old + [fresh]:
+        open(p, "w").write("x")
+    for p in old + keep_old:
+        age_file(p, 2)
+    r = run_dash(root, ["--today", "2026-11-02"])          # 起動時でない実行では片付けない
+    assert all(os.path.exists(p) for p in old + keep_old + [fresh]), r.stderr
+    r = run_dash(root, ["--session", "--today", "2026-11-02"])
+    assert r.returncode == 0, r.stderr
+    assert not any(os.path.exists(p) for p in old), [p for p in old if os.path.exists(p)]
+    assert all(os.path.exists(p) for p in keep_old + [fresh]), "対象外のファイルまで片付けた"
+
+
+@case
+def p1_permissions_are_kept_on_replace():
+    root = make_owner("p1")
+    os.chmod(tasks_path(root), 0o640)
+    assert run_dash(root, ["--today", "2026-11-02"]).returncode == 0
+    assert os.stat(tasks_path(root)).st_mode & 0o777 == 0o640, oct(os.stat(tasks_path(root)).st_mode & 0o777)
+    d = os.path.join(root, "00_タスク管理")
+    x, b = os.path.join(d, "タスク管理.xlsx"), os.path.join(d, "タスクボード.md")
+    os.chmod(x, 0o600)
+    os.chmod(b, 0o600)
+    assert run_dash(root, ["--today", "2026-11-02"]).returncode == 0
+    assert os.stat(x).st_mode & 0o777 == 0o600 and os.stat(b).st_mode & 0o777 == 0o600, \
+        (oct(os.stat(x).st_mode & 0o777), oct(os.stat(b).st_mode & 0o777))
+
+
+# ---------- daily_cycle.sh の分岐ごとの記録（段階を細かく） ----------
+
+STUB_MODE = '''import os, sys
+a = sys.argv[1:]
+home = os.environ["AI_BUNSHIN_HOME"]
+m = os.path.join(home, "mode")
+mode = open(m).read().strip() if os.path.exists(m) else "normal"
+if "--session" in a:
+    sys.exit(0)
+if "--today-status" in a:
+    print("計画済み" if mode == "doneplanned" else "完了")
+    sys.exit(0)
+if "--plan-context" in a:
+    if mode in ("noplan", "doopen"):
+        print("OPEN")
+    elif mode == "skipother":
+        print("SKIP: 動きがない")
+    elif mode in ("doneplanned", "doneall"):
+        print("SKIP: 今日の計画は作成済み")
+'''
+
+
+def cycle_with_mode(name, mode, phase):
+    plugin, home, bindir, notes = make_cycle(name, STUB_MODE)
+    open(os.path.join(home, "mode"), "w").write(mode)
+    r = run_cycle(plugin, home, bindir, phase)
+    calls = os.path.join(home, "claude_calls")
+    n = len(open(calls).read().split()) if os.path.exists(calls) else 0
+    return r, home, n
+
+
+@case
+def b1_plan_ok_but_no_plan_created_records_plan_only():
+    r, home, n = cycle_with_mode("b1", "noplan", "plan")
+    assert r.returncode == 0, r.stderr
+    assert (stamp(home, "plan") or "").startswith(TODAY_ISO) and stamp(home, "do") is None, (stamp(home, "plan"), stamp(home, "do"))
+    assert n == 1, n          # 計画の claude だけ。実行には入らない
+
+
+@case
+def b2_plan_skip_other_records_plan_without_claude():
+    r, home, n = cycle_with_mode("b2", "skipother", "plan")
+    assert r.returncode == 0 and (stamp(home, "plan") or "").startswith(TODAY_ISO) and stamp(home, "do") is None and n == 0, \
+        (r.returncode, stamp(home, "plan"), stamp(home, "do"), n)
+
+
+@case
+def b3_do_open_records_do_without_claude():
+    r, home, n = cycle_with_mode("b3", "doopen", "do")
+    assert r.returncode == 0 and (stamp(home, "do") or "").startswith(TODAY_ISO) and stamp(home, "plan") is None and n == 0, \
+        (r.returncode, stamp(home, "plan"), stamp(home, "do"), n)
+
+
+@case
+def b4_plan_already_made_then_do_runs_records_both():
+    r, home, n = cycle_with_mode("b4", "doneplanned", "plan")
+    assert r.returncode == 0, r.stderr
+    assert (stamp(home, "plan") or "").startswith(TODAY_ISO) and (stamp(home, "do") or "").startswith(TODAY_ISO) and n == 1, \
+        (stamp(home, "plan"), stamp(home, "do"), n)
+
+
+@case
+def b5_plan_and_do_both_done_records_plan_only():
+    r, home, n = cycle_with_mode("b5", "doneall", "plan")
+    assert r.returncode == 0 and (stamp(home, "plan") or "").startswith(TODAY_ISO) and stamp(home, "do") is None and n == 0, \
+        (r.returncode, stamp(home, "plan"), stamp(home, "do"), n)
 
 
 shutil.rmtree(BASE, ignore_errors=True)
