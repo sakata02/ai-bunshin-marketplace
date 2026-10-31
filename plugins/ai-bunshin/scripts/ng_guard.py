@@ -1977,7 +1977,7 @@ def plugin_bash_check(command, root):
 
 # プラグイン・見張りの記録・本人のフォルダそのもの・保護しているものへのリンクは、本人の許可する例外（ng_allow）でも外さない
 NO_EXCEPTION_LABELS = ("プラグインのコピーの書き換え", "共通部分（プラグインの元）の書き換え", "見張りの記録",
-                       "本人のフォルダそのものを動かす・消す", "保護しているものへのリンク")
+                       "本人のフォルダそのものを動かす・消す", "保護しているものへのリンク", "AI 自身の制限を外す書き換え")
 RECORDS_LABEL = "見張りの記録（~/.ai-bunshin/）の書き換え（本人のフォルダを覚えておく所。消すと見張りが外れる）"
 PLUGIN_COPY_LABEL = "プラグインのコピーの書き換え（Claude Code が読み込む共通部分。元を直し、入れ替えは本人へのお願い（`! claude plugin update …`）にする）"
 PLUGIN_UPDATE_LABEL = "プラグインのコピーの書き換え（claude plugin の入れる・更新・外す。本人へのお願い（`! claude plugin update …`）にする）"
@@ -2072,6 +2072,101 @@ def rel_in_root(path, root, base):
 UNKNOWN_CWD_LABEL = "cd の行き先を読み切れない（ワイルドカードの当たりが0個か2個以上・長すぎる・cd -）あとの操作"
 
 
+# ---- AI が自分の制限を外す書き換え（T059）：config の ng_allow・maintainer、CLAUDE.md の「許可する例外」 ----
+SELF_LIMIT_LABEL = ("AI 自身の制限を外す書き換え（config.json の ng_allow・maintainer、CLAUDE.md の「許可する例外」は"
+                    "本人が自分で直す。AI は提案の下書きまで）")
+_HEADING = re.compile(r"^ {0,3}(#{1,6})[ \t]+(.*)$")
+
+
+def _text_after(tool, inp, text):
+    """Write・Edit・MultiEdit を適用したあとの全文。適用の形が確かめられないときは None。"""
+    if tool == "Write":
+        c = inp.get("content")
+        return c if isinstance(c, str) else None
+    if tool == "MultiEdit":
+        edits = inp.get("edits")
+    elif tool == "Edit":
+        edits = [inp]
+    else:
+        return None
+    if not isinstance(edits, list) or not edits:
+        return None
+    for e in edits:
+        if not isinstance(e, dict):
+            return None
+        old, new = e.get("old_string"), e.get("new_string")
+        if not isinstance(old, str) or not isinstance(new, str) or old == "" or old not in text:
+            return None
+        text = text.replace(old, new) if e.get("replace_all") is True else text.replace(old, new, 1)
+    return text
+
+
+def _limit_keys(text):
+    """config.json の本文から、見張りが実際に使う値（ng_allow の文字列のリスト・maintainer の真偽）。読めない・形が違うときは見張りと同じく {} 扱い。"""
+    try:
+        cfg = json.loads(text)
+    except Exception:
+        cfg = {}
+    if not isinstance(cfg, dict):
+        cfg = {}
+    ng = cfg.get("ng_allow", [])
+    ng = [x for x in ng if isinstance(x, str)] if isinstance(ng, list) else []
+    return ng, bool(cfg.get("maintainer"))
+
+
+def _exception_sections(text):
+    """CLAUDE.md の本文から、見出しに「許可する例外」を含む節（次の同じか上の見出しの前まで）の本文のリスト。コードブロックの中の # は見出しにしない。"""
+    out, cur, level, fence = [], None, 0, False
+    for line in nfc(text).replace("\r\n", "\n").split("\n"):
+        if line.lstrip().startswith(("```", "~~~")):
+            fence = not fence
+        m = None if fence else _HEADING.match(line)
+        if m:
+            if cur is not None and len(m.group(1)) <= level:
+                out.append("\n".join(cur))
+                cur = None
+            if cur is None and "許可する例外" in m.group(2):
+                cur, level = [line], len(m.group(1))
+                continue
+        if cur is not None:
+            cur.append(line)
+    if cur is not None:
+        out.append("\n".join(cur))
+    return out
+
+
+def self_limit_hit(tool, inp, root, path, forms, base):
+    """Write・Edit で、既にある config.json の ng_allow・maintainer や CLAUDE.md の「許可する例外」が変わるなら True。
+    まだ無いファイルの新規作成（setup）は通す。適用後の姿を確かめられない形（内容なし・見つからない old_string など）は止める。"""
+    cfg_path, md_path = Path(root) / "設定" / "config.json", Path(root) / "CLAUDE.md"
+    kind = None
+    if covers_any(target(str(cfg_path)), forms):
+        kind = "config"
+    elif covers_any(target(str(md_path)), forms):
+        kind = "md"
+    else:
+        for rel in rels_in_root(path, root, base):
+            if rel.casefold() == "設定/config.json":
+                kind = "config"
+            elif rel.casefold() == "claude.md":
+                kind = "md"
+    if kind is None:
+        return False
+    f = cfg_path if kind == "config" else md_path
+    try:
+        old = f.read_text(encoding="utf-8", errors="replace")
+    except FileNotFoundError:
+        return False  # まだ無い：新規作成は通す
+    except OSError:
+        return True
+    new = _text_after(tool, inp, old)
+    if new is None:
+        return True
+    if kind == "config":
+        return _limit_keys(old) != _limit_keys(new)
+    return _exception_sections(old) != _exception_sections(new)
+
+
 def check(payload, root, command=None):
     """本人のフォルダ root の規則で判定する。command を渡したら、Bash はその部分だけを見る（外のセッション）。"""
     tool = payload.get("tool_name", "")
@@ -2113,6 +2208,8 @@ def check(payload, root, command=None):
             for label, pat in PROTECTED_PATHS:
                 if re.search(pat, rel, re.I):
                     return label, rel
+        if self_limit_hit(tool, inp, root, path, forms, base):  # AI が自分の制限を外す書き換え（T059）
+            return SELF_LIMIT_LABEL, path
     return None
 
 

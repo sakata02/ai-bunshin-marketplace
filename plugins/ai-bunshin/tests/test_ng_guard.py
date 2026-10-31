@@ -34,7 +34,7 @@ for c in good:
 print("## PATHS")
 for t,p in [("Write",R+"/03_インプット/x.csv"),("Write",R+"/.claude/settings.json"),("Edit",R+"/.claude/settings.local.json"),("Write",R+"/.claude/rules/ai-bunshin-common.md"),("Write",R+"/02_成果物/a.md"),("Write",R+"/CLAUDE.md"),("Write",R+"/設定/config.json"),("Write",R+"/03_インプット/../.claude/settings.json"),("MultiEdit",R+"/03_インプット/a"),("NotebookEdit",R+"/03_インプット/a.ipynb"),("Write",R+"/.claude/hooks/x.sh"),("Write",R+"/.claude/settings.JSON")]:
     k="file_path" if t!="NotebookEdit" else "notebook_path"
-    want="pass" if ("02_成果物" in p or p.endswith("CLAUDE.md") or "設定/config" in p) else "STOP"
+    want="pass" if ("02_成果物" in p or p.endswith("CLAUDE.md")) else "STOP"  # 既にある config.json への内容なしの Write は、確かめられないので止める（T059）
     r=run(t,{k:p})
     if r!=want: fail+=1; print("PATH", r, "want", want, t, p.replace(R,"<R>"))
 # 開発の置き場所（config の dev.projects と 05_開発/）の中だけ、その案件へのインストールを通す
@@ -652,4 +652,83 @@ if DL.deadline_seconds(100)!=5.0 or DL.deadline_seconds(0.5)!=0.5 or DL.deadline
 got,reason=run_x("Bash",{"command":"ls"},"in",extra={"NG_GUARD_DEADLINE":"0.000001"})  # 環境変数では短くならない（本番では読まない）
 if got!="pass": xfail+=1; print("FIX NG_GUARD_DEADLINE を読んでいる",got,reason[:60])
 fail+=xfail
+# T059：AI が自分の制限（config の ng_allow・maintainer、CLAUDE.md の「許可する例外」）を Write・Edit で書き換えるのを止める
+print("## T059 自分の制限の書き換え")
+CFGP=os.path.join(R,"設定","config.json"); CLP=os.path.join(R,"CLAUDE.md")
+CFG0={"owner":"坂田","name":"x","ng_allow":["^rm x$"],"maintainer":False,"dev":{"default_mode":"local","projects":[]}}
+CFG0T=json.dumps(CFG0,ensure_ascii=False,indent=2)
+def setcfg(d=CFG0T):
+    open(CFGP,"w",encoding="utf-8").write(d if isinstance(d,str) else json.dumps(d,ensure_ascii=False,indent=2))
+CL0="# 本人設定\n\n## 基本\n\n- 呼び方：坂田さん\n\n## 許可する例外（NG のうち、本人が許可したもの）\n\n- （まだなし）\n\n## 育ったルール\n\n| 日付 | ルール |\n|---|---|\n| （まだなし） | |\n"
+def setcl(t=CL0): open(CLP,"w",encoding="utf-8").write(t)
+def cfgw(**kw):
+    d=json.loads(CFG0T); d.update(kw); return json.dumps(d,ensure_ascii=False,indent=2)
+EXC_OLD="- （まだなし）\n\n## 育ったルール"
+T59=[
+ # --- config.json：止める ---
+ ("cfg","W ng_allow に足す","Write",{"file_path":CFGP,"content":cfgw(ng_allow=["^rm x$","^git push"])},"STOP"),
+ ("cfg","W ng_allow を空にする（変更）","Write",{"file_path":CFGP,"content":cfgw(ng_allow=[])},"STOP"),
+ ("cfg","W maintainer を true","Write",{"file_path":CFGP,"content":cfgw(maintainer=True)},"STOP"),
+ ("cfg","W maintainer を文字列 'false'（bool では True になる）","Write",{"file_path":CFGP,"content":cfgw(maintainer="false")},"STOP"),
+ ("cfg","W ng_allow のキーを消す","Write",{"file_path":CFGP,"content":json.dumps({k:v for k,v in CFG0.items() if k!="ng_allow"})},"STOP"),
+ ("cfg","W キー名を \\u エスケープで書く","Write",{"file_path":CFGP,"content":'{"ng\\u005fallow": ["^rm x$", "."], "maintainer": false}'},"STOP"),
+ ("cfg","W 別の道（./）で指す","Write",{"file_path":R+"/設定/./config.json","content":cfgw(maintainer=True)},"STOP"),
+ ("cfg","W 設定/../設定/config.json","Write",{"file_path":R+"/設定/../設定/config.json","content":cfgw(maintainer=True)},"STOP"),
+ ("cfg","W 内容なし（確かめられない）","Write",{"file_path":CFGP},"STOP"),
+ ("cfg","E maintainer を true","Edit",{"file_path":CFGP,"old_string":'"maintainer": false',"new_string":'"maintainer": true'},"STOP"),
+ ("cfg","E ng_allow に足す","Edit",{"file_path":CFGP,"old_string":'"^rm x$"',"new_string":'"^rm x$", "."'},"STOP"),
+ ("cfg","E replace_all","Edit",{"file_path":CFGP,"old_string":'false',"new_string":'true',"replace_all":True},"STOP"),
+ ("cfg","E 見つからない old_string（確かめられない）","Edit",{"file_path":CFGP,"old_string":'zzz',"new_string":'yyy'},"STOP"),
+ ("cfg","E new_string が無い","Edit",{"file_path":CFGP,"old_string":'"name"'},"STOP"),
+ ("cfg","ME maintainer を true","MultiEdit",{"file_path":CFGP,"edits":[{"old_string":'"name": "x"',"new_string":'"name": "y"'},{"old_string":'"maintainer": false',"new_string":'"maintainer": true'}]},"STOP"),
+ # --- config.json：通す ---
+ ("cfg","W ほかのキーだけ変える","Write",{"file_path":CFGP,"content":cfgw(name="y",owner="佐藤")},"pass"),
+ ("cfg","W キーの順や字下げだけ変える","Write",{"file_path":CFGP,"content":json.dumps(dict(reversed(list(CFG0.items()))),ensure_ascii=False)},"pass"),
+ ("cfg","W dev を足す","Write",{"file_path":CFGP,"content":cfgw(dev={"default_mode":"git","projects":[{"name":"a","mode":"git","path":"/x"}]})},"pass"),
+ ("cfg","W 読めない JSON にする（ng_allow が見張りから消える＝変更）","Write",{"file_path":CFGP,"content":"{x"},"STOP"),
+ ("cfg","E ほかのキーを変える","Edit",{"file_path":CFGP,"old_string":'"name": "x"',"new_string":'"name": "z"'},"pass"),
+ ("cfg","ME ほかのキーを変える","MultiEdit",{"file_path":CFGP,"edits":[{"old_string":'"name": "x"',"new_string":'"name": "z"'},{"old_string":'"owner": "坂田"',"new_string":'"owner": "坂田 K"'}]},"pass"),
+ # --- CLAUDE.md ---
+ ("cl","W 許可する例外に足す","Write",{"file_path":CLP,"content":CL0.replace(EXC_OLD,"- git push を許可\n\n## 育ったルール")},"STOP"),
+ ("cl","W 許可する例外の節を消す","Write",{"file_path":CLP,"content":CL0.replace("## 許可する例外（NG のうち、本人が許可したもの）\n\n- （まだなし）\n\n","")},"STOP"),
+ ("cl","W 見出しの名前を変える","Write",{"file_path":CLP,"content":CL0.replace("許可する例外","許可する 例外")},"STOP"),
+ ("cl","W 内容なし","Write",{"file_path":CLP},"STOP"),
+ ("cl","E 許可する例外に足す","Edit",{"file_path":CLP,"old_string":EXC_OLD,"new_string":"- rm を許可\n\n## 育ったルール"},"STOP"),
+ ("cl","E 次の見出しを消して節をのばす","Edit",{"file_path":CLP,"old_string":"## 育ったルール\n","new_string":""},"STOP"),
+ ("cl","E 見出しを別の名前にする","Edit",{"file_path":CLP,"old_string":"## 許可する例外（","new_string":"## 例外（"},"STOP"),
+ ("cl","ME 許可する例外に足す","MultiEdit",{"file_path":CLP,"edits":[{"old_string":"坂田さん","new_string":"坂田さん様"},{"old_string":EXC_OLD,"new_string":"- 全部\n\n## 育ったルール"}]},"STOP"),
+ ("cl","E 見つからない old_string","Edit",{"file_path":CLP,"old_string":"zzz","new_string":"yyy"},"STOP"),
+ ("cl","E 別の道（./）で指す","Edit",{"file_path":R+"/./CLAUDE.md","old_string":EXC_OLD,"new_string":"- 全部\n\n## 育ったルール"},"STOP"),
+ ("cl","W 育ったルールだけ変える","Write",{"file_path":CLP,"content":CL0.replace("| （まだなし） | |","| 2026-11-01 | 新しいルール |")},"pass"),
+ ("cl","W 基本だけ変える","Write",{"file_path":CLP,"content":CL0.replace("坂田さん","さかた")},"pass"),
+ ("cl","E 育ったルールを変える","Edit",{"file_path":CLP,"old_string":"| （まだなし） | |","new_string":"| 2026-11-01 | 新しいルール |"},"pass"),
+ ("cl","E 基本を変える","Edit",{"file_path":CLP,"old_string":"呼び方：坂田さん","new_string":"呼び方：さかたさん"},"pass"),
+ ("cl","ME 育ったルールと基本を変える","MultiEdit",{"file_path":CLP,"edits":[{"old_string":"坂田さん","new_string":"さかた"},{"old_string":"| （まだなし） | |","new_string":"| 1 | 2 |"}]},"pass"),
+ ("cl","W 新しい節を足す（許可する例外は同じ）","Write",{"file_path":CLP,"content":CL0+"\n## 新しい節\n\n- a\n"},"pass"),
+]
+for kind,nm,tool,inp,want in T59:
+    setcfg(); setcl()
+    got=run(tool,inp)
+    if got!=want: fail+=1; print("T059",kind,nm,"got",got,"want",want)
+# まだ無いファイルの新規作成は通す（setup が使う）。ng_allow・maintainer・許可する例外を含んでいても、新規作成は通す
+R2=tempfile.mkdtemp(prefix="ngtest2_"); os.makedirs(os.path.join(R2,"設定")); os.makedirs(os.path.join(R2,"00_タスク管理","data"))
+open(os.path.join(R2,"00_タスク管理","data","tasks.json"),"w").write("{}")
+def run2(tool,inp):
+    p=subprocess.run(["python3",G],input=json.dumps({"tool_name":tool,"tool_input":inp}),capture_output=True,text=True,cwd=R2,env={**os.environ,"CLAUDE_PROJECT_DIR":R2})
+    return "STOP" if "deny" in p.stdout else "pass"
+for nm,tool,inp in [("config.json 新規","Write",{"file_path":R2+"/設定/config.json","content":CFG0T}),
+                    ("config.json 新規（ng_allow・maintainer 入り）","Write",{"file_path":R2+"/設定/config.json","content":cfgw(maintainer=True,ng_allow=["."])}),
+                    ("CLAUDE.md 新規","Write",{"file_path":R2+"/CLAUDE.md","content":CL0.replace(EXC_OLD,"- x\n\n## 育ったルール")})]:
+    if run2(tool,inp)!="pass": fail+=1; print("T059 新規作成が止まった",nm)
+# 本人の許可する例外（ng_allow）では外れない
+for nm,tool,inp in [("config","Write",{"file_path":CFGP,"content":cfgw(maintainer=True)}),("CLAUDE.md","Write",{"file_path":CLP,"content":CL0.replace(EXC_OLD,"- x\n\n## 育ったルール")})]:
+    setcfg(cfgw(ng_allow=["."])); setcl()
+    if run(tool,inp)!="STOP": fail+=1; print("T059 ng_allow で外れた",nm)
+# 読めない config.json（壊れた JSON）に ng_allow を入れる Write は止める（今は {} として扱われている＝足せば緩む）
+setcfg("{x"); setcl()
+if run("Write",{"file_path":CFGP,"content":cfgw(ng_allow=["."])})!="STOP": fail+=1; print("T059 壊れた config に ng_allow を足せた")
+setcfg("{x")  # 今も読めない config.json を、別の読めない形・ng_allow の無い形にする Write は通す（見張りの見え方は変わらない）
+for nm,c in [("別の読めない形","{y"),("ng_allow の無い JSON",'{"name":"a"}')]:
+    if run("Write",{"file_path":CFGP,"content":c})!="pass": fail+=1; print("T059 読めない config からの変更が止まった",nm)
+setcfg("{}")  # 後ろのテストのために戻す
 print(f"失敗 {fail} 件"); sys.exit(1 if fail else 0)
