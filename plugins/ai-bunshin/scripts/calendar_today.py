@@ -4,10 +4,15 @@
 - 本人設定（設定/config.json）の calendar：
     {"type": "ics", "keychain": "ai-bunshin-calendar", "show": "title"}
   URL は合言葉と同じなので config には書かず、Mac のキーチェーン（サービス名 = keychain）に入れる。
+  Windows など Mac 以外では、ユーザーのフォルダの直下の ai-bunshin-calendar-url.txt（URL を1行だけ書いたファイル。
+  本人のフォルダの外なので、同期や Git に載らない）から読む。つなぎ方は skills/setup/SKILL.md
   試すとき・キーチェーンの無い環境では "ics_file": "<ICS ファイルのパス>" でもよい
 - show："title"（件名と時間）／"time"（時間だけ。件名は「予定あり」）
-- 取れないとき（未設定・オフライン・URL の誤り・ログイン画面などカレンダーでないもの）は静かに空を返す。
-  直前に取れた予定は 00_タスク管理/data/calendar_cache.json（件名と時間だけ）に残し、同じ日なら使う
+- 取れないとき（オフライン・URL の誤り・キーチェーンに無い・ログイン画面などカレンダーでないもの）は、
+  「予定なし」と取り違えないよう、理由つきの error を返す（load_calendar）。URL そのものは理由に入れない。
+  直前に取れた予定は 00_タスク管理/data/calendar_cache.json（件名と時間だけ）に残し、同じ日に取れたものだけ
+  「読めなかったが、○時点の予定」として添える（日をまたいだ古い予定は使わない）
+- タイムゾーン（TZID）を読めない予定は、時刻をずらして出さない。時刻を空にして「時刻不明」の印（time_unknown）を付ける
 - 繰り返しの予定（RRULE）：DAILY・WEEKLY・MONTHLY・YEARLY の INTERVAL・BYDAY（「第2火曜」「最終金曜」などの
   序数つきを含む）・BYMONTHDAY（-1＝月末を含む）・UNTIL・COUNT、EXDATE、1回だけ変更した予定（RECURRENCE-ID）。
   繰り返しは予定のタイムゾーンで数えてから自分のタイムゾーンに直す（夏時間も考える）。
@@ -19,8 +24,9 @@ import json
 import re
 import subprocess
 import sys
+import urllib.error
 import urllib.request
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone, tzinfo
 from pathlib import Path
 
 try:
@@ -30,6 +36,22 @@ except ImportError:  # Python 3.8 以前
 
 WEEKDAYS = {"MO": 0, "TU": 1, "WE": 2, "TH": 3, "FR": 4, "SA": 5, "SU": 6}
 UNSUPPORTED = ("BYSETPOS", "BYWEEKNO", "BYYEARDAY", "BYHOUR", "BYMINUTE", "BYSECOND")
+
+
+class UnknownTZ(tzinfo):
+    """タイムゾーン名（TZID）を読めなかった予定の印。時刻の計算には使わず、「時刻不明」として出す。"""
+    def utcoffset(self, dt):
+        return timedelta(0)
+
+    def dst(self, dt):
+        return timedelta(0)
+
+    def tzname(self, dt):
+        return "UNKNOWN"
+
+
+class CalendarError(Exception):
+    """予定を読めなかった理由（1行。URL は入れない）。"""
 
 
 def local_tz():
@@ -53,11 +75,11 @@ def parse_dt(value, params):
     if value.endswith("Z"):
         return dt.replace(tzinfo=timezone.utc)
     tzid = params.get("TZID")
-    if tzid and ZoneInfo:
+    if tzid:
         try:
             return dt.replace(tzinfo=ZoneInfo(tzid))
-        except Exception:
-            pass
+        except Exception:   # ZoneInfo が無い（Python 3.8 以前）・tzdata が無い（Windows）・知らない名前
+            return dt.replace(tzinfo=UnknownTZ())   # ローカル時刻として扱うと、海外の予定が何時間もずれる
     return dt.replace(tzinfo=local_tz())
 
 
@@ -214,7 +236,15 @@ def events_between(text, first, last):
                     continue
                 starts.append(occ)
         for s in starts:
-            if isinstance(s, datetime):
+            if isinstance(s, datetime) and isinstance(s.tzinfo, UnknownTZ):
+                # タイムゾーンを読めない：時刻は出さない。日付は書かれた日のまま
+                d0 = s.date()
+                for i in range(max(dur.days, 1)):
+                    d = d0 + timedelta(days=i)
+                    if first <= d <= last:
+                        out.append({"date": d.isoformat(), "start": "", "end": "", "title": ev.get("SUMMARY", "(件名なし)"),
+                                    "allday": False, "time_unknown": True})
+            elif isinstance(s, datetime):
                 ls, le = to_local(s), to_local(s + dur)
                 d, dlast = ls.date(), (le - timedelta(microseconds=1)).date() if le > ls else ls.date()
                 while d <= dlast:
@@ -234,66 +264,132 @@ def events_between(text, first, last):
     return sorted(out, key=lambda e: (e["date"], not e["allday"], e["start"]))
 
 
+def _platform():
+    return sys.platform   # テストで差し替えるための入り口
+
+
+def _is_windows():
+    return _platform().startswith("win")
+
+
+def url_file_path():
+    """Mac 以外で URL を置く場所（ユーザーのフォルダの直下。本人のフォルダの外）。"""
+    return Path.home() / "ai-bunshin-calendar-url.txt"
+
+
 def keychain_secret(service):
-    if sys.platform != "darwin":
-        return None
+    """キーチェーンの値。無い・読めないときは CalendarError（理由に値は入れない）。"""
     try:
         r = subprocess.run(["security", "find-generic-password", "-s", service, "-w"],
                            capture_output=True, text=True, timeout=5)
-        return r.stdout.strip() or None
     except (OSError, subprocess.SubprocessError):
-        return None
+        raise CalendarError("キーチェーンを読めませんでした")
+    value = r.stdout.strip()
+    if r.returncode != 0 or not value:
+        raise CalendarError(f"キーチェーン（{service}）に URL が入っていません")
+    return value
+
+
+def file_secret():
+    p = url_file_path()
+    try:
+        # メモ帳が付ける BOM と、行末・見えない空白（URL の途中に空白は無い）を取り除く
+        value = re.sub(r"[\s\u200b-\u200f\ufeff]+", "", p.read_text(encoding="utf-8-sig"))
+    except OSError:
+        if _is_windows():
+            raise CalendarError("Windows のつなぎ方は setup を見てください")
+        raise CalendarError("このパソコンのつなぎ方は setup を見てください")
+    if not value:
+        raise CalendarError("URL を書くファイルが空です")
+    return value
 
 
 def fetch_ics(cfg):
+    """ICS の本文。読めなければ CalendarError（理由は1行）。"""
     if cfg.get("ics_file"):
         p = Path(cfg["ics_file"]).expanduser()
-        return p.read_text(encoding="utf-8") if p.exists() else None
-    url = keychain_secret(cfg.get("keychain", "ai-bunshin-calendar"))
-    if not url or not url.startswith("https://"):
-        return None
+        try:
+            return p.read_text(encoding="utf-8")
+        except OSError:
+            raise CalendarError("ICS ファイルを読めませんでした")
+    url = keychain_secret(cfg.get("keychain", "ai-bunshin-calendar")) if _platform() == "darwin" else file_secret()
+    if not url.startswith("https://"):
+        raise CalendarError("保存されている値が https:// で始まる URL ではありません（入れ直してください）")
     try:
         with urllib.request.urlopen(url, timeout=10) as res:  # 読むだけ（GET）
             return res.read().decode("utf-8", "replace")
-    except Exception:
-        return None
+    except urllib.error.HTTPError as e:   # URLError より先に。str(e) は使わない（URL が入ることがある）
+        raise CalendarError(f"カレンダーのサーバーが {e.code} を返しました（URL が古い・違う可能性）")
+    except Exception as e:
+        if isinstance(e, (OSError, TimeoutError)):
+            raise CalendarError("ネットワークにつながりませんでした")
+        raise CalendarError(f"カレンダーを取得できませんでした（{type(e).__name__}）")
 
 
-def load_events(root, cfg, today, days=2):
-    """今日から days 日分の予定。config に calendar が無ければ None。"""
+def load_calendar(root, cfg, today, days=2):
+    """今日から days 日分の予定を読む。config に calendar（ics）が無ければ None。
+
+    返すもの：{"events": [...], "error": 読めなかった理由（1行）か None, "stale": 古い予定を使うときの取得時刻か None}
+    error があって stale が None なら、予定は不明（0件ではない）。"""
     cal = (cfg or {}).get("calendar") or {}
     if cal.get("type") != "ics":
         return None
     cache = root / "00_タスク管理" / "data" / "calendar_cache.json"
     last = today + timedelta(days=days - 1)
-    text = fetch_ics(cal)
-    if text and "BEGIN:VCALENDAR" in text:   # ログイン画面などカレンダーでないものは使わない（キャッシュも上書きしない）
+    try:
+        text = fetch_ics(cal)
+        if "BEGIN:VCALENDAR" not in text:   # ログイン画面などカレンダーでないものは使わない（キャッシュも上書きしない）
+            raise CalendarError("カレンダーの形式ではありませんでした（ログイン画面などが返った可能性）")
         try:
             evs = events_between(text, today, last)
         except Exception:
-            evs = None
-        if evs is not None:
-            if cal.get("show") == "time":
-                for e in evs:
-                    e["title"] = "予定あり"
-            if cache.parent.exists():
-                cache.write_text(json.dumps({"fetched": datetime.now().strftime("%Y-%m-%d %H:%M"), "from": today.isoformat(),
-                                             "events": evs}, ensure_ascii=False, indent=1), encoding="utf-8")
-            return evs
+            raise CalendarError("カレンダーの中身を読み取れませんでした（形式の誤り）")
+    except CalendarError as e:
+        error = str(e)
+    else:
+        if cal.get("show") == "time":
+            for e in evs:
+                e["title"] = "予定あり"
+        if cache.parent.exists():
+            cache.write_text(json.dumps({"fetched": datetime.now().strftime("%Y-%m-%d %H:%M"), "from": today.isoformat(),
+                                         "events": evs}, ensure_ascii=False, indent=1), encoding="utf-8")
+        return {"events": evs, "error": None, "stale": None}
+    # 読めなかった：同じ日に取れた予定だけ、古いと断って添える（前の日のものは予定なしに見えてしまうので使わない）
     if cache.exists():
         try:
             c = json.loads(cache.read_text(encoding="utf-8"))
-            return [e for e in c.get("events", []) if today.isoformat() <= e["date"] <= last.isoformat()]
-        except (OSError, ValueError):
-            return []
-    return []
+            if str(c.get("fetched", ""))[:10] == today.isoformat():
+                return {"events": [e for e in c.get("events", []) if today.isoformat() <= e["date"] <= last.isoformat()],
+                        "error": error, "stale": c["fetched"]}
+        except (OSError, ValueError, KeyError, TypeError):
+            pass
+    return {"events": [], "error": error, "stale": None}
 
 
-def format_events(evs, day):
+def load_events(root, cfg, today, days=2):
+    """予定の一覧だけ（読めなかったときの理由は load_calendar）。config に calendar が無ければ None。"""
+    r = load_calendar(root, cfg, today, days)
+    return None if r is None else r["events"]
+
+
+def error_line(error, stale=None):
+    return (f"📅 予定を読めませんでした（{error}）"
+            + (f"。{stale} に取れた予定を出しています（最新ではありません）" if stale else "。「予定なし」ではありません"))
+
+
+def format_events(evs, day, error=None, stale=None):
+    if error and not stale:
+        return [f"  {error_line(error)}"]
     todays = [e for e in evs if e["date"] == day.isoformat()]
+    lines = [f"  {error_line(error, stale)}"] if error else []
     if not todays:
-        return ["  （予定なし）"]
-    return [f"  - {'終日' if e['allday'] else e['start'] + '〜' + e['end']} {e['title']}" for e in todays]
+        return lines + ["  （予定なし）"]
+    for e in todays:
+        when = "時刻不明" if e.get("time_unknown") else "終日" if e["allday"] else e["start"] + "〜" + e["end"]
+        lines.append(f"  - {when} {e['title']}")
+    if any(e.get("time_unknown") for e in todays):
+        lines.append("  ⚠ 時刻不明の予定があります（タイムゾーンを読めませんでした。時刻をずらして出さないよう、時間を空にしています）")
+    return lines
 
 
 if __name__ == "__main__":

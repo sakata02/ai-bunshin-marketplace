@@ -57,6 +57,16 @@ description: AI 分身の初回セットアップ。新しく使い始める人�
     2. **Claude の入力欄ではなく、Mac の「ターミナル」アプリ** で次を打ち、聞かれたら URL を貼り付ける（URL は合言葉と同じなので、チャットに貼らない。この打ち方なら画面にも履歴にも残らない）：`security add-generic-password -a "$USER" -s ai-bunshin-calendar -w`
     3. config に `"calendar": {"type": "ics", "keychain": "ai-bunshin-calendar", "show": "title"}` を書く（件名を出したくなければ `"show": "time"`）
     4. `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/update_dashboard.py"` を実行し、起動時のまとめに「今日の予定」が出るか確かめる
+    - **入れ直すとき（URL の末尾に見えない文字が付いて、予定を読めなかったとき）**：上の 2. で `-w` の入力欄に貼ると、URL の末尾に見えない文字（改行など）が付くことがある（2026-10-30 に起きた）。次の2つを、Mac の「ターミナル」で **本人が** 打つ（AI は打たない。消すコマンドは本人だけが打つ）：
+      1. 消す：`security delete-generic-password -s ai-bunshin-calendar`
+      2. 入れる：先に URL をコピーしておき、コピーした直後に次を打って Enter。見えない文字を取り除いて入る（URL は画面にも履歴にも残らない）：`security add-generic-password -a "$USER" -s ai-bunshin-calendar -w "$(pbpaste | tr -d '[:space:]')"`
+  - **Windows の人**（キーチェーンが無いので、置き場所が違う）：URL を、ユーザーのフォルダ（`C:\Users\<ユーザー名>\`）の直下の `ai-bunshin-calendar-url.txt` に書く。本人のフォルダの外なので、同期や Git に載らない。URL は合言葉と同じなので、チャットには貼らない：
+    1. 上の 1. と同じ手順で URL をコピーする
+    2. 「メモ帳」を開いて URL を貼り付ける（1行だけ。改行は付けなくてよい）→「名前を付けて保存」→ 保存先は自分のユーザーフォルダ、ファイル名は `ai-bunshin-calendar-url.txt`、「ファイルの種類」は「すべてのファイル」（`.txt.txt` になるのを防ぐ）。OneDrive で同期されるフォルダ（ドキュメント・デスクトップ）には置かない
+    3. config の `calendar` は Mac と同じ（`keychain` の項目は Windows では使われない）
+    4. 時刻がずれないよう、tzdata（タイムゾーンの辞書）が入っているか確かめる。`scripts/requirements.txt` に入っているので、ほかのライブラリと同じ方法で入れる。入っていないと、タイムゾーンを読めない予定は「時刻不明」と出る
+    5. `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/update_dashboard.py"`（無ければ `python` か `py -3`）を実行する。「📅 予定を読めませんでした（Windows のつなぎ方は setup を見てください）」と出たら、ファイルの名前と場所を確かめる
+  - 予定を読めなかったときは、起動時のまとめ・朝の計画に「📅 予定を読めませんでした（理由）」と出る（「予定なし」とは別。会議の多さは分からないので、予定のない日として計画を組まない）
 
 **4回目：守ってほしいこと**
 9. 共通の「必ず確認すること」（社外への送信・お金・人事・他の人を巻き込む判断・ファイルの削除）以外に、確認してほしいこと

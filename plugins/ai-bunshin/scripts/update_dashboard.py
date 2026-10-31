@@ -868,8 +868,10 @@ def build_own_sheet(wb, ctx):
                 cell = ws.cell(row=i, column=c, value=v)
                 cell.font = BODY_FONT
                 cell.border = BORDER
-        if not ctx["events"]:
-            ws.cell(row=5, column=11, value="予定なし（または取得できませんでした）").font = BODY_FONT
+        if ctx.get("events_error"):   # 読めなかったときは「予定なし」と書かない
+            ws.cell(row=5, column=11, value=calendar_today.error_line(ctx["events_error"], ctx.get("events_stale"))).font = BODY_FONT
+        elif not ctx["events"]:
+            ws.cell(row=5, column=11, value="予定なし").font = BODY_FONT
 
 
 def build_requests_sheet(wb, ctx):
@@ -1134,7 +1136,7 @@ def summary_text(ctx, limit=10, with_ids=False):
     reqs = owner_requests(ctx["tasks"])
     if ctx.get("events") is not None:
         lines.append(f"[📅 今日の予定 {fmt_jp(ctx['today'])}]（予定の中身は使わず、件名と時間だけ）")
-        lines += calendar_today.format_events(ctx["events"], ctx["today"])
+        lines += calendar_today.format_events(ctx["events"], ctx["today"], ctx.get("events_error"), ctx.get("events_stale"))
     own = own_tasks(ctx["tasks"])
     if own:
         picks = today_own_picks(ctx["tasks"], ctx["today"])
@@ -1307,8 +1309,15 @@ def plan_context(today, cal, ctx):
         lines += [f"- {k}：{v}" for k, v in (last.get("blockers") or {}).items()] or [f"- {i}" for i in last.get("carried_over", [])] or ["- なし"]
     if ctx.get("events") is not None:
         todays = [e for e in ctx["events"] if e["date"] == fmt(today) and not e["allday"]]
-        lines += ["", f"## 今日の予定（{len(todays)} 件。会議の多い日は、本人の仕事とお願いを絞る。会議の準備が要りそうなら提案する）"]
-        lines += calendar_today.format_events(ctx["events"], today)
+        err, stale = ctx.get("events_error"), ctx.get("events_stale")
+        if err and not stale:
+            head = "予定を読めなかったので、会議の多さは分からない。「予定なし」ではない。会議の少ない日として計画を組まない"
+        elif err:
+            head = f"{len(todays)} 件。ただし予定を読めなかったので最新ではない。会議の多さは確かではない"
+        else:
+            head = f"{len(todays)} 件。会議の多い日は、本人の仕事とお願いを絞る。会議の準備が要りそうなら提案する"
+        lines += ["", f"## 今日の予定（{head}）"]
+        lines += calendar_today.format_events(ctx["events"], today, err, stale)
     picks = today_own_picks(tasks, today)
     if picks:
         lines += ["", f"## {OWNER_CALL}の仕事（今日やるといいもの。ポイントには数えない）"]
@@ -1528,13 +1537,16 @@ def run(today):
     tds = today_sprint(data, today)
     planned_today = set(tds.get("planned", []) + tds.get("added", []) + tds.get("pulled", [])) if tds else None
     open_tasks, project_end = forecast(tasks, today, velocity, cal, planned_today)
-    events = None
+    events, events_error, events_stale = None, None, None
     if calendar_today is not None:
         try:
-            events = calendar_today.load_events(ROOT, _cfg, today)
-        except Exception:
-            events = []
+            r = calendar_today.load_calendar(ROOT, _cfg, today)
+            if r is not None:
+                events, events_error, events_stale = r["events"], r["error"], r["stale"]
+        except Exception as e:   # 予定のせいでタスク管理は止めない。ただし「予定なし」にはしない（理由に例外の文字は入れない）
+            events, events_error = [], f"想定外のエラー（{type(e).__name__}）"
     ctx = dict(data=data, tasks=tasks, today=today, cal=cal, velocity=velocity, velocity_src=velocity_src, events=events,
+               events_error=events_error, events_stale=events_stale,
                open_tasks=open_tasks, project_end=project_end, sprint=current_sprint(data, today),
                now=datetime.now().strftime("%Y-%m-%d %H:%M"))
 
