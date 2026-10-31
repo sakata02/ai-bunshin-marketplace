@@ -34,6 +34,24 @@ try:
 except ImportError:  # Python 3.8 以前
     ZoneInfo = None
 
+# Windows 形式のタイムゾーン名（Outlook など）→ IANA。よく使うものだけ。表に無いものは「時刻不明」にする（ずらして出さない）
+WINDOWS_TZ = {
+    "Tokyo Standard Time": "Asia/Tokyo",
+    "Pacific Standard Time": "America/Los_Angeles",
+    "Mountain Standard Time": "America/Denver",
+    "Central Standard Time": "America/Chicago",
+    "Eastern Standard Time": "America/New_York",
+    "GMT Standard Time": "Europe/London",          # 「GMT」ではなくロンドン（夏時間あり）
+    "W. Europe Standard Time": "Europe/Berlin",
+    "Romance Standard Time": "Europe/Paris",
+    "China Standard Time": "Asia/Shanghai",
+    "Korea Standard Time": "Asia/Seoul",
+    "Singapore Standard Time": "Asia/Singapore",
+    "India Standard Time": "Asia/Kolkata",
+    "AUS Eastern Standard Time": "Australia/Sydney",
+}
+UTC_NAMES = ("UTC", "Etc/UTC")   # tzdata が無くても読めるよう、zoneinfo を通さない
+
 WEEKDAYS = {"MO": 0, "TU": 1, "WE": 2, "TH": 3, "FR": 4, "SA": 5, "SU": 6}
 UNSUPPORTED = ("BYSETPOS", "BYWEEKNO", "BYYEARDAY", "BYHOUR", "BYMINUTE", "BYSECOND")
 
@@ -76,8 +94,10 @@ def parse_dt(value, params):
         return dt.replace(tzinfo=timezone.utc)
     tzid = params.get("TZID")
     if tzid:
+        if tzid in UTC_NAMES:
+            return dt.replace(tzinfo=timezone.utc)
         try:
-            return dt.replace(tzinfo=ZoneInfo(tzid))
+            return dt.replace(tzinfo=ZoneInfo(WINDOWS_TZ.get(tzid, tzid)))
         except Exception:   # ZoneInfo が無い（Python 3.8 以前）・tzdata が無い（Windows）・知らない名前
             return dt.replace(tzinfo=UnknownTZ())   # ローカル時刻として扱うと、海外の予定が何時間もずれる
     return dt.replace(tzinfo=local_tz())
@@ -277,6 +297,11 @@ def url_file_path():
     return Path.home() / "ai-bunshin-calendar-url.txt"
 
 
+def _clean(value):
+    """URL の前後・途中の空白・改行・見えない文字（ゼロ幅・BOM）を取り除く。"""
+    return re.sub(r"[\s\u200b-\u200f\ufeff]+", "", value)
+
+
 def keychain_secret(service):
     """キーチェーンの値。無い・読めないときは CalendarError（理由に値は入れない）。"""
     try:
@@ -284,7 +309,7 @@ def keychain_secret(service):
                            capture_output=True, text=True, timeout=5)
     except (OSError, subprocess.SubprocessError):
         raise CalendarError("キーチェーンを読めませんでした")
-    value = r.stdout.strip()
+    value = _clean(r.stdout)
     if r.returncode != 0 or not value:
         raise CalendarError(f"キーチェーン（{service}）に URL が入っていません")
     return value
@@ -294,7 +319,9 @@ def file_secret():
     p = url_file_path()
     try:
         # メモ帳が付ける BOM と、行末・見えない空白（URL の途中に空白は無い）を取り除く
-        value = re.sub(r"[\s\u200b-\u200f\ufeff]+", "", p.read_text(encoding="utf-8-sig"))
+        value = _clean(p.read_text(encoding="utf-8-sig"))
+    except UnicodeError:   # UTF-16 などで保存された
+        raise CalendarError("ファイルの文字コードを読めませんでした（UTF-8 で保存し直してください）")
     except OSError:
         if _is_windows():
             raise CalendarError("Windows のつなぎ方は setup を見てください")
@@ -310,9 +337,13 @@ def fetch_ics(cfg):
         p = Path(cfg["ics_file"]).expanduser()
         try:
             return p.read_text(encoding="utf-8")
+        except UnicodeError:
+            raise CalendarError("ファイルの文字コードを読めませんでした（UTF-8 で保存し直してください）")
         except OSError:
             raise CalendarError("ICS ファイルを読めませんでした")
     url = keychain_secret(cfg.get("keychain", "ai-bunshin-calendar")) if _platform() == "darwin" else file_secret()
+    if url.count("https://") >= 2:   # 貼り間違いで URL が2つ以上入っている（空白を除くとつながって見える）
+        raise CalendarError("URL を1行だけにしてください（URL が2つ以上入っています）")
     if not url.startswith("https://"):
         raise CalendarError("保存されている値が https:// で始まる URL ではありません（入れ直してください）")
     try:
@@ -382,8 +413,8 @@ def format_events(evs, day, error=None, stale=None):
         return [f"  {error_line(error)}"]
     todays = [e for e in evs if e["date"] == day.isoformat()]
     lines = [f"  {error_line(error, stale)}"] if error else []
-    if not todays:
-        return lines + ["  （予定なし）"]
+    if not todays:   # 古い予定のときは、「いま予定がない」とは言えない
+        return lines + [("  （取れた時点では予定なし）" if error else "  （予定なし）")]
     for e in todays:
         when = "時刻不明" if e.get("time_unknown") else "終日" if e["allday"] else e["start"] + "〜" + e["end"]
         lines.append(f"  - {when} {e['title']}")

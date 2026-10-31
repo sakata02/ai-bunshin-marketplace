@@ -20,6 +20,20 @@ sys.path.insert(0, os.path.join(HERE, "..", "scripts"))
 import calendar_today as c  # noqa: E402
 
 fails = 0
+_OLD_TZ = os.environ.get("TZ")   # このテストが TZ を変えるので、終わったら元に戻す
+if hasattr(__import__("time"), "tzset"):   # 「今日」の日付が、このテストと動かすスクリプトでずれないよう、最初に日本時間にそろえる
+    os.environ["TZ"] = "Asia/Tokyo"
+    __import__("time").tzset()
+
+
+def restore_tz():
+    import time
+    if _OLD_TZ is None:
+        os.environ.pop("TZ", None)
+    else:
+        os.environ["TZ"] = _OLD_TZ
+    if hasattr(time, "tzset"):
+        time.tzset()
 
 
 def check(name, ok, detail=""):
@@ -143,7 +157,7 @@ with patch(c, "_platform", lambda: "darwin"):
         is_unreadable(c.load_calendar(new_root(), CFG, TODAY), "URL でない値", "https://")
 
     # --- 3. キャッシュ：同じ日に取れたものだけ、古いと断って添える ---
-    ics = ("BEGIN:VCALENDAR\nBEGIN:VEVENT\nUID:a\nSUMMARY:会議\nDTSTART:%sT010000Z\nDTEND:%sT020000Z\nEND:VEVENT\nEND:VCALENDAR\n"
+    ics = ("BEGIN:VCALENDAR\nBEGIN:VEVENT\nUID:a\nSUMMARY:会議\nDTSTART:%sT100000\nDTEND:%sT110000\nEND:VEVENT\nEND:VCALENDAR\n"
            % (TODAY.strftime("%Y%m%d"), TODAY.strftime("%Y%m%d")))
     root = new_root()
     with patch(c.subprocess, "run", lambda *a, **k: P(0, SECRET)):
@@ -163,6 +177,10 @@ with patch(c, "_platform", lambda: "darwin"):
             r = c.load_calendar(root, CFG, TODAY)
         check("前の日のキャッシュは使わない（予定なしに見えるため）", r and r["error"] and r["stale"] is None and r["events"] == [], r)
 
+# 古い予定（stale）で、今日の予定が0件のとき：「予定なし」とだけ書かず、取れた時点の話だと断る
+lines = c.format_events([], TODAY, "ネットワークにつながりませんでした", "2026-11-01 09:00")
+check("stale で0件：「取れた時点では予定なし」", "  （取れた時点では予定なし）" in lines and "  （予定なし）" not in lines, lines)
+
 # --- 4. 設定なし・コネクタ ---
 check("calendar の設定なし → None", c.load_calendar(new_root(), {}, TODAY) is None)
 check("connector → None", c.load_calendar(new_root(), {"calendar": {"type": "connector"}}, TODAY) is None)
@@ -170,6 +188,13 @@ check("load_events も None", c.load_events(new_root(), {}, TODAY) is None)
 
 # --- 5. ICS ファイル ---
 is_unreadable(c.load_calendar(new_root(), {"calendar": {"type": "ics", "ics_file": "/nonexistent/x.ics"}}, TODAY), "ICS ファイルが無い", "ICS")
+
+# keychain の値も、見えない文字（ゼロ幅・改行）を取り除く（file_secret と同じ）
+with patch(c.subprocess, "run", lambda *a, **k: P(0, "\u200b" + SECRET + " \u200d\r\n")):
+    check("キーチェーンの値：見えない文字を取り除く", c.keychain_secret("x") == SECRET, repr(c.keychain_secret("x")))
+# URL が2つ入っている（貼り間違い）
+with patch(c, "_platform", lambda: "darwin"), patch(c.subprocess, "run", lambda *a, **k: P(0, SECRET + "\n" + SECRET)):
+    is_unreadable(c.load_calendar(new_root(), CFG, TODAY), "キーチェーンに URL が2つ", "1行だけ")
 
 # --- 6. Windows の分かれ道 ---
 tmp = Path(tempfile.mkdtemp(prefix="calwin_"))
@@ -196,6 +221,17 @@ with patch(c, "_platform", lambda: "win32"), patch(c, "keychain_secret", must_no
     f.write_text("\n", encoding="utf-8")
     with patch(c, "url_file_path", lambda: f):
         is_unreadable(c.load_calendar(new_root(), CFG, TODAY), "Windows で空のファイル", "空")
+    # URL が2行（2つ）：「URL を1行だけにしてください」
+    f.write_text(SECRET + "\n" + SECRET + "\n", encoding="utf-8")
+    with patch(c, "url_file_path", lambda: f), patch(c.urllib.request, "urlopen", must_not_call):
+        is_unreadable(c.load_calendar(new_root(), CFG, TODAY), "Windows で URL が2つ", "URL を1行だけにしてください")
+    # UTF-16 で保存されたファイル（メモ帳の「Unicode」保存）：文字コードの案内
+    f.write_bytes("\ufeff".encode("utf-16-le") + (SECRET + "\r\n").encode("utf-16-le"))
+    with patch(c, "url_file_path", lambda: f), patch(c.urllib.request, "urlopen", must_not_call):
+        is_unreadable(c.load_calendar(new_root(), CFG, TODAY), "Windows で UTF-16 のファイル", "UTF-8 で保存し直してください")
+    g = tmp / "u16.ics"
+    g.write_bytes("\ufeff".encode("utf-16-le") + EMPTY_ICS.encode("utf-16-le"))
+    is_unreadable(c.load_calendar(new_root(), {"calendar": {"type": "ics", "ics_file": str(g)}}, TODAY), "UTF-16 の ICS ファイル", "UTF-8 で保存し直してください")
 with patch(c, "_platform", lambda: "linux"), patch(c, "keychain_secret", must_not_call), patch(c, "url_file_path", lambda: tmp / "none.txt"):
     is_unreadable(c.load_calendar(new_root(), CFG, TODAY), "Linux でファイルが無い", "setup")
 
@@ -262,6 +298,31 @@ if hasattr(__import__("time"), "tzset"):
     except Exception:
         pass   # tzdata の無い環境では、このテストは飛ばす
 
+# Windows 形式の TZID（Outlook など）：よく使うものは IANA に直す。表に無いものは時刻不明のまま
+def win_ev(tzid, hhmm="090000"):
+    return ev(f"UID:w1\nSUMMARY:W\nDTSTART;TZID={tzid}:20261105T{hhmm}\nDTEND;TZID={tzid}:20261105T{int(hhmm[:2]) + 1:02d}0000")
+
+
+if hasattr(__import__("time"), "tzset"):
+    import time
+    os.environ["TZ"] = "Asia/Tokyo"
+    time.tzset()
+    for tzid, want in (("Tokyo Standard Time", "09:00"), ("UTC", "18:00"),
+                       ("Pacific Standard Time", "02:00"),    # 11/5 は米国の標準時（UTC-8）。09:00 → 17:00 UTC → 翌 02:00 日本時間
+                       ("Eastern Standard Time", "23:00"),    # UTC-5。09:00 → 14:00 UTC → 23:00
+                       ("GMT Standard Time", "18:00")):       # 11/5 のロンドンは UTC+0
+        try:
+            got = c.events_between(win_ev(tzid), date(2026, 11, 5), date(2026, 11, 6))
+        except Exception as e:
+            got = repr(e)
+        check(f"Windows の TZID「{tzid}」：時刻が出る", isinstance(got, list) and got and got[0]["start"] == want and not got[0].get("time_unknown"), got)
+    # 表の中の名前は、tzdata が無くても UTC だけは読める
+    with patch(c, "ZoneInfo", no_zone):
+        got = c.events_between(win_ev("UTC"), date(2026, 11, 5), date(2026, 11, 5))
+        check("UTC は tzdata が無くても読める", got and got[0]["start"] == "18:00" and not got[0].get("time_unknown"), got)
+got = c.events_between(win_ev("Nonexistent Standard Time"), date(2026, 11, 5), date(2026, 11, 5))
+check("表に無い Windows の TZID：時刻不明", got and got[0]["start"] == "" and got[0].get("time_unknown"), got)
+
 # --- 8. update_dashboard.py（起動時のまとめ・朝の計画の材料・Excel）---
 SCRIPT = os.path.abspath(os.path.join(HERE, "..", "scripts", "update_dashboard.py"))
 
@@ -313,11 +374,52 @@ try:
 except ImportError:
     pass
 
+# Excel：古い予定（stale）があるとき、エラー文が1件目の予定を上書きしない。時刻不明は Excel でも「時刻不明」
+def excel_cells(root):
+    import openpyxl
+    wb = openpyxl.load_workbook(os.path.join(root, "00_タスク管理", "タスク管理.xlsx"))
+    for sh in wb.worksheets:
+        if sh["K4"].value == "日付" and sh["M4"].value == "予定（件名だけ）":
+            return sh
+    return None
+
+
+try:
+    import openpyxl  # noqa: F401
+    have_xl = True
+except ImportError:
+    have_xl = False
+if have_xl:
+    for label, cached, want_rows in (
+            ("古い予定あり", [{"date": TODAY.isoformat(), "start": "10:00", "end": "11:00", "title": "部長会", "allday": False},
+                           {"date": TODAY.isoformat(), "start": "", "end": "", "title": "海外会議", "allday": False, "time_unknown": True}], 2),
+            ("古い予定が0件", [], 0)):
+        R3, home3 = make_owner({"type": "ics", "ics_file": "/nonexistent/calendar.ics"})
+        json.dump({"fetched": TODAY.isoformat() + " 08:00", "from": TODAY.isoformat(), "events": cached},
+                  open(os.path.join(R3, "00_タスク管理", "data", "calendar_cache.json"), "w", encoding="utf-8"), ensure_ascii=False)
+        run_dash(R3, home3, [])
+        sh = excel_cells(R3)
+        check(f"Excel（{label}）：予定の表がある", sh is not None)
+        if sh is None:
+            continue
+        k = {r: [sh.cell(row=r, column=col).value for col in (11, 12, 13)] for r in range(3, 9)}
+        text = " ".join(str(v) for row in k.values() for v in row if v)
+        check(f"Excel（{label}）：「読めませんでした」が出る", "予定を読めませんでした" in text and "最新ではありません" in text, k)
+        if want_rows:
+            check(f"Excel（{label}）：1件目の日付セル（K5）が予定の日付のまま", k[5][0] and "読めませんでした" not in str(k[5][0]) and k[5][2] == "部長会", k)
+            check(f"Excel（{label}）：2件目の時間は「時刻不明」", k[6][1] == "時刻不明" and "〜" not in str(k[6][1]), k)
+            check(f"Excel（{label}）：エラー文は予定の行とぶつからない", k[3][0] and "読めませんでした" in str(k[3][0]), k)
+        else:
+            check(f"Excel（{label}）：「取れた時点では予定なし」", k[5][0] == "取れた時点では予定なし", k)
+    r = run_dash(R3, home3, ["--plan-context"])
+    check("朝の計画の材料（古い予定が0件）：「取れた時点では予定なし」", "取れた時点では予定なし" in r.stdout, r.stdout)
+
 ok_ics = os.path.join(os.path.dirname(R), "empty.ics")
 open(ok_ics, "w", encoding="utf-8").write(EMPTY_ICS)
 R2, home2 = make_owner({"type": "ics", "ics_file": ok_ics})
 r = run_dash(R2, home2, ["--plan-context"])
 check("本当に0件：「予定なし」と出る", "（予定なし）" in r.stdout and "読めませんでした" not in r.stdout and "読めなかった" not in r.stdout, r.stdout + r.stderr)
 
+restore_tz()
 print(f"失敗 {fails} 件")
 sys.exit(1 if fails else 0)

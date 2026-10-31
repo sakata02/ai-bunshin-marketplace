@@ -863,13 +863,21 @@ def build_own_sheet(wb, ctx):
             ws.cell(row=4, column=c).font = HEADER_FONT
             ws.cell(row=4, column=c).border = BORDER
         for i, e in enumerate(ctx["events"] or [], start=5):
-            vals = [fmt_jp(parse_date(e["date"])), "終日" if e["allday"] else f"{e['start']}〜{e['end']}", e["title"]]
+            when = "時刻不明" if e.get("time_unknown") else "終日" if e["allday"] else f"{e['start']}〜{e['end']}"
+            vals = [fmt_jp(parse_date(e["date"])), when, e["title"]]
             for c, v in enumerate(vals, start=11):
                 cell = ws.cell(row=i, column=c, value=v)
                 cell.font = BODY_FONT
                 cell.border = BORDER
-        if ctx.get("events_error"):   # 読めなかったときは「予定なし」と書かない
-            ws.cell(row=5, column=11, value=calendar_today.error_line(ctx["events_error"], ctx.get("events_stale"))).font = BODY_FONT
+        err, stale = ctx.get("events_error"), ctx.get("events_stale")
+        if err:   # 読めなかったときは「予定なし」と書かない
+            msg = calendar_today.error_line(err, stale)
+            if stale:   # 古い予定は5行目から並ぶので、表の上（3行目）に書く。予定の行とぶつけない
+                ws.cell(row=3, column=11, value=msg).font = BODY_FONT
+                if not ctx["events"]:
+                    ws.cell(row=5, column=11, value="取れた時点では予定なし").font = BODY_FONT
+            else:
+                ws.cell(row=5, column=11, value=msg).font = BODY_FONT
         elif not ctx["events"]:
             ws.cell(row=5, column=11, value="予定なし").font = BODY_FONT
 
