@@ -62,7 +62,11 @@ claude plugin marketplace add|update|remove は、メンテする人でも止め
 - 本人のフォルダから find . -exec sed -i … のように、起点が 03_インプット を含む形は、前の版と同じだけしか止まらない
 - 解けないパス（リンクのループなど）は、動かす・消す元にあるときだけ止める。Write の行き先なら通す（OS も書けないため）
 - Windows など setitimer の無い所では、締め切りを仕掛けられない
-- 前の版の誤停止（文書の中の語・外で読み出しの後ろの区切りまで本人の規則を当てるなど）は、R1〜R4 の形のほかは残る（T061）
+- 前の版の誤停止（文書の中の語・外で読み出しの後ろの区切りまで本人の規則を当てるなど）は、R1〜R4 の形のほかは残る（T061）。
+  T061 で減らしたもの：cd のあとが読むだけ・git commit の本文・書くだけのヒアドキュメントの本文・python に渡す本文の文字列と変数名
+  （mask_inert。実行されうるもの（bash -c・eval・$( )・python の exec や subprocess など）はならさない）。
+  残るもの：python の本文にプラグインのコピーの場所の文字と書き込みの語が同居する形・bash -c の中の git commit の本文・python -c の文字列・
+  読み込み場所の判定（installed_plugins.json）は入れていない
 """
 import glob
 import json
@@ -154,7 +158,7 @@ BASH_RULES = [
     ("削除", seq(B + r"zip(?=\s)", r"\s(?:-[A-Za-z]*m[A-Za-z]*|--move)(?=$|[\s;&|)])", line=False)),  # 圧縮したあと元を消す
     ("削除・書き換え（git）",
      B + r"git\s+(?:-\S+(?:\s+[^-\s]\S*)?\s+)*(?:push|clean|rebase|restore|rm|reset\s+--hard|stash\s+(?:drop|clear)|"
-         r"branch\s+-D|checkout\s+(?:--|\.))(?=\s|$)"),
+         r"branch\s+-D|checkout\s+(?:--|\.))(?=[\s'\"]|$)"),
     ("プロセスの停止", cmd(r"kill|pkill|killall")),
     ("システム", cmd(r"sudo|su|launchctl|crontab|shutdown|reboot|halt|pmset|diskutil|systemsetup|osascript|shortcuts")),
     ("システム", B + r"defaults\s+(?:write|delete)\b"),
@@ -1932,6 +1936,255 @@ READ_ONLY_CP = re.compile(r"^\s*cp\s+(?:-(?!t\b)[A-Za-su-z]+\s+)*\S+\s+\S+\s*$")
 PLUGIN_COPY_WORD = re.compile(r"\.claude/plugins(?:/|$|[\s\"'])")  # 前の版と同じ当て方（広げると新しく止まるものが出る）
 
 
+# ---- T061：読むだけのコマンド・文字列・本文の中の語で止めない ----
+# 文字の並びの規則（BASH_RULES・plugin_bash_check・前の版の規則）に渡す前に、実行されない文字を「ならす」。
+# ならすのは次の3つだけ。どれも、実行される可能性が少しでもあれば、ならさない（止める側に倒す）。
+#   1. git commit／git tag の引用符の中（-m の本文）。$( )・` ` が入っていれば、ならさない
+#   2. ファイルに書くだけのヒアドキュメント（cat／tee の入力）の本文。同じコマンドに bash・python などの実行役があれば、ならさない
+#   3. python に渡すヒアドキュメントの本文：文字列とコメントを消し、削除・送信の呼び出しの語だけ残す
+#      （変数名 rm や 'os.remove' の文字列では止まらず、os.remove( の呼び出しは止まる）
+# ならした文字は、規則に渡す分だけに使う。行き先の判定（analyze など）には元のコマンドを使うので、書き込み先は見落とさない。
+HEREDOC_OPEN = re.compile(r"(?<!<)<<(-?)[ \t]*(\\?)([\"']?)([A-Za-z_][\w-]*)\3")
+HEREDOC_DATA_RECV = re.compile(r"(?:^|[;&|(`]\s*|\$\(\s*)(?:\w+=\S*\s+)*(?:cat|tee)\b[^|;&<`$()]*$")
+HEREDOC_DATA_TAIL = re.compile(r"^\s*(?:>>?\s*[\w./~-]+\s*)?(?:\)[\"']?\s*)?$")
+HEREDOC_PY_RECV = re.compile(r"(?:^|[;&|(`]\s*|\$\(\s*)(?:\w+=\S*\s+)*python[\d.]*(?:\s+-[IuBsSE]+)*(?:\s+-)?\s*$")
+EXEC_WORDS = re.compile(r"(?<![\w./-])(?:bash|sh|zsh|dash|ksh|source|eval|exec|xargs|python[\d.]*|perl|ruby|node|osascript|make|npm|npx|php|awk|env|open|fish|lua|swift)"
+                        r"(?![\w-])|(?:^|[\s;&|(])\.{1,2}/\S|(?:^|[\s;&|(])\.\s")
+PY_DANGER = re.compile(r"os\.(?:remove|unlink|rmdir|removedirs|system)\b|shutil\.rmtree|\.unlink\(|\.rmdir\(|"
+                       r"requests\.(?:post|put|delete|patch)|smtplib|urlopen\(")
+PY_RUNNERS = re.compile(r"\w*(?:exec|eval|compile|spawn|popen|system|fork)\w*|\b(?:__import__|getattr|setattr|importlib|subprocess|"
+                        r"runpy|pty|ctypes|builtins|globals|locals)\b", re.I)
+PY_FSTRING = re.compile(r"(?<![\w])(?:[fF][rR]?|[rR][fF])[\"']")  # f文字列の {} の中は実行される式（文字列として消すと見落とす）
+# 書いたファイルがあとで実行されうる行き先（スクリプト・git のフック・起動の設定）は、本文をならさない
+SCRIPT_DEST = re.compile(r"\.(?:sh|bash|zsh|py|pl|rb|js|command|plist|zshrc|bashrc|profile)\b|\.git/|hooks|LaunchAgents|/bin/|crontab", re.I)
+
+
+def _py_code_only(body):
+    """python の本文から、文字列とコメントを空白にした文字列。読めなければ None。"""
+    import io
+    import tokenize
+    lines = body.split("\n")
+    rows = [list(l) for l in lines]
+    skip = {tokenize.STRING, tokenize.COMMENT}
+    for n in ("FSTRING_START", "FSTRING_MIDDLE", "FSTRING_END"):
+        if hasattr(tokenize, n):
+            skip.add(getattr(tokenize, n))
+    try:
+        for tok in tokenize.generate_tokens(io.StringIO(body + "\n").readline):
+            if tok.type in skip:
+                (r1, c1), (r2, c2) = tok.start, tok.end
+                for r in range(r1, r2 + 1):
+                    if r - 1 >= len(rows):
+                        break
+                    a = c1 if r == r1 else 0
+                    b = c2 if r == r2 else len(rows[r - 1])
+                    for c in range(a, min(b, len(rows[r - 1]))):
+                        rows[r - 1][c] = " "
+    except (tokenize.TokenError, IndentationError, SyntaxError, ValueError):
+        return None
+    return "\n".join("".join(r) for r in rows)
+
+
+def _py_body_summary(body):
+    """python に渡す本文を、規則に渡す形にする：削除・送信の呼び出しの語だけ残す。ならせないときは None。"""
+    if re.search(r"\$\(|`|<\(", body):
+        return None  # シェルが展開して、中身が変わる
+    code = _py_code_only(body)
+    if code is None or PY_RUNNERS.search(code.replace("re.compile", "re_")) or PY_FSTRING.search(body):
+        return None  # 読めない、または文字列を実行できる呼び出しがある
+    if ".claude/plugins" in body and WRITE_WORDS.search(body):
+        return None  # プラグインのコピーを指す文字と書き込みの語が同居：行き先を変数で隠せるので、ならさない
+    return "\n".join(m.group(0) for m in PY_DANGER.finditer(code))
+
+
+def _heredoc_spans(text):
+    """ならせるヒアドキュメントの本文の位置。[(始め, 終わり, 置き換え, 種類)]。"""
+    spans, pos = [], 0
+    while True:
+        m = HEREDOC_OPEN.search(text, pos)
+        if not m:
+            break
+        ls = text.rfind("\n", 0, m.start()) + 1
+        le = text.find("\n", m.end())
+        if le < 0:
+            break
+        pos = m.end()
+        prefix, tail = text[ls:m.start()], text[m.end():le]
+        if "<<" in prefix or "<<" in tail:
+            continue  # 1行に2つ以上：ならさない
+        delim, dash, quoted = m.group(4), bool(m.group(1)), bool(m.group(2) or m.group(3))
+        i, end = le + 1, None
+        while i <= len(text):
+            j = text.find("\n", i)
+            line = text[i:j if j >= 0 else len(text)]
+            if (line.lstrip("\t") if dash else line) == delim:
+                end = i
+                break
+            if j < 0:
+                break
+            i = j + 1
+        if end is None:
+            break  # 閉じていない：以降はならさない
+        body = text[le + 1:end]
+        pos = end
+        if re.search(r"\$\(|`|<\(", body):
+            continue  # シェルが展開して、中身が変わる
+        if HEREDOC_PY_RECV.search(prefix) and re.match(r"^\s*$", tail):
+            summ = _py_body_summary(body)
+            if summ is not None:
+                spans.append((le + 1, end, (summ + "\n") if summ else "", "py"))
+        elif HEREDOC_DATA_RECV.search(prefix) and HEREDOC_DATA_TAIL.match(tail) and not SCRIPT_DEST.search(prefix + tail):
+            spans.append((le + 1, end, "", "data"))
+    return spans
+
+
+GIT_MSG_SEG = re.compile(r"^\s*(?:\w+=\S*\s+)*git(?:\s+-C\s+\S+)?\s+(?:commit|tag)\b[^<>]*$")
+
+
+def _mask_git_messages(text):
+    """git commit／git tag の引用符の中身を x にする。$( )・` `・${ が入るもの、リダイレクトの行き先は、ならさない。"""
+    out, seg, i, n = [], 0, 0, len(text)
+    last = 0
+    while i < n:
+        c = text[i]
+        if c == "\\" and i + 1 < n:
+            i += 2
+            continue
+        if c in ";\n&|({":
+            seg = i + 1
+            i += 1
+            continue
+        if c == "$" and text.startswith("$(", i):
+            seg = i + 2
+            i += 2
+            continue
+        if c in "'\"":
+            if i > 0 and text[i - 1] == "$":
+                return text  # $'…'：読み切れない。ならさない
+            j = i + 1
+            while j < n:
+                if text[j] == "\\" and c == '"' and j + 1 < n:
+                    j += 2
+                    continue
+                if text[j] == c:
+                    break
+                j += 1
+            if j >= n:
+                return text  # 閉じていない
+            inner = text[i + 1:j]
+            prefix = text[seg:i]
+            if (GIT_MSG_SEG.match(prefix) and not re.search(r"\s-c\s|--exec|--config", prefix)
+                    and not re.search(r"[<>]\s*$", prefix) and not re.search(r"\$\(|`|\$\{|<\(", inner)):
+                out.append(text[last:i + 1])
+                out.append("x" * len(inner))
+                last = j
+            i = j + 1
+            continue
+        i += 1
+    out.append(text[last:])
+    return "".join(out)
+
+
+def mask_inert(text):
+    """規則に渡す前に、実行されない文字（上の1〜3）をならした文字列。"""
+    if "<<" in text:
+        spans = _heredoc_spans(text)
+        if spans:
+            keep, last = [], 0
+            for a, b, r, k in spans:
+                keep.append(text[last:a])
+                last = b
+            keep.append(text[last:])
+            outside = "".join(keep)
+            if any(k == "data" for _, _, _, k in spans) and EXEC_WORDS.search(outside):
+                spans = [s for s in spans if s[3] != "data"]
+            out, last = [], 0
+            for a, b, r, k in spans:
+                out.append(text[last:a])
+                out.append(r)
+                last = b
+            out.append(text[last:])
+            text = "".join(out)
+    if "git" in text and ("commit" in text or "tag" in text):
+        text = _mask_git_messages(text)
+    return text
+
+
+# 読むだけの $( )（ls・head・tail・sort・basename・dirname だけ）は、中のプラグインの場所の名前を規則に渡さない
+READ_SUBST = re.compile(r"\$\(\s*(?:ls|head|tail|sort|basename|dirname)\b[^()`$<>]*(?:\|\s*(?:ls|head|tail|sort|basename|dirname)\b[^()`$<>]*)*\)")
+WRITE_WORDS_NO_CD = None  # WRITE_WORDS の定義のあとで作る
+CD_READ_OK = None
+GIT_READ_SUBS = {"status", "log", "diff", "show", "rev-parse", "ls-files", "blame", "grep", "describe", "shortlog"}
+SED_SAFE_SCRIPT = re.compile(r"^(?:\d+|\$|/[^/]*/)(?:,(?:\d+|\$|/[^/]*/|\+\d+))?[pd=]$")
+
+
+def _read_part(part):
+    """1つのコマンドが、読むだけか（cd・pushd は別に見る）。"""
+    if re.search(r"[>`]|\$\(|<\(|<<", part):
+        return False
+    try:
+        words = seg_words(part)
+    except Exception:
+        return False
+    k = 0
+    while k < len(words) and ASSIGN.match(words[k]):
+        k += 1
+    if k >= len(words):
+        return False
+    name, args = os.path.basename(words[k]), words[k + 1:]
+    if name == "sed":
+        opts = [a for a in args if a.startswith("-")]
+        rest = [a for a in args if not a.startswith("-")]
+        return (all(o in ("-n", "-E", "-r") for o in opts) and bool(rest) and bool(SED_SAFE_SCRIPT.match(rest[0])))
+    if name == "git":
+        a = list(args)
+        if a[:1] == ["-C"] and len(a) >= 3:
+            a = a[2:]
+        return bool(a) and a[0] in GIT_READ_SUBS and not any(x.startswith("--output") or x in ("-c", "--ext-diff") for x in a)
+    return name in (READ_ONLY_CMDS - {"cd", "pushd", "find", "open"})
+
+
+def cd_reads_only(text):
+    """cd・pushd と、読むだけのコマンド（パイプでつないでよい）だけでできているか。書き込みの語が cd だけのときに、通してよいかの確かめ。"""
+    if WRITE_WORDS_NO_CD.search(text) or re.search(r"[>`]|\$\(|<\(|<<", text):
+        return False
+    groups = split_top(text)
+    if not groups:
+        return False
+    for g in groups:
+        g = g.strip().lstrip("({ ").rstrip(") }").strip()
+        m = re.match(r"^(?:cd|pushd)(?:\s+(?:--\s+)?(\"[^\"]*\"|'[^']*'|[^\s\"';&|()<>]+))?$", g)
+        if m:
+            continue
+        parts = split_top(g, pipes=True)
+        if not parts or not all(_read_part(p) for p in parts):
+            return False
+    return True
+
+
+def cd_read_shape(t):
+    """t（ならして quiet を通した文字列）が「cd と読むだけのコマンドだけ」なら、読むだけの $( ) を外した文字列。そうでなければ None。
+    読むだけの $( ) を外すのは、この形のときだけ（cd "$(ls -d …)" && touch x のように、cd の先に書くものは外さない）。"""
+    t2 = READ_SUBST.sub("READ_SUBST", t)
+    if not PLUGIN_COPY_WORD.search(t2) and cd_reads_only(t2):
+        return t2
+    return None
+
+
+def relax_text(command):
+    """前の版の規則を当て直す文字列：実行されない文字をならし、cd と読むだけのコマンドだけなら cd を chdir に替える（cd は書き込みの語に数えない）。"""
+    t = quiet(mask_inert(command))
+    t2 = cd_read_shape(t)
+    if t2 is not None:
+        return re.sub(r"(?<![\w./-])(?:cd|pushd)(?=\s)", "chdir", t2)
+    return t
+
+
+WRITE_WORDS_NO_CD = re.compile(WRITE_WORDS.pattern.replace(r"|\bcd\b|\bpushd\b", ""))
+
+
+
+
 def _plain_read(g):
     """区切り g が、読むだけの1つのコマンドか（cat・ls など。向け先・$( )・` ` なし）。"""
     if re.search(r"[>`]|\$\(|<\(", g):
@@ -1948,9 +2201,11 @@ def plugin_bash_check(command, root):
     """Bash でのプラグインへの書き込み。コピー（~/.claude/plugins/）は誰でも、元（.claude-plugin/ を持つフォルダ）は
     メンテする人以外を止める。読むだけ（cat・ls・diff、cp のコピー元）は通す。
     パスを細かく追えない書き方（cd してから書く、python -c で書く）もあるので、書き込みの語があれば広めに止める。"""
-    command = quiet(command)  # 2>/dev/null・2>&1 は書き込みと見ない（R4）
+    command = quiet(mask_inert(command))  # 2>/dev/null・2>&1 は書き込みと見ない（R4）。実行されない文字はならす（T061）
     if not WRITE_WORDS.search(command):
         return None
+    if cd_read_shape(command) is not None:
+        return None  # 書き込みの語が cd だけで、あとは読むだけ（cd <元> && sed -n …）。cd の先に書き込む形は、書き込みの語で止まる（T061）
     tokens = re.findall(r"[\"']?([^\s\"';&|()]+)[\"']?", command)
     if PLUGIN_COPY_WORD.search(command):
         # 区切り（; && || 改行）ごとに見る。読むだけの区切り（cat ~/.claude/plugins/x）のあとの、別の場所での cd や書き込みでは止めない。
@@ -2174,7 +2429,8 @@ def check(payload, root, command=None):
     if tool == "Bash":
         full = inp.get("command", "")
         flat = normalize(full if command is None else command)
-        q = quiet(flat)  # 2>/dev/null・2>&1 などを除いてから規則を当てる（R4）
+        qf = quiet(flat)  # 2>/dev/null・2>&1 などを除いてから規則を当てる（R4）
+        q = quiet(mask_inert(flat))  # 実行されない文字（git commit の本文・書くだけの本文・python の文字列）をならす（T061）
         for label, pat in BASH_RULES:
             if rule_hit(pat, q):
                 if (label in DEV_ALLOWED and not GLOBAL_INSTALL.search(flat) and not pip_outside_venv(flat)
@@ -2183,7 +2439,7 @@ def check(payload, root, command=None):
                 return label, full
         an = analyze(flat, base_cwd(payload, root))
         label = input_hit(an, root)
-        if label is None and "<<" in q and any(m(q) for m in LEGACY_INPUT_RULES):
+        if label is None and "<<" in qf and any(m(qf) for m in LEGACY_INPUT_RULES):
             label = "元データの移動・上書き"
         if label is None and any(p.launched and any(m(quiet(p.text)) for m in LEGACY_INPUT_RULES) for p in an.parts):
             label = "元データの移動・上書き"  # 起動役（xargs・find -exec など）のあるコマンドには、前の文字の規則も残す（指摘2）
@@ -2411,7 +2667,7 @@ def legacy_decision(payload, root_new):
         relaxed, flat, an = dict(payload), None, None
         if payload.get("tool_name") == "Bash" and isinstance((payload.get("tool_input") or {}).get("command"), str):
             flat = normalize(payload["tool_input"]["command"])
-            relaxed["tool_input"] = dict(payload["tool_input"], command=quiet(flat))  # R4：2>/dev/null・2>&1 を除く
+            relaxed["tool_input"] = dict(payload["tool_input"], command=relax_text(flat))  # R4：2>/dev/null・2>&1 を除く。T061：実行されない文字・cd のあとの読むだけもならす
             an = analyze(flat, base_cwd(payload, root_new))
         s03 = an is not None and r3_confirmed(an, flat)
         splug = an is not None and plugin_confirmed(an, flat)

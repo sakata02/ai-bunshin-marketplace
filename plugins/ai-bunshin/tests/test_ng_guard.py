@@ -731,4 +731,56 @@ setcfg("{x")  # 今も読めない config.json を、別の読めない形・ng_
 for nm,c in [("別の読めない形","{y"),("ng_allow の無い JSON",'{"name":"a"}')]:
     if run("Write",{"file_path":CFGP,"content":c})!="pass": fail+=1; print("T059 読めない config からの変更が止まった",nm)
 setcfg("{}")  # 後ろのテストのために戻す
+# ---- T061：読むだけ・文字列の中の語で止めない（止めるべきものは止めたまま）----
+cfg(False)
+PS=os.path.join(SRC,"plugins","x"); os.makedirs(os.path.join(PS,"skills"),exist_ok=True); open(os.path.join(PS,"skills","a.md"),"w").write("x")
+os.makedirs(os.path.expanduser("~/.claude/plugins/cache/x"),exist_ok=True)
+LS="$(ls -d ~/.claude/plugins/cache/* | tail -1)"
+t61_pass=[
+ "cd "+PS+" && sed -n 1,5p skills/a.md","cd "+PS+" && cat skills/a.md","cd "+PS+"/skills && ls","cd "+PS+" && git status && grep -n x skills/a.md",
+ "cd "+PS+" && git log --oneline | head -3","(cd "+PS+" && wc -l skills/a.md)",
+ "python3 - <<EOF\nrm = 3\nprint(rm)\nEOF","python3 - <<'EOF'\nimport re\ns = \"os.remove\"\nprint(s)  # shutil.rmtree\nEOF",
+ "python3 - <<EOF\ndef f(): return 'shutil.rmtree'\nprint(f())\nEOF",
+ "python3 - <<EOF\nprint('git push')\nprint(\"\"\"\ngit push\npip install x\nrm y\n\"\"\")\nEOF",
+ "python3 - <<EOF\nprint('~/.claude/plugins')\nEOF","python3 - <<EOF\nimport re\np = re.compile('rm x')\nrm = 1\nEOF",
+ "git commit -m \"fix\\n\\ngit push\\npip install x\\nrm y\"","git commit -m \"git push と ~/.claude/plugins と pip install の話\"",
+ "git commit -am 'text ~/.claude/plugins pip install here'","git -C . commit -m \"rm x\"",
+ "git commit -m \"$(cat <<'EOF'\nfix: git push と pip install と chflags\n\nrm x\nEOF\n)\"",
+ "git add -A && git commit -m \"a: git push\"",
+ "echo "+LS,"cat "+LS+"/README.md","cd \""+LS+"\" && cat README.md","cd \""+LS+"\" && sed -n 1,5p README.md",
+ "diff -r "+LS+" "+PS,
+ "cat > /tmp/t61.md <<'EOF'\nchflags nohidden x\nCLAUDE_PLUGIN_ROOT rm cp\nrm x\nEOF",
+ "cat > /tmp/t61.md <<EOF\nchflags nohidden x\nCLAUDE_PLUGIN_ROOT\npip install y\nEOF",
+ "cat > 02_成果物/t61.md <<'EOF'\ngit push\nrm x\nEOF","tee 02_成果物/t61.md <<'EOF'\nchflags x\nEOF",
+]
+t61_stop=[
+ "cd "+PS+" && sed -i s/a/b/ skills/a.md","cd "+PS+" && rm skills/a.md","cd "+PS+" && touch x","cd "+PS+" && echo x > skills/a.md",
+ "cd "+PS+" && cp /tmp/x .","cd "+PS+" && ./run.sh","cd "+PS+" && python3 x.py","cd "+PS+" && sed -n 1,5p skills/a.md > b",
+ "cd "+PS+" && sed -n 'w out' skills/a.md","cd "+PS+" && git checkout x","cd "+PS+" && git diff --output=out",
+ "cd \""+LS+"\" && touch x","cd \""+LS+"\" && sed -i s/a/b/ README.md","cd \""+LS+"\" && rm README.md",
+ "cd ~/.claude/plugins && cat x","cd ~/.claude/plugins && cp x .",
+ "echo x > ~/.claude/plugins/cache/a","cat > ~/.claude/plugins/x.md <<'EOF'\nhi\nEOF","cat > ~/.claude/plugins/x.md <<EOF\nhi\nEOF","sed -i s/a/b/ ~/.claude/plugins/cache/x/r.md",
+ "cat > "+PS+"/skills/x.md <<'EOF'\nhi\nEOF","tee ~/.claude/plugins/cache/x/r.md <<'EOF'\nhi\nEOF",
+ "git push","rm x","pip install x","chflags nohidden x","git commit -m a && git push","git commit -m a; rm x","git commit -m a\nrm x",
+ "git commit -m \"$(rm x)\"","git commit -m \"`rm x`\"","git commit -m 'a' && pip install x",
+ "bash -c \"rm x\"","sh -c \"git push\"","eval \"rm x\"","$(rm x)","`rm x`","python3 -c \"import os; os.remove('x')\"","python3 -c \"import shutil; shutil.rmtree('x')\"",
+ "python3 - <<EOF\nimport os\nos.remove('x')\nEOF","python3 - <<EOF\nimport os\nos.system('rm x')\nEOF","python3 - <<EOF\nimport shutil\nshutil.rmtree('x')\nEOF",
+ "python3 - <<EOF\nfrom pathlib import Path\nPath('x').unlink()\nEOF","python3 - <<EOF\nexec(\"import os; os.remove('x')\")\nEOF",
+ "python3 - <<EOF\nimport os\nprint('x')\nos.remove('x')  # ok\nEOF",
+ "python3 - <<EOF\nimport os\nprint(f\"{os.remove('x')}\")\nEOF","python3 - <<EOF\nimport os\nos.posix_spawn('/bin/sh',['sh','-c','''\nrm x\n'''],{})\nEOF",
+ "cat > x.sh <<'EOF'\nrm y\nEOF","cat > .git/hooks/pre-commit <<'EOF'\nrm y\nEOF\ngit commit -m a","cat > x.md <<'EOF'\nrm y\nEOF\nopen x.command",
+ "cat > x.md <<'EOF'\nrm y\nEOF\nsource x.md","cat > x.md <<'EOF'\nrm y\nEOF\n. ./x.md",
+ "python3 - <<EOF\nimport subprocess\nprint(\"\"\"\nrm x\n\"\"\")\nEOF","python3 - <<EOF\ngetattr(__import__('os'),'remove')('x')\nprint(\"\"\"\nrm x\n\"\"\")\nEOF",
+"python3 - <<EOF\nrm = 1\nEOF\nrm x",
+ "python3 - <<EOF\np='"+os.path.expanduser("~")+"/.claude/plugins/a'\nopen(p,'w').write('x')\nEOF",
+ "cat <<'EOF' | sh\nrm x\nEOF","cat <<EOF | bash\nrm x\nEOF","bash <<'EOF'\nrm x\nEOF","sh <<EOF\ngit push\nEOF",
+ "cat > x.sh <<'EOF'\nrm y\nEOF\nbash x.sh","cat > x.sh <<'EOF'\nrm y\nEOF\nsh x.sh","cat <<EOF > x.sh && sh x.sh\nrm y\nEOF",
+ "cat > /tmp/x.md <<EOF\n$(rm x)\nEOF","cat > /tmp/x.md <<EOF\n`rm x`\nEOF",
+ "echo \"rm x\" | sh","echo hi | bash","ssh h 'rm x'",
+]
+for c in t61_pass:
+    if run("Bash",{"command":c})!="pass": fail+=1; print("T061 FALSEPOS",repr(c).replace(PS,"<PS>")[:150])
+for c in t61_stop:
+    if run("Bash",{"command":c})!="STOP": fail+=1; print("T061 MISS",repr(c).replace(PS,"<PS>")[:150])
+json.dump({},open(os.path.join(R,"設定","config.json"),"w"))
 print(f"失敗 {fail} 件"); sys.exit(1 if fail else 0)
