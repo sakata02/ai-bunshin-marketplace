@@ -737,21 +737,26 @@ PS=os.path.join(SRC,"plugins","x"); os.makedirs(os.path.join(PS,"skills"),exist_
 os.makedirs(os.path.expanduser("~/.claude/plugins/cache/x"),exist_ok=True)
 LS="$(ls -d ~/.claude/plugins/cache/* | tail -1)"
 t61_pass=[
- "cd "+PS+" && sed -n 1,5p skills/a.md","cd "+PS+" && cat skills/a.md","cd "+PS+"/skills && ls","cd "+PS+" && git status && grep -n x skills/a.md",
- "cd "+PS+" && git log --oneline | head -3","(cd "+PS+" && wc -l skills/a.md)",
- "python3 - <<EOF\nrm = 3\nprint(rm)\nEOF","python3 - <<'EOF'\nimport re\ns = \"os.remove\"\nprint(s)  # shutil.rmtree\nEOF",
- "python3 - <<EOF\ndef f(): return 'shutil.rmtree'\nprint(f())\nEOF",
- "python3 - <<EOF\nprint('git push')\nprint(\"\"\"\ngit push\npip install x\nrm y\n\"\"\")\nEOF",
- "python3 - <<EOF\nprint('~/.claude/plugins')\nEOF","python3 - <<EOF\nimport re\np = re.compile('rm x')\nrm = 1\nEOF",
+ "cd "+PS+" && sed -n 1,5p skills/a.md","cd "+PS+" && cat skills/a.md","cd "+PS+"/skills && ls",
+ "python3 - <<'EOF'\nimport re\ns = \"os.remove\"\nprint(s)  # shutil.rmtree\nEOF",
+ "python3 - <<EOF\nprint('~/.claude/plugins')\nEOF",
  "git commit -m \"fix\\n\\ngit push\\npip install x\\nrm y\"","git commit -m \"git push と ~/.claude/plugins と pip install の話\"",
  "git commit -am 'text ~/.claude/plugins pip install here'","git -C . commit -m \"rm x\"",
- "git commit -m \"$(cat <<'EOF'\nfix: git push と pip install と chflags\n\nrm x\nEOF\n)\"",
  "git add -A && git commit -m \"a: git push\"",
- "echo "+LS,"cat "+LS+"/README.md","cd \""+LS+"\" && cat README.md","cd \""+LS+"\" && sed -n 1,5p README.md",
+ "echo "+LS,"cat "+LS+"/README.md",
  "diff -r "+LS+" "+PS,
  "cat > /tmp/t61.md <<'EOF'\nchflags nohidden x\nCLAUDE_PLUGIN_ROOT rm cp\nrm x\nEOF",
- "cat > /tmp/t61.md <<EOF\nchflags nohidden x\nCLAUDE_PLUGIN_ROOT\npip install y\nEOF",
  "cat > 02_成果物/t61.md <<'EOF'\ngit push\nrm x\nEOF","tee 02_成果物/t61.md <<'EOF'\nchflags x\nEOF",
+]
+# T061b：通す形を狭くしたので、次の形は前の版（2899260）と同じく止まる（誤検知が戻ったもの。T061 では通していた）
+t61_fp_back=[
+ "cd "+PS+" && git status && grep -n x skills/a.md","cd "+PS+" && git log --oneline | head -3","(cd "+PS+" && wc -l skills/a.md)",
+ "python3 - <<EOF\nrm = 3\nprint(rm)\nEOF","python3 - <<EOF\ndef f(): return 'shutil.rmtree'\nprint(f())\nEOF",
+ "python3 - <<EOF\nprint('git push')\nprint(\"\"\"\ngit push\npip install x\nrm y\n\"\"\")\nEOF",
+ "python3 - <<EOF\nimport re\np = re.compile('rm x')\nrm = 1\nEOF",
+ "git commit -m \"$(cat <<'EOF'\nfix: git push と pip install と chflags\n\nrm x\nEOF\n)\"",
+ "cd \""+LS+"\" && cat README.md","cd \""+LS+"\" && sed -n 1,5p README.md",
+ "cat > /tmp/t61.md <<EOF\nchflags nohidden x\nCLAUDE_PLUGIN_ROOT\npip install y\nEOF",
 ]
 t61_stop=[
  "cd "+PS+" && sed -i s/a/b/ skills/a.md","cd "+PS+" && rm skills/a.md","cd "+PS+" && touch x","cd "+PS+" && echo x > skills/a.md",
@@ -777,6 +782,28 @@ t61_stop=[
  "cat > x.sh <<'EOF'\nrm y\nEOF\nbash x.sh","cat > x.sh <<'EOF'\nrm y\nEOF\nsh x.sh","cat <<EOF > x.sh && sh x.sh\nrm y\nEOF",
  "cat > /tmp/x.md <<EOF\n$(rm x)\nEOF","cat > /tmp/x.md <<EOF\n`rm x`\nEOF",
  "echo \"rm x\" | sh","echo hi | bash","ssh h 'rm x'",
+# T061b：抜け道を塞ぐ代わりに、通す形を狭い許可リストに絞った。形が外れたら前の版の判定に任せて止める
+ "echo 'a; cat <<EOF\n'; rm x\nEOF","git commit -m \"a\" # don't\ngit push\n# it's","git commit -m \"a\" # \"\nrm x\n# \"",
+ "git commit -m \"$(rm x)\"","echo $(ls -d ~/.claude/plugins/cache/*; cp /tmp/e ~/.claude/plugins/cache/x)","echo $(ls ~/.claude/plugins | tee ~/.claude/plugins/y)",
+ "cd "+PS+" && rg --pre sh x","cd "+PS+" && GIT_EXTERNAL_DIFF=sh git diff","cd "+PS+" && PATH=/tmp:$PATH ls","cd "+PS+" && git show --textconv",
+ "cd "+PS+" && git diff --ext-diff","cd "+PS+" && git log -O x","cd "+PS+" && git diff --no-index a b","cd "+PS+" && git diff -C",
+ "cd "+PS+" && cat x | sh","cd "+PS+" && cat x; rm y","cd "+PS+" && cat x && rm y","cd "+PS+" && cat $(rm y)","cd "+PS+" && cat `rm y`",
+ "cat <<EOF > /tmp/a\nrm x\nEOF\n/bin/bash /tmp/a","cat <<EOF > /tmp/a\nrm x\nEOF\n$SHELL /tmp/a","cat <<EOF > /tmp/a\nrm x\nEOF\n`cat /tmp/a`",
+ "cat <<'EOF' > ~/.zshenv\nrm x\nEOF","cat <<'EOF' > ~/.bash_profile\nrm x\nEOF","cat <<'EOF' > ~/.ssh/authorized_keys\nrm x\nEOF",
+ "cat <<'EOF' > x.fish\nrm x\nEOF","cat <<'EOF' > package.json\nrm x\nEOF",
+ "cat > ~/.config/a.md <<'EOF'\nrm x\nEOF","cat > ~/Library/a.md <<'EOF'\nrm x\nEOF","cat > ~/.a.md <<'EOF'\nrm x\nEOF","cat > ~/.claude/plugins/a.md <<'EOF'\nrm x\nEOF",
+ "cat > a.md <<'EOF'\nrm x\nEOF\nrm y","VAR=1 cat > a.md <<'EOF'\nrm x\nEOF","# c\ncat > a.md <<'EOF'\nrm x\nEOF",
+ "python3 - <<'EOF'\nrm = 1\nEOF\nrm x","git commit -m \"a\" && git push","git commit -m \"a\"\nrm x","git add -A && git commit -m \"a\" && rm x",
+ "git commit -m \"a\" -m \"`rm x`\"","git tag -a v1 -m \"`rm x`\"","FOO=1 git commit -m \"a\" && git push",
+]
+t61_stop+=t61_fp_back
+LS1="$(ls -d ~/.claude/plugins/cache/foo)"
+t61_pass+=[
+ "cd "+PS+" && sed -n 1,5p x","cd "+PS+" && cat x","cd "+PS+" && git status","cd "+PS+" && git log --oneline",
+ "python3 - <<'EOF'\nrm = 3\nprint(rm)\nEOF","git commit -m \"git push の説明\"","echo $(ls -d ~/.claude/plugins/cache/foo)",
+ "cat > /tmp/a.md <<'EOF'\n# 見出し\nchflags nohidden x\nEOF","cat <<'EOF' > /tmp/a.txt\nchflags x\nEOF","tee /tmp/a.csv <<\"EOF\"\nchflags x\nEOF",
+ "git add -A && git commit -m \"fix: git push と chflags\"",
+ "cd \""+LS1+"\" && cat README.md","cat "+LS1+"/README.md",
 ]
 for c in t61_pass:
     if run("Bash",{"command":c})!="pass": fail+=1; print("T061 FALSEPOS",repr(c).replace(PS,"<PS>")[:150])
