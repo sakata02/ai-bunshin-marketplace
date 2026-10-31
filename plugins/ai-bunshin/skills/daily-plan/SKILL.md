@@ -26,6 +26,11 @@ Bash は `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/update_dashboard.py" …` だ�
 2. 1行目が `SKIP: …` なら、何もせずに終わる
 3. `04_ナレッジ/判断基準.md`、改善ログの「実施中の Try」、前日の `daily/*_振り返り.md`（「明日の要件確認」を含む）を読む
 4. 前日に出した要件確認のお願い（kind 確認）に、本人の返事があるかを tasks.json の note と受け入れ条件で確かめる（朝の自動計画は会話を読めないため、tasks.json に書かれたものだけが伝わる）
+5. **S### の確認**（`/ai-bunshin:sprint` の「0. 準備」の3と同じ手順。自動実行でも動くよう、Read・Edit・Write と update_dashboard.py だけを使う）。tasks.json の `sprints` が1つも無い、または今の S### の `end` が今日より前なら、先にこれを行ってから計画に入る：
+   1. 今の S### があれば `status: "完了"` にし、`retro` に一言を書く（その期間の `daily/` の振り返りから）
+   2. 次の S### を決める。番号は最大の番号 +1。ゴールは、指揮官がバックログの上位から1文で決める（プロダクトオーナーの仕事。本人には聞かない）。`start`・`end` は1週間の期間にする（`YYYY-MM-DD`。形が違うとスクリプトが止まる）
+   3. tasks.json の `sprints` に `{"id": "S###", "start": "YYYY-MM-DD", "end": "YYYY-MM-DD", "goal": "1週間のゴール", "status": "進行中", "pdca": "Plan"}` を足す（`id`・`start`・`end` は必須）。`01_スプリント/S###_YYYYMMDD/plan.md` を Write で作る（ゴールを書く。フォルダは Write と一緒にできる）
+   4. 今日の計画（`daily/YYYYMMDD_計画.md`）の最初に、S### を切り替えたことを一言書く
 
 ## 1. 今日の容量を決める
 
