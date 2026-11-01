@@ -203,7 +203,7 @@ def sprint_and_review_keep_whole_log_where_needed():
     sprint = read(SKILLS, "sprint", "SKILL.md")
     review = read(SKILLS, "daily-review", "SKILL.md")
     line16 = [l for l in sprint.splitlines() if "判断基準.md" in l and "部署一覧.md" in l][0]
-    assert "改善ログ.md" in line16 and "`## 実施中の Try`" in line16 and "節だけ" in line16, line16
+    assert "改善ログ.md" in line16 and "`## 実施中の Try`" in line16 and "部分だけ" in line16, line16
     line61 = [l for l in sprint.splitlines() if "過去の改善ログに照らして" in l][0]
     assert "改善ログ" in line61 and "全体" in line61, line61
     line39 = [l for l in review.splitlines() if l.startswith("- `04_ナレッジ/改善ログ.md`")][0]
@@ -318,7 +318,7 @@ def agent_id_found_by_format_and_task_and_who():
 def skills_spell_out_the_grep_and_the_line_format():
     review = read(SKILLS, "daily-review", "SKILL.md")
     l37 = [l for l in review.splitlines() if "do_log.md` の今日の記録" in l][0]
-    for w in ("YYYY-MM-DD", "Grep -n", "字下げ", "見出しの節", "見つからないとき", "全体を読む"):
+    for w in ("YYYY-MM-DD", "Grep -n", "字下げ", "見出しの部分", "見つからないとき", "全体を読む"):
         assert w in l37, f"daily-review の今日の分の読み方に「{w}」が無い"
     for skill in ("daily-do", "sprint"):
         body = read(SKILLS, skill, "SKILL.md")
