@@ -46,4 +46,10 @@ def main():
 
 
 if __name__ == "__main__":
+    # Windows は標準出力が cp932 のことがあり、絵文字で落ちる。入口で UTF-8 にする（reconfigure が無い環境でも落ちない）
+    for _stream in (sys.stdout, sys.stderr):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
     sys.exit(main())
