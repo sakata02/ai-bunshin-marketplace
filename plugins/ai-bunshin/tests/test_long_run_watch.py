@@ -258,6 +258,97 @@ def l8_signals_in_a_row_still_stop_the_group_and_clean_up():
             signal.signal(s, h)
 
 
+@case
+def l9_signal_at_every_line_of_run_is_not_lost():
+    # run() の中の「どの行」に信号が届いても（起動の直前・直後・待ちに入る直前を含む）、取りこぼさず、すぐ止める。
+    # sys.settrace で、run() の各行に入る直前に、自分自身に信号を送る（決定的。送る相手はこのテストのプロセスだけ。子は自分が起動した sleep だけ）。
+    # 期待：戻り値は 128+番号、上限（3秒）を待たずに止まる、一時ファイルが無い、起動した子が残らない
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("run_limited_under_test2", LIMITED)
+    rl = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(rl)
+    sigs = (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)
+    saved = {s: signal.signal(s, signal.SIG_IGN) for s in sigs}   # run() の前後で、届き遅れたものでこのテストが落ちないように
+    d = os.path.join(BASE, "l9")
+    os.makedirs(d, exist_ok=True)
+
+    def one(tag, fire_line, sig):
+        out = os.path.join(d, f"out_{tag}")
+        pidf = os.path.join(d, f"pid_{tag}")
+        hit = []
+        lines = {}   # 行番号 → 最初に通った時刻
+
+        def tracer(frame, event, arg):
+            if frame.f_code.co_name != "run" or frame.f_code.co_filename != rl.__file__:
+                return None
+
+            def local(frame, event, arg):
+                if event == "line":
+                    lines.setdefault(frame.f_lineno, time.time())
+                    # 信号の受け手（run() の記録用のハンドラ）を入れたあとの行だけ。入れる前は、このテストの SIG_IGN で捨てられてしまう
+                    if (fire_line is not None and frame.f_lineno == fire_line and not hit
+                            and signal.getsignal(sig) not in (signal.SIG_IGN, signal.SIG_DFL)):
+                        hit.append(1)
+                        os.kill(os.getpid(), sig)
+                return local
+            return local
+
+        t0 = time.time()
+        sys.settrace(tracer)
+        try:
+            rc = rl.run(["sh", "-c", f"echo $$ > '{pidf}'; exec sleep 60"], 3, out, grace=1.0)
+        finally:
+            sys.settrace(None)
+        return rc, time.time() - t0, hit, lines, out, pidf
+
+    try:
+        # まず信号なしで、上限で止まる道（124）と、ふつうに終わる道を流して、run() が通る行を集める
+        rc, dt, hit, lines, out, pidf = one("dry", None, None)
+        assert rc == 124, rc
+        # 上限（3秒）が来たあとに初めて通る行（上限で止める道）は除く：そこに届いた信号は、止める判断のあとなので無視でよい
+        t_end = max(lines.values())
+        late = {ln for ln, t in lines.items() if t_end - t <= 0.3}
+        all_lines = set(lines) - late
+        # 早く終わる道の行も集める（信号は送らない）
+        saved_run = rl.run
+        out2 = os.path.join(d, "out_fast")
+        lines2 = set()
+
+        def tracer2(frame, event, arg):
+            if frame.f_code.co_name != "run" or frame.f_code.co_filename != rl.__file__:
+                return None
+
+            def local(frame, event, arg):
+                if event == "line":
+                    lines2.add(frame.f_lineno)
+                return local
+            return local
+        sys.settrace(tracer2)
+        try:
+            assert saved_run(["true"], 3, out2, grace=1.0) == 0
+        finally:
+            sys.settrace(None)
+        all_lines |= (lines2 - late)
+        assert len(all_lines) >= 8, all_lines   # run() の行を拾えている
+        tried = 0
+        for n, ln in enumerate(sorted(all_lines)):
+            sig = sigs[n % 3]
+            rc, dt, hit, lines, out, pidf = one(f"l{ln}", ln, sig)
+            if not hit:
+                continue   # この行は、信号を送った道では通らない（例：上限で止める道の行）
+            tried += 1
+            assert rc == 128 + int(sig), (f"{ln}行目で信号 {int(sig)}", "戻り値", rc)
+            assert dt < 2.5, (f"{ln}行目で信号 {int(sig)}", "止まるのが遅い（上限まで待った）", round(dt, 1))
+            assert not os.path.exists(out), (f"{ln}行目で信号 {int(sig)}", "一時ファイルが残っている")
+            if os.path.exists(pidf) and open(pidf).read().strip():
+                assert wait_dead(int(open(pidf).read().strip()), 5), (f"{ln}行目で信号 {int(sig)}", "起動した子が残っている")
+        assert tried >= 5, tried
+    finally:
+        time.sleep(0.2)
+        for s, h in saved.items():
+            signal.signal(s, h)
+
+
 # ---------- 2. 時間の上限の設定 ----------
 print("## 2. 時間の上限の設定（auto.max_minutes）")
 
@@ -1013,7 +1104,9 @@ def e9_term_to_the_whole_group_like_launchd_leaves_nothing():
         wait_out_file(c)
         os.killpg(p.pid, signal.SIGTERM)   # p はこのテストが新しいセッションで起動した daily_cycle.sh（そのグループだけに送る）
         try:
-            p.wait(timeout=30)
+            rc = p.wait(timeout=30)
+            if rc != 143:
+                problems.append(f"終了コードが {rc}（期待 143）")
         except subprocess.TimeoutExpired:
             problems.append("daily_cycle.sh が終わらない")
         if not all(wait_dead(x, 12) for x in pids):
@@ -1027,6 +1120,119 @@ def e9_term_to_the_whole_group_like_launchd_leaves_nothing():
     finally:
         stop_leftovers(pids)
     assert not problems, "／".join(problems) + f"\nログ：{cycle_log(c)[-800:]}"
+
+
+def patched_cycle(name, claude_body, anchor, replacement, cfg=None):
+    """作り物の daily_cycle.sh の写しの、決まった1行（anchor）のあとに、時機をずらすための行を足す（本物のスクリプトは変えない）。"""
+    c = make_cycle(name, claude_body, cfg=cfg)
+    path = os.path.join(c["plugin"], "scripts", "auto", "daily_cycle.sh")
+    text = read(path)
+    assert text.count(anchor) == 1, f"目印の行が見つからない（または2つ以上）：{anchor!r}"
+    open(path, "w", encoding="utf-8").write(text.replace(anchor, anchor + replacement, 1))
+    return c
+
+
+def hold_with_bystander(d, phases_not="plan"):
+    """claude を起動する直前（LAUNCHING=1 のあと）で3秒止まる。止まる前に、同じグループに「関係ない居座りプロセス」を1つ置く
+    （$! を変えないよう、コマンド置換の中で背景に出す）。シグナルの転送先を取り違えて自分のグループ全体に送ると、これが止まってしまう。"""
+    return (f'  if [ "$PHASE" != {phases_not} ]; then\n'
+            f"    : $(sh -c 'echo $$ > \"{d}/bystander.pid\"; exec sleep 120' >/dev/null 2>&1 &)\n"
+            f"    /bin/sleep 3\n  fi\n")
+
+
+@case
+def e10_signal_just_before_the_first_launch_does_not_hit_its_own_group():
+    # 最初の起動の直前：$! がまだ 0（または空）のとき、kill に 0 を渡すと自分のグループ全体に届く。届かないこと。
+    decoy = start_decoy("e10")
+    d = os.path.join(BASE, "e10")
+    os.makedirs(d, exist_ok=True)
+    c = patched_cycle("e10", "echo should-not-run", '  LAUNCHING=1\n', hold_with_bystander(d, "none"))
+    auto = os.path.join(c["home"], "scripts", "auto")
+    p = start_cycle(c, "review", "review")
+    pids = []
+    try:
+        pids = [pid_from(os.path.join(d, "bystander.pid"), 30)]
+        time.sleep(0.5)
+        os.kill(p.pid, signal.SIGTERM)
+        rc = p.wait(timeout=30)
+        assert rc == 143, rc
+        assert alive(pids[0]), "起動の直前に受けて、自分のグループ全体に信号を送った（関係ないプロセスまで止めた）"
+        assert decoy.poll() is None and alive(decoy.pid)
+        assert calls_of(c) == [], "止められたのに claude を起動した"
+        assert not os.path.exists(os.path.join(auto, ".lock")) and not out_files(c)
+        assert len([ln for ln in cycle_log(c).splitlines() if "シグナル" in ln]) == 1
+    finally:
+        stop_leftovers(pids)
+
+
+@case
+def e11_signal_just_before_the_second_launch_ignores_the_old_pid():
+    # 計画のあと実行に入る直前：$! は計画のときの run_limited の PID（もう終わっている）。それに信号を送らず、実行の claude を起動せずに 143 で終わる
+    d = os.path.join(BASE, "e11")
+    os.makedirs(d, exist_ok=True)
+    body = """case "$2" in
+  /ai-bunshin:daily-plan) echo planned ;;
+  *) echo should-not-run ;;
+esac"""
+    c = patched_cycle("e11", body, '  LAUNCHING=1\n', hold_with_bystander(d, "plan"))
+    auto = os.path.join(c["home"], "scripts", "auto")
+    p = start_cycle(c, "plan", "plan")
+    pids = []
+    try:
+        pids = [pid_from(os.path.join(d, "bystander.pid"), 40)]   # 実行の起動の直前に着いた
+        time.sleep(0.5)
+        os.kill(p.pid, signal.SIGTERM)
+        rc = p.wait(timeout=30)
+        assert rc == 143, rc
+        assert alive(pids[0]), "関係ないプロセスまで止めた"
+        assert calls_of(c) == ["/ai-bunshin:daily-plan"], calls_of(c)
+        assert not os.path.exists(os.path.join(auto, ".lock")) and not out_files(c)
+        assert os.path.exists(os.path.join(auto, "last_success_plan.txt")) and not os.path.exists(os.path.join(auto, "last_success_do.txt"))
+    finally:
+        stop_leftovers(pids)
+
+
+@case
+def e12_signal_between_plan_and_do_during_the_notification():
+    # 計画が終わった通知（osascript）の最中に受ける：実行（daily-do）には入らない。ロック・一時ファイルは残らず、143 で終わる
+    c = make_cycle("e12", "echo planned")
+    stub = os.path.join(c["bindir"], "osascript")
+    open(stub, "w").write(f'#!/bin/sh\necho "$*" >> "{c["notes"]}"\nsleep 2\n')
+    auto = os.path.join(c["home"], "scripts", "auto")
+    p = start_cycle(c, "plan", "plan")
+    try:
+        t0 = time.time()
+        while time.time() - t0 < 30 and "planned" not in read(c["notes"]):
+            time.sleep(0.01)
+        time.sleep(0.3)
+        os.kill(p.pid, signal.SIGTERM)
+        rc = p.wait(timeout=30)
+        assert rc == 143, rc
+        assert calls_of(c) == ["/ai-bunshin:daily-plan"], calls_of(c)
+        assert not os.path.exists(os.path.join(auto, ".lock")) and not out_files(c)
+        assert os.path.exists(os.path.join(auto, "last_success_plan.txt")) and not os.path.exists(os.path.join(auto, "last_success_do.txt"))
+        assert len([ln for ln in cycle_log(c).splitlines() if "シグナル" in ln]) == 1
+    finally:
+        stop_leftovers([p.pid])
+
+
+@case
+def e13_signal_right_after_the_temp_file_is_made_leaves_no_temp_file():
+    # 一時ファイル（.out.*）を作った直後・run_limited を起動する前に受ける：残らない
+    c = patched_cycle("e13", "echo should-not-run", '  : > "$out" || { log "一時ファイルを作れませんでした"; exit 1; }\n', "  /bin/sleep 3\n")
+    auto = os.path.join(c["home"], "scripts", "auto")
+    p = start_cycle(c, "review", "review")
+    try:
+        wait_out_file(c, 30)
+        assert out_files(c), "一時ファイルが作られない（テストの前提）"
+        time.sleep(0.3)
+        os.kill(p.pid, signal.SIGTERM)
+        rc = p.wait(timeout=30)
+        assert rc == 143, rc
+        assert not out_files(c), "一時ファイル（.out.*）が残っている"
+        assert not os.path.exists(os.path.join(auto, ".lock")) and calls_of(c) == []
+    finally:
+        stop_leftovers([p.pid])
 
 
 # ロックを書いたあと・claude を起動する前（見張りの自己点検の最中）にシグナルが届く。点検を数秒かかるものにして、その間に送る
