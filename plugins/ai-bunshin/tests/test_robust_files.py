@@ -616,12 +616,12 @@ def e2_daily_cycle_reads_japanese_config_without_locale():
     # 設定に日本語（AI の名前・開発の置き場所）がある。文字コードを決めない環境でも、AI の名前を通知に使えて、置き場所を読める
     outside = os.path.join(BASE, "e2_dev_日本語")
     os.makedirs(outside)
-    plugin, home, bindir, notes = make_cycle("e2", STUB_REVIEW, ai_name="デイビットはるか",
+    plugin, home, bindir, notes = make_cycle("e2", STUB_REVIEW, ai_name="ガイドはるか",
                                              config_extra={"dev": {"projects": [{"path": outside}]}})
     r = run_cycle(plugin, home, bindir, "review", env_extra=C_LOCALE)
     assert r.returncode == 0, r.stderr
     n = open(notes, encoding="utf-8").read()
-    assert "デイビットはるか" in n, f"AI の名前が読めていない: {n!r}"
+    assert "ガイドはるか" in n, f"AI の名前が読めていない: {n!r}"
 
 
 @case

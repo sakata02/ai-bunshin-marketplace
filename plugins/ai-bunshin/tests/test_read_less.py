@@ -255,7 +255,7 @@ REAL_LOG = """# S001 Do ログ
   - 続きの続き：テスト9本
 - 2026-11-01 Agent ID: a1b2c3（T102・部下C）
 - 2026-11-01 Agent ID: d4e5f6（T102・部下D）
-- 2026-11-01 坂田さん：T102 を beta.5 に入れる
+- 2026-11-01 山田さん：T102 を beta.5 に入れる
 """
 
 
@@ -296,7 +296,7 @@ def agent_id_for(text, task, who):
 def todays_grep_takes_today_lines_and_continuations_not_yesterdays_section():
     out = grep_today(REAL_LOG, "2026-11-01")
     assert "T101 部下C 56e9c0d" in out and "続きの続き：テスト9本" in out, out
-    assert "坂田さん：T102 を beta.5" in out
+    assert "山田さん：T102 を beta.5" in out
     assert "2026-10-31" not in out and "再開するときの状態" not in out and "T074 文書の分" not in out, out
     # 日付の見出しの節がある日は、その節も読む
     sec = grep_today(REAL_LOG, "2026-10-31 夕方")

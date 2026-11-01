@@ -123,12 +123,12 @@ check("hook：無関係のフォルダ → 何もしない", r.returncode == 0 a
 
 # 日本語のフォルダ名：実際は NFD（濁点が分かれた形）、Claude から来るパスは NFC でも、本人の tasks.json として動く
 import unicodedata
-NFD_HOME = os.path.join(BASE, unicodedata.normalize("NFD", "デイビットAI"))
+NFD_HOME = os.path.join(BASE, unicodedata.normalize("NFD", "ガイドAI"))
 os.makedirs(os.path.join(NFD_HOME, "設定"))
 os.makedirs(os.path.join(NFD_HOME, "00_タスク管理", "data"))
 json.dump({"owner": "テスト"}, open(os.path.join(NFD_HOME, "設定", "config.json"), "w", encoding="utf-8"))
 json.dump(TASKS, open(os.path.join(NFD_HOME, "00_タスク管理", "data", "tasks.json"), "w", encoding="utf-8"))
-nfc_path = os.path.join(BASE, unicodedata.normalize("NFC", "デイビットAI"), "00_タスク管理", "data", "tasks.json")
+nfc_path = os.path.join(BASE, unicodedata.normalize("NFC", "ガイドAI"), "00_タスク管理", "data", "tasks.json")
 r = hook(nfc_path, NFD_HOME)
 check("hook：濁点の表し方が違うパス（NFC）でも本人の tasks.json として動く", r.returncode == 0 and "PostToolUse" in r.stdout, r.stdout + r.stderr)
 

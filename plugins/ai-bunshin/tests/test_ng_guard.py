@@ -190,7 +190,7 @@ for text in ["[]","null","123","\"str\"","{broken","","{\"tool_name\":\"Bash\",\
 print("## 記録と抜け道")
 import unicodedata,getpass
 PH=tempfile.mkdtemp(prefix="ngph_")  # この節のホーム
-W=os.path.join(PH,"workspace"); P=os.path.join(W,"AI坂田"); OUTP=os.path.join(W,"other")
+W=os.path.join(PH,"workspace"); P=os.path.join(W,"AI山田"); OUTP=os.path.join(W,"other")
 for d in ["設定","00_タスク管理/data","05_開発/x","02_成果物/共通","03_インプット","02_成果物/設定"]: os.makedirs(os.path.join(P,d))
 open(P+"/設定/config.json","w").write("{}"); open(P+"/00_タスク管理/data/tasks.json","w").write("{}"); os.makedirs(OUTP)
 os.makedirs(P+"/.claude/rules"); open(P+"/.claude/rules/ai-bunshin-common.md","w").write("x")  # .clau* が実際に当たるように
@@ -224,8 +224,8 @@ probe=[  # (名前, (tool, inp), where, 期待)
  ("in: zip -rm",Bc("zip -rmq /tmp/a.zip 設定"),"in","STOP"),
  ("in: os.rename(getcwd)",Bc("python3 -c \"import os;os.rename(os.getcwd(),'/tmp/x')\""),"in","STOP"),
  ("in: shutil.move(abs root)",Bc(f"python3 -c \"import shutil;shutil.move('{P}','/tmp/x')\""),"in","STOP"),
- ("in: mv ../AI坂田",Bc("mv ../AI坂田 /tmp/x"),"in","STOP"),
- ("in: cd .. && mv AI坂田",Bc("cd .. && mv AI坂田 AI坂田_old"),"in","STOP"),
+ ("in: mv ../AI山田",Bc("mv ../AI山田 /tmp/x"),"in","STOP"),
+ ("in: cd .. && mv AI山田",Bc("cd .. && mv AI山田 AI山田_old"),"in","STOP"),
  ("in: mv \"$PWD\"",Bc("mv \"$PWD\" /tmp/x"),"in","STOP"),
  ("in: mv $(pwd)",Bc("mv $(pwd) /tmp/x"),"in","STOP"),
  ("in: mv 親",Bc(f"mv {W} /tmp/x"),"in","STOP"),
@@ -235,14 +235,14 @@ probe=[  # (名前, (tool, inp), where, 期待)
  ("in: Write NFD 03_インプット",("Write",{"file_path":P+"/"+NFD+"/a.csv"}),"in","STOP"),
  # （in: Write 設定/config.json の ng_allow の書き換えは T059 で扱う）
  ("out: rm -rf ABS/03_インプット",Bc(f"{RM} -rf {P}/03_インプット"),"out","STOP"),
- ("out: rm -rf ../AI坂田/03_インプット",Bc(f"{RM} -rf ../AI坂田/03_インプット"),"out","STOP"),
- ("out: cd ../AI坂田 && rm",Bc(f"cd ../AI坂田 && {RM} -rf 03_インプット"),"out","STOP"),
+ ("out: rm -rf ../AI山田/03_インプット",Bc(f"{RM} -rf ../AI山田/03_インプット"),"out","STOP"),
+ ("out: cd ../AI山田 && rm",Bc(f"cd ../AI山田 && {RM} -rf 03_インプット"),"out","STOP"),
  ("out: cd ABS && rm",Bc(f"cd {P} && {RM} -rf 03_インプット"),"out","STOP"),
- ("out: cd W && rm AI坂田/03_インプット",Bc(f"cd {W} && {RM} -rf AI坂田/03_インプット"),"out","STOP"),
+ ("out: cd W && rm AI山田/03_インプット",Bc(f"cd {W} && {RM} -rf AI山田/03_インプット"),"out","STOP"),
  ("out: rm \"QUOTED\"/03_インプット",Bc(f"{RM} -rf \"{P}\"/03_インプット"),"out","STOP"),
  ("out: git -C<abs> clean",Bc(f"git -C{P} clean -fdx"),"out","STOP"),
  ("out: 61個のパスのあと",Bc(f"{RM} -rf "+" ".join(f"/nx{i}" for i in range(61))+f" {P}/03_インプット"),"out","STOP"),
- ("out: Write ../AI坂田/03_インプット",("Write",{"file_path":"../AI坂田/03_インプット/a.csv"}),"out","STOP"),
+ ("out: Write ../AI山田/03_インプット",("Write",{"file_path":"../AI山田/03_インプット/a.csv"}),"out","STOP"),
  ("out: mv ABS/設定",Bc(f"mv {P}/設定 /tmp/x"),"out","STOP"),
  # probe2：誤検知だったもの
  ("FP in: git mv 02_成果物",Bc("git mv 02_成果物/a.md 02_成果物/b.md"),"in","pass"),
@@ -261,38 +261,38 @@ probe=[  # (名前, (tool, inp), where, 期待)
  ("FP out: mv build/設定 dist/",Bc("mv build/設定 dist/"),"out","pass"),
  ("FP out: cat 本人のファイル && rm -rf build",Bc(f"cat {P}/CLAUDE.md && {RM} -rf build"),"out","pass"),
  # probe3（~ は PH）
- ("p3 out: rm ~/workspace/AI坂田",Bc(f"{RM} -rf ~/workspace/AI坂田/03_インプット"),"/tmp","STOP"),
- ("p3 out: rm \"$HOME\"/workspace",Bc(f"{RM} -rf \"$HOME\"/workspace/AI坂田/03_インプット"),"/tmp","STOP"),
- ("p3 out: rm \"${HOME}/workspace",Bc(f"{RM} -rf \"${{HOME}}/workspace/AI坂田/03_インプット\""),"/tmp","STOP"),
- ("p3 out: cd ~/workspace/AI坂田 && rm",Bc(f"cd ~/workspace/AI坂田 && {RM} -rf 03_インプット"),"/tmp","STOP"),
- ("p3 out: cd ~/workspace && rm AI坂田/",Bc(f"cd ~/workspace && {RM} -rf AI坂田/03_インプット"),"/tmp","STOP"),
+ ("p3 out: rm ~/workspace/AI山田",Bc(f"{RM} -rf ~/workspace/AI山田/03_インプット"),"/tmp","STOP"),
+ ("p3 out: rm \"$HOME\"/workspace",Bc(f"{RM} -rf \"$HOME\"/workspace/AI山田/03_インプット"),"/tmp","STOP"),
+ ("p3 out: rm \"${HOME}/workspace",Bc(f"{RM} -rf \"${{HOME}}/workspace/AI山田/03_インプット\""),"/tmp","STOP"),
+ ("p3 out: cd ~/workspace/AI山田 && rm",Bc(f"cd ~/workspace/AI山田 && {RM} -rf 03_インプット"),"/tmp","STOP"),
+ ("p3 out: cd ~/workspace && rm AI山田/",Bc(f"cd ~/workspace && {RM} -rf AI山田/03_インプット"),"/tmp","STOP"),
  # 「p3 out: rm ~user/（名前で拾う）」は外した（T058）：R1 で名前の部分一致をやめた。~user は本物のホームに広がり、本物の本人のフォルダの ng_log に書いてしまうため。~user の広げ方は下の EXPAND で確かめる
  ("p3 out: find ABS -delete",Bc(f"find {P}/03_インプット -delete"),"/tmp","STOP"),
- ("p3 out: mv \"$HOME/workspace/AI坂田\"",Bc("mv \"$HOME/workspace/AI坂田\" /tmp/x"),"/tmp","STOP"),
+ ("p3 out: mv \"$HOME/workspace/AI山田\"",Bc("mv \"$HOME/workspace/AI山田\" /tmp/x"),"/tmp","STOP"),
  ("p3 in: mv 設? 00_タ* .clau*",Bc("mv 設? 00_タ* .clau* /tmp/x"),"in","STOP"),
- ("p3 in: mv \"$HOME/workspace/AI坂田\"",Bc("mv \"$HOME/workspace/AI坂田\" /tmp/x"),"in","STOP"),
+ ("p3 in: mv \"$HOME/workspace/AI山田\"",Bc("mv \"$HOME/workspace/AI山田\" /tmp/x"),"in","STOP"),
  ("p3 FP in: os.replace(tmp, tasks.json)",Bc("python3 -c \"import json,os;d=json.load(open('00_タスク管理/data/tasks.json'));json.dump(d,open('t.tmp','w'));os.replace('t.tmp','00_タスク管理/data/tasks.json')\""),"in","pass"),
  ("p3 FP in: pandas rename(columns=)",Bc("python3 -c \"import pandas as pd;df=pd.DataFrame(json.load(open('00_タスク管理/data/tasks.json'))['tasks']).rename(columns={'id':'ID'})\""),"in","pass"),
  ("p3 out: Write ABS/03_インプット",("Write",{"file_path":P+"/03_インプット/a.csv","content":"x"}),"/tmp","STOP"),
  # 本人のフォルダそのもの・親を、別の書き方で動かす・消す
- ("out: cd W && mv AI坂田",Bc("cd .. && mv AI坂田 x"),"out","STOP"),
- ("out: bash -c 'mv ../AI坂田'",Bc("bash -c 'mv ../AI坂田 /tmp/x'"),"out","STOP"),
+ ("out: cd W && mv AI山田",Bc("cd .. && mv AI山田 x"),"out","STOP"),
+ ("out: bash -c 'mv ../AI山田'",Bc("bash -c 'mv ../AI山田 /tmp/x'"),"out","STOP"),
  ("out: bash -c 'cd .. && rm AI*/03'",Bc(f"bash -c 'cd .. && {RM} -rf AI*/03_インプット'"),"out","STOP"),
  ("out: cd .. && rm AI*/03 (glob)",Bc(f"cd .. && {RM} -rf AI*/03_インプット"),"out","STOP"),
- ("out: mv W/AI坂? (glob)",Bc(f"mv {W}/AI坂? /tmp/x"),"out","STOP"),
- ("out: zip -rm 本人のフォルダ",Bc("zip -rmq /tmp/a.zip ~/workspace/AI坂田"),"out","STOP"),
+ ("out: mv W/AI山? (glob)",Bc(f"mv {W}/AI山? /tmp/x"),"out","STOP"),
+ ("out: zip -rm 本人のフォルダ",Bc("zip -rmq /tmp/a.zip ~/workspace/AI山田"),"out","STOP"),
  ("out: find 親 -delete",Bc("find ~/workspace -name '*.json' -delete"),"out","STOP"),
- ("out: git -C 親 rm -r",Bc(f"git -C ~/workspace {RM} -r AI坂田"),"out","STOP"),
+ ("out: git -C 親 rm -r",Bc(f"git -C ~/workspace {RM} -r AI山田"),"out","STOP"),
  ("out: Path(親).rename",Bc(f"python3 -c \"from pathlib import Path;p=Path('{W}');p.rename('/tmp/w')\""),"out","STOP"),
- ("out: for で受け渡す",Bc(f"for d in ~/workspace/AI坂田; do {RM} -rf $d/03_インプット; done"),"out","STOP"),
- ("out: 変数で受け渡す",Bc(f"D=~/workspace/AI坂田; {RM} -rf $D/03_インプット"),"out","STOP"),
+ ("out: for で受け渡す",Bc(f"for d in ~/workspace/AI山田; do {RM} -rf $d/03_インプット; done"),"out","STOP"),
+ ("out: 変数で受け渡す",Bc(f"D=~/workspace/AI山田; {RM} -rf $D/03_インプット"),"out","STOP"),
  ("out: パイプで受け渡す",Bc(f"echo {P}/03_インプット | xargs {RM} -rf"),"out","STOP"),
  ("in: mv x 設定/config.json（上書き）",Bc("mv x 設定/config.json"),"in","STOP"),
  ("in: git rm --cached",Bc(f"git {RM} --cached 02_成果物/a.md"),"in","STOP"),
  ("in: Bash NFD 03_インプット",Bc("echo x > "+NFD+"/a.csv"),"in","STOP"),
  ("in: cp x \"ABS\"/03_インプット",Bc(f"cp x \"{P}\"/03_インプット/a.csv"),"in","STOP"),
  ("FP out: cd ~ && git push",Bc("cd ~ && git push"),"out","pass"),
- ("FP out: ls 本人のフォルダ && npm install",Bc("ls ~/workspace/AI坂田 && npm install"),"out","pass"),
+ ("FP out: ls 本人のフォルダ && npm install",Bc("ls ~/workspace/AI山田 && npm install"),"out","pass"),
  ("FP out: rm -rf ./dist（外の案件）",Bc(f"{RM} -rf ./dist node_modules"),"out","pass"),
  ("FP in: mv 02_成果物/a.md .",Bc("mv 02_成果物/a.md ."),"in","pass"),
  ("FP in: cp 設定/config.json 02_成果物/",Bc("cp 設定/config.json 02_成果物/c.bak"),"in","pass"),
@@ -337,7 +337,7 @@ json.dump({},open(P+"/設定/config.json","w"))
 # 表の形：(ID, 動く場所, ツール, 入力, 期待 deny/pass, deny の理由に含む語)。R1〜R4 は通す側の行を先に書く
 print("## T058 方式 v2")
 VH=os.path.realpath(tempfile.mkdtemp(prefix="ngv2_"))  # この節のホーム（本物の ~ には触れない）
-VW=VH+"/workspace"; VR=VW+"/AI坂田"; VO=VW+"/other/proj"; VK=VW+"/work"
+VW=VH+"/workspace"; VR=VW+"/AI山田"; VO=VW+"/other/proj"; VK=VW+"/work"
 for d in ["設定","00_タスク管理/data","05_開発/x","02_成果物/共通","02_成果物/設定","03_インプット",".claude/rules"]: os.makedirs(VR+"/"+d)
 for f,t in [("設定/config.json","{}"),("00_タスク管理/data/tasks.json","{}"),(".claude/rules/ai-bunshin-common.md","x"),("CLAUDE.md","x"),("03_インプット/a.csv","a"),("02_成果物/a.md","x")]:
     open(VR+"/"+f,"w").write(t)
@@ -365,11 +365,11 @@ run_v("Bash",{"command":"ls"},"in"); run_v("Bash",{"command":"ls"},VK)  # 記録
 def Bv(c): return ("Bash",{"command":c})
 V=[
  # R1：外のセッションで、本人のフォルダの名前が語に含まれるだけでは本人の規則を当てない（通す側を先に）
- ("R1-p1","out",*Bv("git commit -m 'AI坂田 の件' && npm install"),"pass",""),
- ("R1-p2","out",*Bv("git commit -m 'AI坂田 の件' && git push origin main"),"pass",""),
+ ("R1-p1","out",*Bv("git commit -m 'AI山田 の件' && npm install"),"pass",""),
+ ("R1-p2","out",*Bv("git commit -m 'AI山田 の件' && git push origin main"),"pass",""),
  ("R1-p3","out",*Bv("git commit -m 'work in progress' && git push"),"pass",""),
  ("R1-p4","out",*Bv(f"{RM} -rf {VO}/build"),"pass",""),
- ("R1-p5","out",*Bv("echo AI坂田 && npm install && "+RM+" -rf dist"),"pass",""),
+ ("R1-p5","out",*Bv("echo AI山田 && npm install && "+RM+" -rf dist"),"pass",""),
  # R2：find の -exec は、直後が rm・mv などのときだけ「動かす・消す」（通す側を先に）
  ("R2-p1","in",*Bv("find . -name '*.md' -exec grep -l TODO {} +"),"pass",""),
  ("R2-p2","ws",*Bv("find . -name '*.md' -exec grep -l TODO {} +"),"pass",""),
@@ -392,11 +392,11 @@ V=[
 ]
 V+=[
  # R1：止める側（パスとして解いたものが、記録の実体と同じかその下のときだけ当てる）
- ("R1-s1","out",*Bv(f"cd ~/workspace && {RM} -rf AI坂田/03_インプット"),"deny","削除"),
- ("R1-s2","ws",*Bv(f"{RM} -rf \"AI坂田/03_インプット\""),"deny","削除"),
- ("R1-s3","out",*Bv(f"{RM} -rf ../../AI坂田/03_インプット"),"deny","削除"),
+ ("R1-s1","out",*Bv(f"cd ~/workspace && {RM} -rf AI山田/03_インプット"),"deny","削除"),
+ ("R1-s2","ws",*Bv(f"{RM} -rf \"AI山田/03_インプット\""),"deny","削除"),
+ ("R1-s3","out",*Bv(f"{RM} -rf ../../AI山田/03_インプット"),"deny","削除"),
  ("R1-s4","out",*Bv(f"{RM} -rf ~/workspace/work/03_インプット"),"deny","削除"),
- ("R1-s5","out",*Bv(f"git commit -m 'AI坂田 の件' && {RM} -rf {VR}/03_インプット"),"deny","削除"),
+ ("R1-s5","out",*Bv(f"git commit -m 'AI山田 の件' && {RM} -rf {VR}/03_インプット"),"deny","削除"),
  # R2：止める側
  ("R2-s1","in",*Bv(f"find 設定 -exec {RM} {{}} +"),"deny","削除"),
  ("R2-s2","ws",*Bv(f"find . -name node_modules -prune -exec {RM} -rf {{}} +"),"deny","本人のフォルダそのもの"),  # 起点の workspace が本人のフォルダを含む
@@ -421,10 +421,10 @@ V+=[
  ("R4-s3","in",*Bv("echo x 2>&1 > 03_インプット/a.csv"),"deny","元データ"),
  ("R4-s4","out",*Bv("ls ~/.ai-bunshin 2>/dev/null; echo '{}' > ~/.ai-bunshin/owners.json"),"deny","見張りの記録"),
  # R5：表記違い（大文字小文字・NFD・//・/./・ハードリンク）を実体で解く
- ("R5-1","in",*Bv("mv ../ai坂田 /tmp/x"),"deny","本人のフォルダそのもの"),
+ ("R5-1","in",*Bv("mv ../ai山田 /tmp/x"),"deny","本人のフォルダそのもの"),
  ("R5-2","in",*Bv("mv 設定/CONFIG.JSON /tmp/x"),"deny","正本の移動"),
  ("R5-3","in",*Bv("mv .CLAUDE /tmp/x"),"deny","正本の移動"),
- ("R5-4","out",*Bv(f"mv {VW}/ai坂田 /tmp/x"),"deny","本人のフォルダそのもの"),
+ ("R5-4","out",*Bv(f"mv {VW}/ai山田 /tmp/x"),"deny","本人のフォルダそのもの"),
  ("R5-5","in",*Bv(f"mv {VNFD_T}/data /tmp/x"),"deny","正本の移動"),
  ("R5-6","in",*Bv("mv 設定//config.json /tmp/x"),"deny","正本の移動"),
  ("R5-7","in",*Bv("mv 設定/./config.json /tmp/x"),"deny","正本の移動"),
@@ -433,7 +433,7 @@ V+=[
  ("R5-10","in",*Bv("echo x > 02_成果物/hl.csv"),"deny","元データ"),
  ("R5-11","in",*Bv("mv x 設定/CONFIG.JSON"),"deny","上書き"),
  ("R5-12","out","Write",{"file_path":VH+"/.AI-BUNSHIN/owners.json"},"deny","見張りの記録"),
- ("R5-13","out",*Bv("mv ~/WORKSPACE/AI坂田/設定 /tmp/x"),"deny","正本の移動"),
+ ("R5-13","out",*Bv("mv ~/WORKSPACE/AI山田/設定 /tmp/x"),"deny","正本の移動"),
  ("R5-14","in","Write",{"file_path":VR+"/設定/../03_インプット//b.csv"},"deny","元データ"),
  ("R5-p1","in",*Bv("cat 設定/CONFIG.JSON 02_成果物/hl.csv"),"pass",""),
  ("R5-p2","in",*Bv("mv 02_成果物/A.md 02_成果物/b.md"),"pass",""),
@@ -442,7 +442,7 @@ V+=[
  ("R6-1","out",*Bv(f"ln -s {VR} {VO}/L2 && mv {VO}/L2/設定 /tmp/x"),"deny","リンク"),
  ("R6-2","in",*Bv("ln -s . self && mv self/設定 /tmp/x"),"deny","リンク"),
  ("R6-3","in",*Bv("ln -s 設定 s2 && mv s2/config.json /tmp/x"),"deny","リンク"),
- ("R6-4","out",*Bv(f"cd {VW} && ln -s AI坂田 L3 && mv L3/設定 /tmp/x"),"deny","リンク"),
+ ("R6-4","out",*Bv(f"cd {VW} && ln -s AI山田 L3 && mv L3/設定 /tmp/x"),"deny","リンク"),
  ("R6-5","in",*Bv("ln -sf /nonexistent 設定/config.json"),"deny","リンク"),
  ("R6-6","in",*Bv("ln -sf /tmp/o.json 00_タスク管理/data/tasks.json"),"deny","リンク"),
  ("R6-7","out",*Bv(f"ln -sf /tmp/o.json {VR}/設定/config.json"),"deny","リンク"),
@@ -485,7 +485,7 @@ check_rows([("R5-15","out",*Bv(f"echo '{{}}' > {_hl}"),"deny","見張りの記�
 # R8：owners.json が読めない（深い入れ子・壊れた JSON など）でも落ちずに、本人のフォルダの中は止める
 for nm,txt in [("深い入れ子","["*200000+"]"*200000),("壊れた JSON","{not json"),("null","null"),("owners が文字列",'{"owners": "/x"}'),
                ("入れ子リスト",'{"owners": [["/x"], 5, null, "rel/path"]}'),("BOM","﻿{\"owners\": []}"),("バイナリ","\udcff")]:
-    H8=os.path.realpath(tempfile.mkdtemp(prefix="ngr8_")); R8=H8+"/ws/AI坂田"; O8=H8+"/ws/other"
+    H8=os.path.realpath(tempfile.mkdtemp(prefix="ngr8_")); R8=H8+"/ws/AI山田"; O8=H8+"/ws/other"
     for d in ["設定","00_タスク管理/data"]: os.makedirs(R8+"/"+d)
     open(R8+"/設定/config.json","w").write("{}"); os.makedirs(O8); os.makedirs(H8+"/.ai-bunshin")
     with open(H8+"/.ai-bunshin/owners.json","w",encoding="utf-8",errors="surrogateescape") as f: f.write(txt)
@@ -514,7 +514,7 @@ fail+=vfail
 # 部下D の試し（p1〜p9）で、直す前に失敗することを確かめた行を写した。期待が deny の行は、理由の語まで見る
 print("## T058 直し（ヒアドキュメント・起動役・締め切り・ハードリンク・例外・cd のワイルドカード）")
 import time as _time
-XH=os.path.realpath(tempfile.mkdtemp(prefix="ngfix_")); XW=XH+"/workspace"; XR=XW+"/AI坂田"; XO=XW+"/other/proj"
+XH=os.path.realpath(tempfile.mkdtemp(prefix="ngfix_")); XW=XH+"/workspace"; XR=XW+"/AI山田"; XO=XW+"/other/proj"
 for d in ["設定","00_タスク管理/data","05_開発/x","02_成果物/共通","03_インプット",".claude/rules",".claude/hooks"]: os.makedirs(XR+"/"+d)
 for f,t in [("設定/config.json","{}"),("00_タスク管理/data/tasks.json","{}"),(".claude/rules/ai-bunshin-common.md","x"),(".claude/settings.json","{}"),
             ("CLAUDE.md","x"),("03_インプット/a.csv","a"),("02_成果物/a.md","x")]:
@@ -543,7 +543,7 @@ XF=[
  ("F1-2","in",*Bx(HD+"ln -s 設定 s"),"deny","リンク"),
  ("F1-3","in",*Bx(HD+"cp a.csv 03_インプット"),"deny","元データ"),
  ("F1-4","in",*Bx(HD+"touch 03_インプット/new.csv"),"deny","元データ"),
- ("F1-5","in",*Bx(HD+"mv ../AI坂田 /tmp/x"),"deny","本人のフォルダそのもの"),
+ ("F1-5","in",*Bx(HD+"mv ../AI山田 /tmp/x"),"deny","本人のフォルダそのもの"),
  ("F1-6","in",*Bx("python3 - <<'EOF'\nprint(1)\nEOF\nmv 00_タスク管理 /tmp/x"),"deny","正本の移動"),
  ("F1-7","out",*Bx(HD.replace("02_成果物/n.md","notes.md")+f"mv {XR}/設定 /tmp/x"),"deny","正本の移動"),
  ("F1-8","in",*Bx(HD+"unzip -o x.zip -d 03_インプット"),"deny","元データ"),
@@ -589,7 +589,7 @@ XF=[
  ("F4-p2","in",*Bx("cp -l 02_成果物/a.md 02_成果物/c.md"),"pass",""),
  ("F4-p3","out",*Bx("ln ../src2/x y && cp -al src src_bk"),"pass",""),
  # 指摘5：stat が失敗するパス（リンクのループ）
- ("F5-1","in",*Bx(f"mv {XO}/loopa/../../../../AI坂田/設定 /tmp/x"),"deny","読み切れない"),
+ ("F5-1","in",*Bx(f"mv {XO}/loopa/../../../../AI山田/設定 /tmp/x"),"deny","読み切れない"),
  ("F5-2","in","Write",{"file_path":XO+"/loopa/x"},"pass",""),
  ("F5-3","out","Write",{"file_path":XO+"/loopa/x"},"pass",""),
  ("F5-4","in",*Bx(f"mkdir -p {XO}/cl/hooks && echo x > {XO}/cl/hooks/x.sh"),"deny","hook"),  # リンク経由で .claude の下に書く
@@ -640,7 +640,7 @@ if got!="deny" or "cd の行き先を読み切れない" not in reason: xfail+=1
 _sp2=importlib.util.spec_from_file_location("ng_guard_dl",G); DL=importlib.util.module_from_spec(_sp2); _sp2.loader.exec_module(DL)
 _saved_env,_saved_cwd=dict(os.environ),os.getcwd()
 for vid,where,c,want in [("F3-dl-in","in","ls","deny"),("F3-dl-out","out","ls","pass"),("F3-dl-out-mention","out",f"ls {XR}/02_成果物","deny"),
-                         ("F3-dl-out-tilde","out","ls ~/workspace/AI坂田/02_成果物","deny")]:
+                         ("F3-dl-out-tilde","out","ls ~/workspace/AI山田/02_成果物","deny")]:
     base={"in":XR,"out":XO}[where]
     os.environ["HOME"]=XH; os.environ["CLAUDE_PROJECT_DIR"]=base; os.chdir(base); DL._SEEN["root"]="unset"
     d,label,_w,_r,_t,fell=DL.decide(json.dumps({"tool_name":"Bash","tool_input":{"command":c},"cwd":base}),deadline=1e-6)
@@ -655,11 +655,11 @@ fail+=xfail
 # T059：AI が自分の制限（config の ng_allow・maintainer、CLAUDE.md の「許可する例外」）を Write・Edit で書き換えるのを止める
 print("## T059 自分の制限の書き換え")
 CFGP=os.path.join(R,"設定","config.json"); CLP=os.path.join(R,"CLAUDE.md")
-CFG0={"owner":"坂田","name":"x","ng_allow":["^rm x$"],"maintainer":False,"dev":{"default_mode":"local","projects":[]}}
+CFG0={"owner":"山田","name":"x","ng_allow":["^rm x$"],"maintainer":False,"dev":{"default_mode":"local","projects":[]}}
 CFG0T=json.dumps(CFG0,ensure_ascii=False,indent=2)
 def setcfg(d=CFG0T):
     open(CFGP,"w",encoding="utf-8").write(d if isinstance(d,str) else json.dumps(d,ensure_ascii=False,indent=2))
-CL0="# 本人設定\n\n## 基本\n\n- 呼び方：坂田さん\n\n## 許可する例外（NG のうち、本人が許可したもの）\n\n- （まだなし）\n\n## 育ったルール\n\n| 日付 | ルール |\n|---|---|\n| （まだなし） | |\n"
+CL0="# 本人設定\n\n## 基本\n\n- 呼び方：山田さん\n\n## 許可する例外（NG のうち、本人が許可したもの）\n\n- （まだなし）\n\n## 育ったルール\n\n| 日付 | ルール |\n|---|---|\n| （まだなし） | |\n"
 def setcl(t=CL0): open(CLP,"w",encoding="utf-8").write(t)
 def cfgw(**kw):
     d=json.loads(CFG0T); d.update(kw); return json.dumps(d,ensure_ascii=False,indent=2)
@@ -687,7 +687,7 @@ T59=[
  ("cfg","W dev を足す","Write",{"file_path":CFGP,"content":cfgw(dev={"default_mode":"git","projects":[{"name":"a","mode":"git","path":"/x"}]})},"pass"),
  ("cfg","W 読めない JSON にする（ng_allow が見張りから消える＝変更）","Write",{"file_path":CFGP,"content":"{x"},"STOP"),
  ("cfg","E ほかのキーを変える","Edit",{"file_path":CFGP,"old_string":'"name": "x"',"new_string":'"name": "z"'},"pass"),
- ("cfg","ME ほかのキーを変える","MultiEdit",{"file_path":CFGP,"edits":[{"old_string":'"name": "x"',"new_string":'"name": "z"'},{"old_string":'"owner": "坂田"',"new_string":'"owner": "坂田 K"'}]},"pass"),
+ ("cfg","ME ほかのキーを変える","MultiEdit",{"file_path":CFGP,"edits":[{"old_string":'"name": "x"',"new_string":'"name": "z"'},{"old_string":'"owner": "山田"',"new_string":'"owner": "山田 K"'}]},"pass"),
  # --- CLAUDE.md ---
  ("cl","W 許可する例外に足す","Write",{"file_path":CLP,"content":CL0.replace(EXC_OLD,"- git push を許可\n\n## 育ったルール")},"STOP"),
  ("cl","W 許可する例外の節を消す","Write",{"file_path":CLP,"content":CL0.replace("## 許可する例外（NG のうち、本人が許可したもの）\n\n- （まだなし）\n\n","")},"STOP"),
@@ -696,14 +696,14 @@ T59=[
  ("cl","E 許可する例外に足す","Edit",{"file_path":CLP,"old_string":EXC_OLD,"new_string":"- rm を許可\n\n## 育ったルール"},"STOP"),
  ("cl","E 次の見出しを消して節をのばす","Edit",{"file_path":CLP,"old_string":"## 育ったルール\n","new_string":""},"STOP"),
  ("cl","E 見出しを別の名前にする","Edit",{"file_path":CLP,"old_string":"## 許可する例外（","new_string":"## 例外（"},"STOP"),
- ("cl","ME 許可する例外に足す","MultiEdit",{"file_path":CLP,"edits":[{"old_string":"坂田さん","new_string":"坂田さん様"},{"old_string":EXC_OLD,"new_string":"- 全部\n\n## 育ったルール"}]},"STOP"),
+ ("cl","ME 許可する例外に足す","MultiEdit",{"file_path":CLP,"edits":[{"old_string":"山田さん","new_string":"山田さん様"},{"old_string":EXC_OLD,"new_string":"- 全部\n\n## 育ったルール"}]},"STOP"),
  ("cl","E 見つからない old_string","Edit",{"file_path":CLP,"old_string":"zzz","new_string":"yyy"},"STOP"),
  ("cl","E 別の道（./）で指す","Edit",{"file_path":R+"/./CLAUDE.md","old_string":EXC_OLD,"new_string":"- 全部\n\n## 育ったルール"},"STOP"),
  ("cl","W 育ったルールだけ変える","Write",{"file_path":CLP,"content":CL0.replace("| （まだなし） | |","| 2026-11-01 | 新しいルール |")},"pass"),
- ("cl","W 基本だけ変える","Write",{"file_path":CLP,"content":CL0.replace("坂田さん","さかた")},"pass"),
+ ("cl","W 基本だけ変える","Write",{"file_path":CLP,"content":CL0.replace("山田さん","やまだ")},"pass"),
  ("cl","E 育ったルールを変える","Edit",{"file_path":CLP,"old_string":"| （まだなし） | |","new_string":"| 2026-11-01 | 新しいルール |"},"pass"),
- ("cl","E 基本を変える","Edit",{"file_path":CLP,"old_string":"呼び方：坂田さん","new_string":"呼び方：さかたさん"},"pass"),
- ("cl","ME 育ったルールと基本を変える","MultiEdit",{"file_path":CLP,"edits":[{"old_string":"坂田さん","new_string":"さかた"},{"old_string":"| （まだなし） | |","new_string":"| 1 | 2 |"}]},"pass"),
+ ("cl","E 基本を変える","Edit",{"file_path":CLP,"old_string":"呼び方：山田さん","new_string":"呼び方：やまださん"},"pass"),
+ ("cl","ME 育ったルールと基本を変える","MultiEdit",{"file_path":CLP,"edits":[{"old_string":"山田さん","new_string":"やまだ"},{"old_string":"| （まだなし） | |","new_string":"| 1 | 2 |"}]},"pass"),
  ("cl","W 新しい節を足す（許可する例外は同じ）","Write",{"file_path":CLP,"content":CL0+"\n## 新しい節\n\n- a\n"},"pass"),
 ]
 for kind,nm,tool,inp,want in T59:
