@@ -236,5 +236,110 @@ def archive_step_in_daily_review():
         assert word in sec, f"保管の手順に「{word}」が無い"
 
 
+# --- 本物の do_log に近い形（T102 の直し）：日付の箇条書き・字下げの続き・前日の見出しの節 ---
+REAL_LOG = """# S001 Do ログ
+
+## 2026-10-31 夕方（会話）
+
+### T074 文書の分
+- 受け取り：OK。2026-10-31 の記録は見出しの節にある
+- 部下C の報告は20行以内
+
+## 運用メモ（日付の見出しではない節）
+
+- 2026-10-31 14:53 一旦やめた
+  - 再開するときの状態：T058 は作業中
+
+- 2026-11-01 T101 部下C 56e9c0d → 部下D 1回目 合格
+  - 続き：PO 判断で直す点は3つ
+  - 続きの続き：テスト9本
+- 2026-11-01 Agent ID: a1b2c3（T102・部下C）
+- 2026-11-01 Agent ID: d4e5f6（T102・部下D）
+- 2026-11-01 坂田さん：T102 を beta.5 に入れる
+"""
+
+
+def grep_today(text, date):
+    """スキルの指定を機械で再現：日付を含む行（Grep -n）＋続きの字下げの行。日付の見出しの節があればその節も。
+    見つからないときは全体を返す。"""
+    lines = text.splitlines()
+    picked = set()
+    for i, l in enumerate(lines):
+        if date in l:
+            picked.add(i)
+            if l.startswith("#"):                         # 見出しなら、次の同じ階層以上の見出しまでが節
+                lv = len(l) - len(l.lstrip("#"))
+                for j in range(i + 1, len(lines)):
+                    m = re.match(r"(#+) ", lines[j])
+                    if m and len(m.group(1)) <= lv:
+                        break
+                    picked.add(j)
+            else:                                          # 続きの字下げの行
+                for j in range(i + 1, len(lines)):
+                    if lines[j].startswith((" ", "\t")):
+                        picked.add(j)
+                    else:
+                        break
+    if not picked:
+        return text
+    return "\n".join(lines[i] for i in sorted(picked))
+
+
+def agent_id_for(text, task, who):
+    """「Agent ID:」を含む行を Grep して、T 番号と担当で選ぶ。無ければ None（＝新しく呼ぶ）。"""
+    hits = [l for l in text.splitlines() if "Agent ID:" in l]
+    ids = [re.search(r"Agent ID: (\S+)（", l).group(1) for l in hits if task in l and who in l]
+    return ids[-1] if ids else None
+
+
+@case
+def todays_grep_takes_today_lines_and_continuations_not_yesterdays_section():
+    out = grep_today(REAL_LOG, "2026-11-01")
+    assert "T101 部下C 56e9c0d" in out and "続きの続き：テスト9本" in out, out
+    assert "坂田さん：T102 を beta.5" in out
+    assert "2026-10-31" not in out and "再開するときの状態" not in out and "T074 文書の分" not in out, out
+    # 日付の見出しの節がある日は、その節も読む
+    sec = grep_today(REAL_LOG, "2026-10-31 夕方")
+    assert "T074 文書の分" in sec and "受け取り：OK" in sec and "T101 部下C" not in sec, sec
+    # 見つからないときは全体（読めないままにしない）
+    assert grep_today(REAL_LOG, "2026-12-25") == REAL_LOG
+
+
+@case
+def agent_id_found_by_format_and_task_and_who():
+    assert agent_id_for(REAL_LOG, "T102", "部下C") == "a1b2c3"
+    assert agent_id_for(REAL_LOG, "T102", "部下D") == "d4e5f6"
+    assert agent_id_for(REAL_LOG, "T999", "部下C") is None          # 見つからなければ新しく呼ぶ
+    # 実物の書き方（Agent ID の文字列が無い）では見つからず、新しく呼ぶ側に倒れる
+    assert agent_id_for("- 2026-11-01 T101 部下C 56e9c0d → 部下D 合格\n", "T101", "部下C") is None
+
+
+@case
+def skills_spell_out_the_grep_and_the_line_format():
+    review = read(SKILLS, "daily-review", "SKILL.md")
+    l37 = [l for l in review.splitlines() if "do_log.md` の今日の記録" in l][0]
+    for w in ("YYYY-MM-DD", "Grep -n", "字下げ", "見出しの節", "見つからないとき", "全体を読む"):
+        assert w in l37, f"daily-review の今日の分の読み方に「{w}」が無い"
+    for skill in ("daily-do", "sprint"):
+        body = read(SKILLS, skill, "SKILL.md")
+        assert "`- YYYY-MM-DD …`" in body, f"{skill} に記録の行の書き出しが無い"
+        assert "古い記録は直さない" in body, f"{skill} に「古い記録は直さない」が無い"
+    for skill in ("daily-do", "sprint", "daily-review"):
+        body = read(SKILLS, skill, "SKILL.md")
+        assert "Agent ID: <id>（T0XX・部下C）" in body, f"{skill} に Agent ID の書式が無い"
+        assert "`Agent ID:` を含む行" in body and "新しく呼ぶ" in body, f"{skill} に Agent ID を探す手順が無い"
+
+
+@case
+def archive_step_is_safe_to_redo_and_checks_git_toplevel():
+    review = read(SKILLS, "daily-review", "SKILL.md")
+    sec = review.split("改善ログの月ごとの保管（")[1].split("## 8. 議事録")[0]
+    for w in ("同じ ID の行", "足さない", "git rev-parse --show-toplevel", "一致しない",
+              "Git で記録していない環境", "コミットするものが無い", "成功として扱う",
+              "金曜", "改善ログの保管（次の会話で「改善ログを保管して」と言う）", "毎日は出さない",
+              "「改善ログを保管して」と言われたら"):
+        assert w in sec, f"保管の手順に「{w}」が無い"
+
+
 print(f"{'FAILED: ' + str(fails) if fails else 'ALL OK'}")
 sys.exit(1 if fails else 0)
