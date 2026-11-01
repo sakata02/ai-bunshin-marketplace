@@ -233,6 +233,7 @@ PROTECTED_PATHS = [
     ("権限・設定", r"^\.claude/settings(?:\.local)?\.json$"),
     ("hook・権限（.claude の設定）", r"^\.claude/hooks/"),
     ("共通ルールの自動コピー（プラグイン側を直す）", r"^\.claude/rules/ai-bunshin-common\.md$"),
+    ("共通ルールの詳細の自動コピー（プラグイン側を直す）", r"^\.claude/ai-bunshin-details(?:/|$)"),
 ]
 
 
@@ -243,6 +244,7 @@ PROTECTED_TARGETS = [
     ("権限・設定", (".claude", "settings.local.json")),
     ("hook・権限（.claude の設定）", (".claude", "hooks")),
     ("共通ルールの自動コピー（プラグイン側を直す）", (".claude", "rules", "ai-bunshin-common.md")),
+    ("共通ルールの詳細の自動コピー（プラグイン側を直す）", (".claude", "ai-bunshin-details")),
 ]
 
 

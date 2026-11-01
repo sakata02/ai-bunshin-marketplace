@@ -5,7 +5,7 @@ description: 1日スプリントの実行（平日9時の計画に続けて自�
 
 # 1日スプリント：実行（9時の計画のあと）
 
-> 部下の呼び出しは `subagent_type: ai-bunshin:<名前>`。資料は `buka-a`（作成）→ `buka-b`（検証）、開発は `dev-a`（部下C・実装）→ `dev-b`（部下D・検証）、分析は `analyst`（部下F）→ `buka-b`、研修は `trainer`（部下G）→ `buka-b`、デザインが入るタスク（`design: true`）は作る人の前に `design`（部下E）。本人設定の `team.off` の部下は使わない。モデルと考える深さは指揮官ルールの表に従い、Opus に上げるときは理由を do_log に「Opus に上げた理由：…」と1行書く。**誰を呼ぶかはタスクの `assignee`（作る人）と `reviewer`（確かめる人）に従う**（指揮官ルールの「振り分け」）。スクリプトは `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/update_dashboard.py"`。
+> 部下の呼び出しは `subagent_type: ai-bunshin:<名前>`。資料は `buka-a`（作成）→ `buka-b`（検証）、開発は `dev-a`（部下C・実装）→ `dev-b`（部下D・検証）、分析は `analyst`（部下F）→ `buka-b`、研修は `trainer`（部下G）→ `buka-b`、デザインが入るタスク（`design: true`）は作る人の前に `design`（部下E）。本人設定の `team.off` の部下は使わない。モデルと考える深さは指揮官ルールの表（`.claude/ai-bunshin-details/models.md`。Opus に上げるか迷うときに読む）に従い、Opus に上げるときは理由を do_log に「Opus に上げた理由：…」と1行書く。**誰を呼ぶかはタスクの `assignee`（作る人）と `reviewer`（確かめる人）に従う**（指揮官ルールの「振り分け」）。スクリプトは `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/update_dashboard.py"`。
 
 引数：日付（YYYY-MM-DD、省略時は今日）。
 自動実行（`claude -p`）のときは本人がその場にいない。**質問せずに最後まで進める。**
@@ -20,11 +20,15 @@ Bash は `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/update_dashboard.py" …` だ�
 - 1行目が `SKIP: …`（ほかの実行が動いている）なら、部下は動かさず・何も書かずに終わり、本人には「◯◯の自動実行が動いているので、重ならないよう開かなかった。終わってから声をかけてほしい」と1〜2行で伝える
 - 自動実行の中では、`daily_cycle.sh` が渡した環境変数 `AI_BUNSHIN_AUTO_RUN` とロックの ID が一致するので、自分のロックでは必ず `OPEN` になる。`SKIP` が出るのは、会話から開いたとき、または別の自動実行が動いているときだけ
 
+先に `.claude/ai-bunshin-details/daily-sprint.md` を読む（一度読んだら、この会話では読み直さない）。
+
 1. `01_スプリント/<今のスプリント>/daily/YYYYMMDD_計画.md` を読む。なければ「今日の計画がないため実行しません」と出力して終わる
 2. tasks.json の `daily_sprints` の今日の行の `status` を `実行中` にする
 3. 実施中の Try（改善ログ）を確認する。指示書の「守ること」に入っているか確かめる
 
 ## 1. 計画の順にタスクを進める
+
+本人名義の文章（記事・コラムなど）のタスクを始める前に、先に `.claude/ai-bunshin-details/writing-style.md` を読む（指示書の「守ること」に該当部分を抜き出す。部下には読ませない）（一度読んだら、この会話では読み直さない）。
 
 各タスクについて、`/ai-bunshin:sprint` の「2. Do」と同じ流れで進める：
 

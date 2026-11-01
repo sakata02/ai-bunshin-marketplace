@@ -54,6 +54,7 @@ description: AI 分身の初回セットアップ。新しく使い始める人�
 - デザインを入れたくない仕事（例：社内資料は自分で見るので不要）があれば聞いて、本人設定に書く
 
 **（3回目の続き）Google カレンダー**
+- 先に `.claude/ai-bunshin-details/calendar.md` を読む（セットアップの途中でまだ写されていないときは `${CLAUDE_PLUGIN_ROOT}/rules/details/calendar.md`)（一度読んだら、この会話では読み直さない）
 - 「今日の予定を、タスクと一緒に見られるようにしますか？（Google カレンダー）」→ いいえなら飛ばす
 - はいなら、使い方に合わせて案内する（どちらも読むだけ）：
   - **チャットだけで使う人**：claude.ai の設定 → コネクタ（Connectors）→ Google Calendar をオンにして、Google アカウントでログインする。オンにしたら「今日の予定を見せて」で確かめる。config の `calendar` は `{"type": "connector"}`
@@ -117,7 +118,7 @@ description: AI 分身の初回セットアップ。新しく使い始める人�
 
 作ったら自己診断をする（どれかが失敗したら、原因と直し方を本人に伝える）：
 1. `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/update_dashboard.py"` → `00_タスク管理/タスク管理.xlsx` ができる
-2. `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/update_dashboard.py" --session` → `.claude/rules/ai-bunshin-common.md` ができる（次の起動から共通ルールが読み込まれる）
+2. `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/update_dashboard.py" --session` → `.claude/rules/ai-bunshin-common.md` と `.claude/ai-bunshin-details/`（必要なときだけ読む詳しい手順）ができる（次の起動から共通ルールが読み込まれる）
 3. `python3 "${CLAUDE_PLUGIN_ROOT}/tests/test_ng_guard.py"` → 「失敗 0 件」（NG の見張りが効く）
 
 ## 4. 業務の棚卸し（何を任せるか）

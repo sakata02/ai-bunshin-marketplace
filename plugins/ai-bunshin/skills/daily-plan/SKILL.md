@@ -5,13 +5,14 @@ description: 1日スプリントのプランニング（平日9時に自動。�
 
 # 1日スプリント：プランニング（9:00）
 
-> 部下の呼び出しは `subagent_type: ai-bunshin:<名前>`。資料は `buka-a`（作成）→ `buka-b`（検証）、開発は `dev-a`（部下C・実装）→ `dev-b`（部下D・検証）、分析は `analyst`（部下F）→ `buka-b`、研修は `trainer`（部下G）→ `buka-b`、デザインが入るタスク（`design: true`）は作る人の前に `design`（部下E）。本人設定の `team.off` の部下は使わない。モデルと考える深さは指揮官ルールの表に従い、Opus に上げるときは理由を do_log に「Opus に上げた理由：…」と1行書く。**誰を呼ぶかはタスクの `assignee`（作る人）と `reviewer`（確かめる人）に従う**（指揮官ルールの「振り分け」）。スクリプトは `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/update_dashboard.py"`。
+> 部下の呼び出しは `subagent_type: ai-bunshin:<名前>`。資料は `buka-a`（作成）→ `buka-b`（検証）、開発は `dev-a`（部下C・実装）→ `dev-b`（部下D・検証）、分析は `analyst`（部下F）→ `buka-b`、研修は `trainer`（部下G）→ `buka-b`、デザインが入るタスク（`design: true`）は作る人の前に `design`（部下E）。本人設定の `team.off` の部下は使わない。モデルと考える深さは指揮官ルールの表（`.claude/ai-bunshin-details/models.md`。Opus に上げるか迷うときに読む）に従い、Opus に上げるときは理由を do_log に「Opus に上げた理由：…」と1行書く。**誰を呼ぶかはタスクの `assignee`（作る人）と `reviewer`（確かめる人）に従う**（指揮官ルールの「振り分け」）。スクリプトは `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/update_dashboard.py"`。
 
 このあと自動で `/ai-bunshin:daily-do`（実行）が続く。計画は短く・早く終える。
 
 引数：日付（YYYY-MM-DD、省略時は今日）。
 自動実行（`claude -p`）のときは本人がその場にいない。**質問せずに最後まで進める。**
 Bash は `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/update_dashboard.py" …` だけを使う。tasks.json は Read と Edit で直接直す（別のスクリプトは作らない）。ロックの確認のときだけ `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/lock_check.py"` も使ってよい（読むだけ）。
+先に `.claude/ai-bunshin-details/daily-sprint.md` を読む（一度読んだら、この会話では読み直さない）。
 
 ## 0. 開くかどうか
 
@@ -40,6 +41,8 @@ Bash は `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/update_dashboard.py" …` だ�
 
 ## 2. 見積もり
 
+先に `.claude/ai-bunshin-details/tasks-json.md` を読む（一度読んだら、この会話では読み直さない）。
+
 **見積もる対象**（`--plan-context` の印を使う）：🆕 前回の計画以降に登録されたタスク、🔁 要再見積もり（`reestimate: true`）のタスク、ポイントがないタスク、8pt 以上のタスク。それ以外は見積もり直さない。
 
 - **今日やる候補**（容量に入りそうな上位）だけ、2人で見積もる（プランニングポーカー。タスクの `assignee`（作る人）と `reviewer`（確かめる人））
@@ -49,7 +52,7 @@ Bash は `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/update_dashboard.py" …` だ�
 - 見積もる人（作る人）には、見積もりと一緒に「どう」（作業の分け方）を返させる（下の「4. 計画を書く」の指示書の「どう」）
 
 2人で見積もるとき：
-1. タスクの `assignee`（作る人）と `reviewer`（確かめる人）に **並列で・独立して** 見積もらせる。指揮官ルールの「ポイントの基準」の表と、基準のタスク（指揮官ルールの「ポイントの基準」と、本人設定の「ポイントの基準タスク」）を渡す
+1. タスクの `assignee`（作る人）と `reviewer`（確かめる人）に **並列で・独立して** 見積もらせる。指揮官ルールの「ポイントの基準」（`.claude/ai-bunshin-details/tasks-json.md`）の表と、基準のタスク（指揮官ルールの「ポイントの基準」と、本人設定の「ポイントの基準タスク」）を渡す
 2. 2人の差が 2段階以上（例：2 と 5）なら、それぞれの理由を比べて指揮官が決める
 3. 8pt 以上は、5pt 以下に分割して新しいタスクとして登録する（元のタスクは分割後のタスクを depends_on にするか、完了にして note に分割先を書く）
 4. **作業を始めたタスクのポイントは変えない**（ベロシティの水増しを防ぐため）
@@ -60,6 +63,8 @@ Bash は `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/update_dashboard.py" …` だ�
 - 次の「3. 今日のタスクを選ぶ」は、このゴールに近づくものから選ぶ
 
 ## 3. 今日のタスクを選ぶ
+
+先に `.claude/ai-bunshin-details/tasks-json.md` を読む（2 で読んだなら読み直さない）。
 
 - `--plan-context` の候補を優先順に見て、容量に入るまで選ぶ
 - 選ばないもの：⛔ 待ち（前提の作業が終わっていない）、本人のタスク（ポイントに数えない）
@@ -78,6 +83,7 @@ Bash は `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/update_dashboard.py" …` だ�
 
 ## 3.55 今日の予定と本人の仕事
 
+- 予定を見る前に、先に `.claude/ai-bunshin-details/calendar.md` を読む（一度読んだら、この会話では読み直さない）
 - `--plan-context` の「今日の予定」（カレンダーをつないだ人だけ）と「本人の仕事（今日やるといいもの）」を見る
 - 会議が多い日（目安：会議で4時間以上）は、本人へのお願いの期日を今日にしない・今日やるといいものを2件までに絞る
 - 会議の前に準備が要りそうなもの（資料・データ・確認）があれば、通知の3行目で「◯時の◯◯の前に、△△を用意しましょうか？」と提案する（勝手にタスクにはしない）
@@ -85,6 +91,7 @@ Bash は `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/update_dashboard.py" …` だ�
 
 ## 3.6 モデルと考える深さ
 
+- 先に `.claude/ai-bunshin-details/models.md` を読む（一度読んだら、この会話では読み直さない）
 - 今日のタスクごとに、指揮官ルールの「モデルと考える深さ」の表で、ふだんのままか Opus に上げるかを決め、計画の表に書く（上げる理由も）
 - Opus に上げるのは1日に原則3回まで。超えそうなら、優先度の低いものは明日に回す
 

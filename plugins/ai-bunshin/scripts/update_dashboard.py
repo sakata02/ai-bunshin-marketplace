@@ -100,6 +100,8 @@ try:
 except Exception:  # 予定が読めなくても、タスク管理は止めない
     calendar_today = None
 RULES_COPY = ROOT / ".claude" / "rules" / "ai-bunshin-common.md"   # .claude/rules/ は自動で読み込まれる。起動のたびにプラグインから写す
+RULES_DETAILS_SRC = PLUGIN_ROOT / "rules" / "details"               # 必要なときだけ読む詳しい手順（T101。ファイル名は英数字）
+DETAILS_COPY_DIR = ROOT / ".claude" / "ai-bunshin-details"         # .claude/rules/ の下に置くと毎回読み込まれるので、外に写す
 
 
 def _tmp_path(path):
@@ -190,17 +192,48 @@ def clean_old_tmp():
                         pass
 
 
-def sync_rules():
-    """共通の指揮官ルールを本人のフォルダの .claude/rules/ に写す（hook の出力は長いと切れるため）。
+def _copy_head(src):
+    return (f"<!-- 自動コピー：{src}（ai-bunshin プラグイン）。直接編集しない。"
+            "起動のたびに上書きされる -->\n\n")
+
+
+def sync_rules(warnings=None):
+    """共通の指揮官ルールを本人のフォルダに写す（hook の出力は長いと切れるため）。
+    本体 → .claude/rules/ai-bunshin-common.md（自動で読み込まれる）／詳しい手順（rules/details/*.md）→ .claude/ai-bunshin-details/
+    （.claude/rules/ の外。必要なときだけ読む。T101）。詳しい手順を先に写してから本体を写す（本体が指すファイルが無い時間を作らない）。
+    写せなかったものは warnings（リスト）に1件ずつ足す。詳しい手順が写せなかったときは、前の本体が残っていればそれを残す
+    （前の本体は全部入りで、詳しい手順が無くても動く）。元に無くなった写しは消さない（本体の表にないので読まれない）。
     中身が変わったら True。"""
     if not RULES_MD.exists():
         return False
+    problems = warnings if warnings is not None else []
+    changed = False
+    mine = []
+    srcs = sorted(RULES_DETAILS_SRC.glob("*.md")) if RULES_DETAILS_SRC.is_dir() else []
+    if not srcs:
+        mine.append("プラグインの元に rules/details/ がありません")
+    else:
+        try:
+            DETAILS_COPY_DIR.mkdir(parents=True, exist_ok=True)
+            for src in srcs:
+                text = _copy_head(src) + src.read_text(encoding="utf-8")
+                dst = DETAILS_COPY_DIR / src.name
+                try:
+                    if dst.read_text(encoding="utf-8") == text:
+                        continue
+                except (OSError, ValueError):
+                    pass
+                atomic_write_text(dst, text)
+                changed = True
+        except (OSError, ValueError) as e:
+            mine.append(f"{e.__class__.__name__}")
+    problems += mine
+    if mine and RULES_COPY.exists():
+        return changed   # 前の本体を残す
     RULES_COPY.parent.mkdir(parents=True, exist_ok=True)
-    head = (f"<!-- 自動コピー：{RULES_MD}（ai-bunshin プラグイン）。直接編集しない。"
-            "起動のたびに上書きされる -->\n\n")
-    text = head + RULES_MD.read_text(encoding="utf-8")
+    text = _copy_head(RULES_MD) + RULES_MD.read_text(encoding="utf-8")
     if RULES_COPY.exists() and RULES_COPY.read_text(encoding="utf-8") == text:
-        return False
+        return changed
     atomic_write_text(RULES_COPY, text)
     return True
 TASKS_JSON = ROOT / "00_タスク管理" / "data" / "tasks.json"
@@ -1918,9 +1951,14 @@ def main():
         text += f"\n{ctx['migrated']}"
     if args.session:
         # 共通の指揮官ルールは .claude/rules/ai-bunshin-common.md に写す（自動で読み込まれる）
-        if sync_rules():
+        sync_problems = []
+        if sync_rules(sync_problems):
             text = ("[共通ルールが更新されました] .claude/rules/ai-bunshin-common.md を読み直してから作業してください"
                     "（この起動では古い版が読み込まれている可能性があります）\n") + text
+        if sync_problems:   # 詳しい手順を写せなかった（本体が指すファイルが無い）。いちばん先頭に出す
+            text = ("[共通ルールの詳細ファイルを写せませんでした] .claude/ai-bunshin-details/ に写せません"
+                    f"（{'、'.join(sync_problems)}）。本人に伝えて、フォルダの書き込み権限などを確かめてください。"
+                    "それまでは、前の版の共通ルールで動きます\n") + text
         # 自動実行が止まっている知らせは、いちばん先頭（hook の出力は約2KBで切れるため）
         try:
             clean_old_tmp()

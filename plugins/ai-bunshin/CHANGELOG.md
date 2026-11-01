@@ -1,5 +1,13 @@
 # CHANGELOG（ai-bunshin）
 
+## 1.0.0-beta.5 — 作業中（未公開。`plugin.json` の版はまだ上げていない）
+- 共通ルールの分割（T101）：毎回自動で読み込まれる `rules/commander.md`（約44KB）を、本体（約29KB）と、必要なときだけ読む `rules/details/*.md`（9ファイル：`tasks-json`・`retro-try`・`kaizen`・`daily-sprint`・`models`・`team-growth`・`calendar`・`writing-style`・`dev`）に分けた。**文面は変えず、節ごとそのまま移した**。本体には、安全に関わるもの（NG、必ず確認すること、承認制、プラグインのコピーを書き換えない、承認なしに部下を増やさない、急ぎの3段階、要件確認の返事は tasks.json に書く、自動実行中の注意など）を残し、各節の跡に「詳細：`.claude/ai-bunshin-details/x.md`」の案内と、末尾の「詳しい手順のファイル」の表（読むとき・1つの会話で1回・迷ったら読む・部下は読まない）を足した
+- 写し：`update_dashboard.py` の `sync_rules()` が、本体（`.claude/rules/ai-bunshin-common.md`）と同時に、details を本人のフォルダの `.claude/ai-bunshin-details/` へ写す（`.claude/rules/` の下に置くと毎回読み込まれてしまうため、外に置く）。詳しい手順を先に写し、写せなかったときは前の本体を残して、起動時のまとめの先頭に「[共通ルールの詳細ファイルを写せませんでした]」を出す。元に無くなった写しは消さない（本体の表にないので読まれない）。自動実行は、Claude を起動する前の `update_dashboard.py --session`（`daily_cycle.sh`）を通るので、同じ関数で写る
+- 見張り：`ng_guard.py` の `PROTECTED_PATHS`・`PROTECTED_TARGETS` に `.claude/ai-bunshin-details/` を足した（判定の方式は変えていない）。写しへの Write・Edit・Bash の書き込みは止め、読むだけは通す
+- スキル：該当する手順に「先に `.claude/ai-bunshin-details/x.md` を読む」を足した（intake・daily-plan・daily-do・daily-review・sprint・dev・setup）。移した節を指していた参照（指揮官ルールの「ポイントの基準」「部下を増やすときのルール」「業務改善（システム化）の提案」「振り返りと Try」「文章のスタイルを育てる」「モデルと考える深さ」の表）に details の場所を足した。dev の「ポイントの基準（開発）」は、実際の見出しに合わせて「ポイントの基準」の「開発の場合」に直した
+- テスト：`tests/test_rules_split.py`（古い版 8101a02 の全行が本体か details に残る突き合わせ、写し、自動実行、見張り、参照、tasks.json の手直しで止まる項目の一覧）
+- なぜ：トークンの節約。毎回読み込まれる共通ルールが大きく、部下・会話の開始時の量が増えていた（T101。ルール分割の設計 B）。読み漏れの弱点（会話の中は指揮官の判断に頼る）は、同じ読み忘れが2回続いたら、その節を本体に戻して対処する
+
 ## 1.0.0-beta.4 — 2026-11-01（beta.3 公開後のレビュー指摘への対応）
 - 見張り（NG の見張り）：本人のフォルダでだけ動かす（外では何も止めない。プラグインのコピーへの書き込みの保護だけ、どこでも残す）。印の外し・フォルダの移動・リンクの抜け道を塞ぎ、保護しているものとの比べ方を文字の並びから実体（st_dev・st_ino）にした（T058。レビュー K・G）。起動時・更新時の hook も本人のフォルダでだけ動く
 - 見張り：AI が自分の制限（config の `ng_allow`・`maintainer`、CLAUDE.md の「許可する例外」）を Write・Edit で書き換えるのを止める（T059）。**Bash 経由の書き換えは範囲外**
