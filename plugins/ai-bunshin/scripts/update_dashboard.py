@@ -80,7 +80,7 @@ def setup_pending():
             seen.add(d)
             for name in ("settings.json", "settings.local.json"):
                 try:
-                    cfg = json.loads((d / ".claude" / name).read_text(encoding="utf-8"))
+                    cfg = json.loads((d / ".claude" / name).read_text(encoding="utf-8-sig"))   # メモ帳の BOM 付きでも読む
                 except (OSError, ValueError):
                     continue
                 plugins = cfg.get("enabledPlugins") if isinstance(cfg, dict) else None
@@ -1518,6 +1518,19 @@ def summary_text(ctx, limit=10, with_ids=False):
 
 # ---------- 振り返り（変更履歴・Try・議事録） ----------
 
+def needs_newline(path):
+    """ファイルが空でなく、改行で終わっていないか（追記の前に改行が要るか）。読めないときは要らない扱い。"""
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            if f.tell() == 0:
+                return False
+            f.seek(-1, os.SEEK_END)
+            return f.read(1) not in (b"\n", b"\r")
+    except OSError:
+        return False
+
+
 def record_history(data):
     """前回の tasks.json との差分を history.jsonl に追記する。初回はスナップショットだけ作る。"""
     current = {t["id"]: {k: t.get(k) for k in HISTORY_FIELDS} for t in data.get("tasks", [])}
@@ -1527,8 +1540,8 @@ def record_history(data):
             prev = load_json_file(SNAPSHOT_JSON, ".snapshot.json")
         except BadFile:
             prev = None   # 控えが壊れていても止めない。差分は出さず、今の状態で作り直す（全部が「新規」になるのを防ぐ）
-        if not isinstance(prev, dict):
-            prev = None
+        if not isinstance(prev, dict) or not all(isinstance(v, dict) for v in prev.values()):
+            prev = None   # JSON として正しくても形が違う（{"T001": "x"} など）ときも、前回なしとして作り直す
     if prev is not None:
         now = current_now().strftime("%Y-%m-%d %H:%M")
         entries = []
@@ -1542,6 +1555,8 @@ def record_history(data):
                 entries.append({"at": now, "id": tid, "change": "更新", "title": cur["title"], "diff": diff})
         if entries:
             with HISTORY_JSONL.open("a", encoding="utf-8") as f:
+                if needs_newline(HISTORY_JSONL):   # 手で編集されて改行で終わっていないと、最初の追記が前の行にくっつく
+                    f.write("\n")
                 for e in entries:
                     f.write(json.dumps(e, ensure_ascii=False) + "\n")
     atomic_write_text(SNAPSHOT_JSON, json.dumps(current, ensure_ascii=False, indent=1))
@@ -1934,13 +1949,18 @@ def write_excel(ctx):
     if not HAVE_OPENPYXL:
         return NO_OPENPYXL_NOTE
     wb = Workbook()
-    build_dashboard(wb, ctx)
-    build_own_sheet(wb, ctx)
-    build_requests_sheet(wb, ctx)
-    build_daily_sheet(wb, ctx)
-    build_task_list(wb, ctx)
-    build_gantt(wb, ctx)
-    build_sprint_history(wb, ctx)
+    try:
+        build_dashboard(wb, ctx)
+        build_own_sheet(wb, ctx)
+        build_requests_sheet(wb, ctx)
+        build_daily_sheet(wb, ctx)
+        build_task_list(wb, ctx)
+        build_gantt(wb, ctx)
+        build_sprint_history(wb, ctx)
+    except (ValueError, TypeError) as e:   # 一覧や { } など、Excel のセルに入らない値（英語の "Cannot convert ..." をそのまま見せない）
+        raise BadFile("Excel（タスク管理.xlsx）に書けない値が tasks.json にあります。note・title・department など、文字や数のはずの項目に、"
+                      "一覧（[ ]）や { } が入っていないか確かめてください"
+                      f"（内部のエラー：{type(e).__name__}）。tasks.json は書き換えていません") from e
     try:
         atomic_save(XLSX, lambda tmp: wb.save(tmp))   # 一時ファイルに作ってから置き換える。途中で止まっても、元の Excel は壊れない
     except OSError:   # Excel が開いている（Windows は PermissionError）ほか、保存先に書けないとき。落ちずに、ほかの生成物は書く
@@ -2099,12 +2119,6 @@ def run(today):
     if errors:   # 形に問題があるうちは、tasks.json に何も書かない（新しい形式への移しもしない）
         raise ValueError("tasks.json の内容に問題があります。直すまで、生成物は更新しません（tasks.json は書き換えていません）:\n- "
                          + "\n- ".join(errors))
-    try:
-        migrated = migrate_tasks_json(TASKS_JSON, today)
-    except OSError as e:   # 移せなくても、タスク管理は止めない（元の tasks.json はそのまま。次の機会にまた試す）
-        migrated = f"tasks.json を新しい形式に移せませんでした（今回は見送り）：{type(e).__name__}"
-    except BadFile as e:   # 読み直したときに壊れていた（ほかの人が書き換え中など）。今回は見送り
-        migrated = f"tasks.json を新しい形式に移せませんでした（今回は見送り）：{e}"
     record_history(data)
     cal =Calendar(data.get("project", {}).get("holidays", []))
     tasks = data.get("tasks", [])
@@ -2123,11 +2137,20 @@ def run(today):
     ctx = dict(data=data, tasks=tasks, today=today, cal=cal, velocity=velocity, velocity_src=velocity_src, events=events,
                events_error=events_error, events_stale=events_stale,
                open_tasks=open_tasks, project_end=project_end, sprint=current_sprint(data, today),
-               now=current_now().strftime("%Y-%m-%d %H:%M"), migrated=migrated)
+               now=current_now().strftime("%Y-%m-%d %H:%M"), migrated=None)
 
     saved_note = write_excel(ctx)
     atomic_write_text(BOARD_MD, build_board_md(ctx))
     atomic_write_text(REQUEST_MD, build_requests_md(ctx))
+    # tasks.json の新しい形式への移しは、Excel・ボード・お願いを書き終えたあと（最後）に行う。検査を通っても Excel などで落ちたときに、
+    # 移しだけ済んでしまわないように。移しのあとに data は読み直さない：メモリの data は移す前の内容で、違いは schema_version の有無だけ
+    # （ここから先で使わない）。読み直すと、移しの途中の状態を見るおそれがある
+    try:
+        ctx["migrated"] = migrate_tasks_json(TASKS_JSON, today)
+    except OSError as e:   # 移せなくても、タスク管理は止めない（元の tasks.json はそのまま。次の機会にまた試す）
+        ctx["migrated"] = f"tasks.json を新しい形式に移せませんでした（今回は見送り）：{type(e).__name__}"
+    except BadFile as e:   # 読み直したときに壊れていた（ほかの人が書き換え中など）。今回は見送り
+        ctx["migrated"] = f"tasks.json を新しい形式に移せませんでした（今回は見送り）：{e}"
     return ctx, saved_note
 
 
@@ -2166,6 +2189,31 @@ def cli_now(text):
     raise argparse.ArgumentTypeError(f"時刻は 10:30 か 2026-11-05 10:30 のように書いてください（今は {text!r}）")
 
 
+ERROR_LOG_PREFIX = "dashboard_error"
+
+
+def write_error_log(argv):
+    """想定外の例外のトレースバックを scripts/auto/logs/dashboard_error_YYYYMMDD.log に追記する。書けたらその場所（本人のフォルダからの
+    相対パス）、書けない・本人のフォルダが無いときは None（ログが書けなくても止めない）。"""
+    if find_root() is None:
+        return None
+    try:
+        import traceback
+        logdir = AUTO_DIR / "logs"
+        logdir.mkdir(parents=True, exist_ok=True)
+        path = logdir / f"{ERROR_LOG_PREFIX}_{current_now().strftime('%Y%m%d')}.log"
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(f"[{current_now().strftime('%Y-%m-%d %H:%M:%S')}] update_dashboard.py {' '.join(argv)}\n")
+            f.write(traceback.format_exc())
+            f.write("\n")
+        try:
+            return path.relative_to(ROOT).as_posix()
+        except ValueError:
+            return str(path)
+    except Exception:
+        return None
+
+
 def failure_notice(message, args, code):
     """失敗を、モードに合わせて伝える。session／hook の呼び出し元（Claude Code）は止めず、案内を additionalContext に入れる。
     code は手動実行のときの終了コード。"""
@@ -2189,8 +2237,10 @@ def main():
         class _Mode:
             hook = "--hook" in sys.argv
             session = "--session" in sys.argv
+        logged = write_error_log(sys.argv[1:])
+        where = (f"詳しいエラーは {logged} に残しました。" if logged else "詳しいエラーのログは書けませんでした。")
         return failure_notice(f"ダッシュボード更新で想定外のエラーが起きました（{type(e).__name__}）。tasks.json や設定/config.json の中身に"
-                              "変わった書き方がないか確かめてください。直らなければ、この文面を AI に見せてください", _Mode, 1)
+                              f"変わった書き方がないか確かめてください。{where}直らなければ、この文面とログを AI に見せてください", _Mode, 1)
 
 
 def _main():

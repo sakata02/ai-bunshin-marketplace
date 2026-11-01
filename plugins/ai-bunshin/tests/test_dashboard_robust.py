@@ -451,6 +451,141 @@ def b3_unexpected_exception_is_japanese_not_traceback():
         sys.argv = saved_argv
 
 
+# ---------- T069 の直し（部下D の確かめへの対応） ----------
+
+def data_file(root, name):
+    return os.path.join(root, "00_タスク管理", "data", name)
+
+
+@case
+def t69_1_snapshot_with_wrong_shape_or_broken_json_is_rebuilt():
+    """.snapshot.json が JSON として正しくても形が違う・壊れているときは、前回なしとして扱う（ずっと落ち続けない）。"""
+    bad = []
+    for name, raw in (("値が文字", '{"T001": "x"}'), ("配列", '[1, 2]'), ("壊れた JSON", '{ "T001": '), ("空", ""),
+                      ("値が配列", '{"T001": [1]}')):
+        home = make_home()
+        r0 = run_dash(home, ["--today", "2026-11-02"])   # 最初の記録（snapshot ができる）
+        with open(data_file(home, ".snapshot.json"), "w", encoding="utf-8") as f:
+            f.write(raw)
+        hist_before = os.path.exists(data_file(home, "history.jsonl"))
+        for n in (1, 2):   # 2回目も落ちない（直らないままにならない）
+            r = run_dash(home, ["--today", "2026-11-02"])
+            if r.returncode != 0 or "Traceback" in r.stderr:
+                bad.append(f"{name} {n}回目: 終了コード {r.returncode} {r.stderr[-200:]}")
+        snap = json.loads(rd(data_file(home, ".snapshot.json")).decode("utf-8"))
+        if not (isinstance(snap, dict) and all(isinstance(v, dict) for v in snap.values())):
+            bad.append(f"{name}: snapshot が作り直されていない")
+        if not hist_before and os.path.exists(data_file(home, "history.jsonl")):
+            bad.append(f"{name}: 前回なしのはずなのに history.jsonl に全部が「新規」で出た")
+    assert not bad, "\n      " + "\n      ".join(bad)
+
+
+@case
+def t69_4_history_without_trailing_newline_gets_one_before_append():
+    home = make_home()
+    run_dash(home, ["--today", "2026-11-02", "--now", "2026-11-02 09:00"])
+    first = json.dumps({"at": "2026-11-01 09:00", "id": "T001", "change": "新規", "title": "a", "status": "ToDo"}, ensure_ascii=False)
+    with open(data_file(home, "history.jsonl"), "w", encoding="utf-8") as f:
+        f.write(first)   # 改行で終わっていない
+    t = copy.deepcopy(TASKS)
+    t["tasks"].append({"id": "T002", "title": "追加", "status": "ToDo", "assignee": "dev-a", "points": 1, "priority": 2})
+    with open(tasks_file(home), "w", encoding="utf-8") as f:
+        json.dump(t, f, ensure_ascii=False)
+    r = run_dash(home, ["--today", "2026-11-02", "--now", "2026-11-02 10:30"])
+    assert r.returncode == 0, r.stderr
+    lines = [x for x in open(data_file(home, "history.jsonl"), encoding="utf-8").read().split("\n") if x.strip()]
+    assert len(lines) == 2, lines
+    assert [json.loads(x)["id"] for x in lines] == ["T001", "T002"], lines
+
+
+@case
+def t69_2_starter_settings_json_with_bom_is_recognised_as_setup_pending():
+    folder = os.path.join(BASE, "starter_bom")
+    os.makedirs(os.path.join(folder, ".claude"))
+    os.makedirs(os.path.join(BASE, "fakehome"), exist_ok=True)
+    with open(os.path.join(folder, ".claude", "settings.json"), "wb") as f:
+        f.write((BOM + json.dumps({"enabledPlugins": {"ai-bunshin@market": True}})).encode("utf-8"))
+    env = {k: v for k, v in os.environ.items() if k not in ("AI_BUNSHIN_HOME", "CLAUDE_PROJECT_DIR")}
+    env.update(HOME=os.path.join(BASE, "fakehome"), USERPROFILE=os.path.join(BASE, "fakehome"), PYTHONUTF8="1",
+               CLAUDE_PROJECT_DIR=folder)
+    r = subprocess.run([sys.executable, DASH, "--session"], capture_output=True, text=True, encoding="utf-8", cwd=folder, env=env)
+    assert r.returncode == 0, r.stderr
+    assert "初回セットアップ" in r.stdout, r.stdout
+
+
+@case
+def t69_3_list_note_fails_in_japanese_and_tasks_json_bytes_stay_same():
+    """検査を通ったあと Excel で落ちる値（note が一覧）でも、tasks.json は書き換えない（移しは最後）。英語の ValueError は出さない。"""
+    try:
+        import openpyxl  # noqa: F401
+    except ImportError:
+        print("      （openpyxl が無いので飛ばす）")
+        return
+    t = copy.deepcopy(TASKS)
+    t["tasks"][0]["note"] = ["一覧", "になっている"]
+    home = make_home(tasks=t)   # schema_version が無い＝移しの対象
+    before = rd(tasks_file(home))
+    for mode in ([], ["--session"], ["--plan-context"]):
+        r = run_dash(home, ["--today", "2026-11-02"] + mode)
+        text = r.stdout + r.stderr
+        assert "Cannot convert" not in text and "Traceback" not in text, text[-300:]
+        assert re.search(r"[ぁ-んァ-ン一-龥]", text) and "Excel" in text, text
+        assert rd(tasks_file(home)) == before, f"tasks.json が書き換わった {mode}"
+        assert not [f for f in os.listdir(os.path.dirname(tasks_file(home))) if ".bak_" in f], "控えが作られた"
+    # 直したら移しが行われる（移しは Excel・ボード・お願いを書き終えたあと）
+    t["tasks"][0]["note"] = "文字にした"
+    with open(tasks_file(home), "w", encoding="utf-8") as f:
+        json.dump(t, f, ensure_ascii=False)
+    r = run_dash(home, ["--today", "2026-11-02"])
+    assert r.returncode == 0, r.stderr
+    assert b'"schema_version"' in rd(tasks_file(home))
+    assert "新しい形式" in r.stdout
+
+
+@case
+def t69_5_unexpected_exception_is_logged_to_auto_logs_and_message_names_it():
+    saved_argv, saved_run, saved_auto = sys.argv, MOD.run, MOD.AUTO_DIR
+
+    def boom(today):
+        raise KeyError("start")
+
+    MOD.run = boom
+    try:
+        sys.argv = ["x", "--today", "2026-11-02", "--now", "2026-11-02 10:00"]
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = MOD.main()
+        text = out.getvalue() + err.getvalue()
+        assert rc == 1, (rc, text)
+        logdir = os.path.join(MOD_HOME, "scripts", "auto", "logs")
+        files = [f for f in os.listdir(logdir) if f == "dashboard_error_20261102.log"]   # --now の日付で名前が決まる
+        assert files, os.listdir(logdir) if os.path.isdir(logdir) else "logs が無い"
+        body = open(os.path.join(logdir, files[0]), encoding="utf-8").read()
+        assert "Traceback" in body and "KeyError" in body and "boom" in body, body
+        assert "scripts/auto/logs/" + files[0] in text, text
+        assert "Traceback" not in text
+        # 2回目は追記（上書きしない）
+        sys.argv = ["x"]
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            MOD.main()
+        body2 = open(os.path.join(logdir, files[0]), encoding="utf-8").read()
+        assert body2.count("KeyError") >= 2 and body2.startswith(body[:50])
+        # ログが書けないとき（保存先が普通のファイル）も止まらない
+        blocker = os.path.join(BASE, "not_a_dir")
+        with open(blocker, "w") as f:
+            f.write("x")
+        MOD.AUTO_DIR = type(MOD.AUTO_DIR)(blocker)
+        sys.argv = ["x"]
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = MOD.main()
+        text = out.getvalue() + err.getvalue()
+        assert rc == 1 and "Traceback" not in text and re.search(r"[ぁ-んァ-ン一-龥]", text), (rc, text)
+        assert "ログ" in text
+    finally:
+        MOD.run, MOD.AUTO_DIR, sys.argv = saved_run, saved_auto, saved_argv
+
+
 # ---------- 既定値 ----------
 
 @case
