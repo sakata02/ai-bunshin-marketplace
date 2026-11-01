@@ -2031,6 +2031,16 @@ def main():
         stale = auto_run_warning(today, ctx["cal"])
         if stale:
             text = stale + "\n" + text
+        # 見張りの自己点検・「読めませんでした」の連続・自動実行が時間の上限で止まった記録（T095）。
+        # 先頭（出力の 1,500 バイト以内）に、短い1行ずつ出す
+        try:
+            sys.path.insert(0, str(Path(__file__).resolve().parent))
+            import watch_check
+            long_run = watch_check.session_warnings(ROOT, AUTO_DIR, datetime.now(), call=OWNER_CALL)
+        except Exception:   # 点検の失敗で起動時のまとめを止めない
+            long_run = []
+        if long_run:
+            text = "\n".join(long_run) + "\n" + text
     if args.hook or args.session:
         event = "PostToolUse" if args.hook else "SessionStart"
         print(json.dumps({"hookSpecificOutput": {"hookEventName": event, "additionalContext": text}}, ensure_ascii=False))

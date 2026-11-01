@@ -17,6 +17,8 @@ esac
 ROOT="${AI_BUNSHIN_HOME:?本人のフォルダ（AI_BUNSHIN_HOME）が指定されていません。scripts/auto/run.sh から呼んでください}"
 PLUGIN_ROOT="${0:A:h:h:h}"
 DASH="$PLUGIN_ROOT/scripts/update_dashboard.py"
+WATCH="$PLUGIN_ROOT/scripts/watch_check.py"          # 時間の上限・見張りの点検・「時間の上限で止めた」印（T095）
+LIMITED="$PLUGIN_ROOT/scripts/auto/run_limited.py"   # claude を時間の上限つきで動かす（T095）
 # 開発の置き場所のうち、本人のフォルダの外にあるリポジトリ（自動実行でも編集できるように --add-dir で渡す）
 ADD_DIRS=(${(f)"$(python3 - "$ROOT" <<'PY'
 import json, os, sys
@@ -47,6 +49,7 @@ cd "$ROOT" || exit 1
 mark_ok() {
   local f="$ROOT/scripts/auto/last_success_$1.txt"
   date '+%Y-%m-%d %H:%M' > "$f.tmp.$$" && mv -f "$f.tmp.$$" "$f"
+  python3 "$WATCH" clear-timeout "$ROOT/scripts/auto" "$1" 2>/dev/null   # 同じ段階が後で成功したら「時間の上限で止めた」印を消す（T095）
 }
 log() { echo "[$(date '+%H:%M:%S') $PHASE] $*" >> "$LOG"; }
 notify() {
@@ -78,10 +81,11 @@ if [ "$HEAD" = "SKIP: 営業日ではない" ]; then
   exit 0
 fi
 
-# 前の段階が動いていれば待つ（計画・実行は60分、振り返りは実行の終わりを待つため180分）
+# 前の段階が動いていれば待つ（計画・実行は計画の上限＝既定60分、振り返りは実行の終わりを待つため実行の上限＝既定180分。
+# 時間の上限と同じ設定 auto.max_minutes から出す。T095）
 # ロックの1行目は持ち主の PID。そのプロセスがもう無ければ（強制終了・停電など）古いロックとして無視する
-MAX_WAIT=60
-[ "$PHASE" = "review" ] && MAX_WAIT=180
+MAX_WAIT=$(python3 "$WATCH" wait-minutes "$ROOT" "$PHASE" 2>/dev/null)
+case "$MAX_WAIT" in (''|*[!0-9]*) MAX_WAIT=60; [ "$PHASE" = "review" ] && MAX_WAIT=180 ;; esac
 WAITED=0
 while [ -f "$LOCK" ]; do
   OWNER_PID=$(head -1 "$LOCK")
@@ -152,16 +156,50 @@ else
 fi
 
 
-RESULT=$(claude -p "$SKILL" \
-  --permission-mode acceptEdits \
-  --model opus \
-  --allowedTools "$TOOLS" \
-  --disallowedTools "$DENY" \
-  "${ADD_DIR_ARGS[@]}" \
-  < /dev/null 2>> "$LOG")
-STATUS=$?
-echo "$RESULT" >> "$LOG"
-log "終了 (exit=$STATUS)"
+# 見張りの自己点検（T095）：claude を起動する前に、今動いている見張り（このプラグインのコピー）が壊れていないかを確かめる。
+# 壊れていれば起動しない（壊れた見張りの下では、中の Claude が何もできない／何でも通るため）
+if ! GUARD_MSG=$(python3 "$WATCH" canary "$ROOT" 2>> "$LOG"); then
+  log "見張りが壊れている可能性があるため、${LABEL}を始めませんでした（${GUARD_MSG}）"
+  notify "見張りが壊れている可能性があるため、${LABEL}を始めませんでした（ログ参照）"
+  exit 1
+fi
+
+# claude を時間の上限つきで動かす（T095）。結果は RESULT、終了コードは STATUS。
+# 上限（auto.max_minutes。段階を決めたあとに決める）を超えたら、自分の起動した claude のグループだけを止めて exit 124
+run_claude() {
+  local skill="$1" out start broken
+  LIMIT_MIN=$(python3 "$WATCH" minutes "$ROOT" "$PHASE" 2>/dev/null)
+  case "$LIMIT_MIN" in (''|*[!0-9.]*) LIMIT_MIN=60 ;; esac
+  out=$(mktemp "$LOG_DIR/.out.XXXXXX") || { log "一時ファイルを作れませんでした"; exit 1; }
+  start=$(date '+%Y-%m-%d %H:%M:%S')
+  log "claude を起動（時間の上限 ${LIMIT_MIN}分）"
+  python3 "$LIMITED" --minutes "$LIMIT_MIN" --stdout "$out" -- claude -p "$skill" \
+    --permission-mode acceptEdits \
+    --model opus \
+    --allowedTools "$TOOLS" \
+    --disallowedTools "$DENY" \
+    "${ADD_DIR_ARGS[@]}" \
+    < /dev/null 2>> "$LOG"
+  STATUS=$?
+  RESULT=$(cat "$out" 2>/dev/null)
+  rm -f "$out"
+  echo "$RESULT" >> "$LOG"
+  log "終了 (exit=$STATUS)"
+  # 補助：この実行の間に「見張りの入力を読めませんでした」が3回以上あれば、ログと通知に書く
+  broken=$(python3 "$WATCH" broken-since "$ROOT" "$start" 2>/dev/null)
+  if [ "${broken:-0}" -ge 3 ] 2>/dev/null; then
+    log "警告：見張りが壊れている可能性（この実行の間に「見張りの入力を読めませんでした」が${broken}回）"
+    notify "見張りが壊れている可能性があります（${broken}回）。ログを見てください"
+  fi
+  if [ $STATUS -eq 124 ]; then
+    log "時間の上限（${LIMIT_MIN}分）で止めました。続きは会話で"
+    python3 "$WATCH" mark-timeout "$ROOT/scripts/auto" "$PHASE" "$LIMIT_MIN" 2>> "$LOG"
+    notify "時間の上限（${LIMIT_MIN}分）で${LABEL}を止めました。続きは会話で"
+    exit 124
+  fi
+}
+
+run_claude "$SKILL"
 
 # 振り返りのあとに今日の議事録が無ければ、ログに警告を残す（スキルが SKIP などで何もせず終わったのが分かるように。T080）
 if [ "$PHASE" = "review" ] && [ $STATUS -eq 0 ]; then
@@ -191,16 +229,7 @@ if [ "$PHASE" = "plan" ]; then
   notify "実行を始めました。その間、tasks.json の同時編集に注意してください"
   TOOLS="$TOOLS,WebSearch,WebFetch"
   DENY="${DENY/,WebFetch,WebSearch/}"
-  RESULT=$(claude -p "/ai-bunshin:daily-do" \
-    --permission-mode acceptEdits \
-    --model opus \
-    --allowedTools "$TOOLS" \
-    --disallowedTools "$DENY" \
-    "${ADD_DIR_ARGS[@]}" \
-    < /dev/null 2>> "$LOG")
-  STATUS=$?
-  echo "$RESULT" >> "$LOG"
-  log "終了 (exit=$STATUS)"
+  run_claude "/ai-bunshin:daily-do"   # 上限（実行の分）はここで決め直す。計画で止まったら、ここには来ない
   if [ $STATUS -eq 0 ] && [ -n "$RESULT" ]; then
     mark_ok do
     notify "$(echo "$RESULT" | tail -3 | tr '\n' ' ')"

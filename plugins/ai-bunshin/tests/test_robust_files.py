@@ -347,6 +347,10 @@ def make_cycle(name, stub, claude_exit=0, ai_name="テストAI", config_extra=No
     os.makedirs(os.path.join(plugin, "scripts", "auto"))
     shutil.copy(CYCLE, os.path.join(plugin, "scripts", "auto", "daily_cycle.sh"))
     shutil.copy(LOCK_CHECK, os.path.join(plugin, "scripts", "lock_check.py"))
+    # T095：時間の上限・見張りの点検の道具（daily_cycle.sh が使う）。見張りは本物のコピー（点検が通る）
+    for f in ("watch_check.py", "ng_guard.py", "ng_guard_legacy.py"):
+        shutil.copy(os.path.join(SCRIPTS, f), os.path.join(plugin, "scripts", f))
+    shutil.copy(os.path.join(SCRIPTS, "auto", "run_limited.py"), os.path.join(plugin, "scripts", "auto", "run_limited.py"))
     with open(os.path.join(plugin, "scripts", "update_dashboard.py"), "w", encoding="utf-8") as f:
         f.write(stub)
     home = os.path.join(d, "owner")
