@@ -134,7 +134,7 @@ check("hook：濁点の表し方が違うパス（NFC）でも本人の tasks.js
 
 # 手動実行（本人のフォルダが見つからない）
 r = run([], OTHERDIR)
-check("手動：見つからないときの案内文", r.returncode == 1 and "00_タスク管理 があるフォルダで Claude を開き直してください" in r.stderr, r.stderr)
+check("手動：見つからないときの案内文", r.returncode == 1 and "00_タスク管理 があるフォルダを開き直してください" in r.stderr, r.stderr)
 
 print()
 print(f"失敗 {fails} 件")

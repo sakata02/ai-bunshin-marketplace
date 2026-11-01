@@ -26,6 +26,7 @@ from pathlib import Path
 try:
     from openpyxl import Workbook
     from openpyxl.chart import BarChart, LineChart, Reference
+    from openpyxl.comments import Comment
     from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
     from openpyxl.utils import get_column_letter
     HAVE_OPENPYXL = True
@@ -266,6 +267,32 @@ KIND_ICON = {"判断": "🔴", "申請": "📝", "設定": "🔧", "確認": "�
 # 振り分け：仕事の種類（type）ごとの、作る人（assignee）と確かめる人（reviewer）の組み合わせ
 MEMBER_LABEL = {"buka-a": "部下A", "buka-b": "部下B", "dev-a": "部下C", "dev-b": "部下D", "design": "部下E",
                 "analyst": "部下F", "trainer": "部下G"}
+
+
+def role_name(member):
+    """本人に見せる出力用：dev-a などの記号を部下C などの役割名にする（本人の名前など、表に無いものはそのまま。tasks.json の値は変えない）。"""
+    return MEMBER_LABEL.get(member, member) if member else ""
+
+
+# 本人に見せる出力に添える短い言い換え（skills/status/SKILL.md の「ことばの説明」と同じ言い方）
+VELOCITY_LABEL = f"ベロシティ（最近{VELOCITY_DAYS}日の完了量の平均）"   # 「きょうはこのくらいできそう」のめやす
+SPRINT_NOTE = "1週間の計画"
+PDCA_NOTE = "計画・実行・確認・改善のどの段階か"
+HEADER_NOTES = {   # Excel の見出しにつける注釈（見出しの文字は変えない。グラフの凡例などに使うため）
+    "pt": "しごとの大きさをあらわす数字（時間ではなく、ほかのしごととくらべてきめる）",
+    "計画pt": "しごとの大きさをあらわす数字（pt）の、計画した分の合計",
+    "スプリント": "きめた期間（1日または1週間）のしごとを、あらかじめ計画してやりきるひとくぎり。S001 などは1週間の計画の番号",
+    "PDCA": "計画（Plan）→ 実行（Do）→ 確認（Check）→ 改善（Act）のどの段階か",
+}
+
+
+def note_headers(ws, row, ncols):
+    """見出しのセルに、用語の注釈（コメント）を付ける。"""
+    for c in range(1, ncols + 1):
+        cell = ws.cell(row=row, column=c)
+        note = HEADER_NOTES.get(cell.value)
+        if note:
+            cell.comment = Comment(note, "AI")
 TEAM_OFF = set((_cfg.get("team") or {}).get("off", []))
 TEAM_MAX = int((_cfg.get("team") or {}).get("max", 7))
 ASSIGNMENT = {
@@ -774,12 +801,12 @@ def build_dashboard(wb, ctx):
         ("全体の完了予定日" + ("（見積もり待ち等は含まず）" if unscheduled_notes(ctx["open_tasks"]) else ""),
          project_end_base(ctx)),
         (f"📌 {OWNER_CALL}へのお願い", f"{len(owner_requests(tasks))} 件"),
-        ("今日の計画（完了/約束）", f"{tdr['done_planned']:g} / {tdr['committed']:g} pt" if tdr else "未計画"),
+        ("今日の計画（完了/約束。pt＝しごとの大きさ）", f"{tdr['done_planned']:g} / {tdr['committed']:g} pt" if tdr else "未計画"),
         ("残タスク", f"{open_n} 件"),
         ("🔴 期限超過", f"{overdue} 件"),
         ("⚠ 遅延見込み", f"{late} 件"),
-        ("スプリント進捗", f"{sp_rate:.0%}"),
-        ("ベロシティ", f"{ctx['velocity']:.1f} pt/日"),
+        (f"スプリント進捗（今の{SPRINT_NOTE}）", f"{sp_rate:.0%}"),
+        (VELOCITY_LABEL, f"{ctx['velocity']:.1f} pt/日"),
     ]
     for i, (label, value) in enumerate(kpis):
         col = i + 1
@@ -790,22 +817,23 @@ def build_dashboard(wb, ctx):
                        color="C00000" if ("超過" in label and overdue) or ("遅延" in label and late)
                        else ("C55A11" if "お願い" in label and owner_requests(tasks) else "1F4E78"))
         for c in (lc, vc):
-            c.alignment = Alignment(horizontal="center", vertical="center")
+            c.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
             c.fill = PatternFill("solid", fgColor="F2F2F2")
             c.border = BORDER
+    ws.row_dimensions[4].height = 42
     ws.row_dimensions[5].height = 32
     ws.cell(row=6, column=8, value=f"（{ctx['velocity_src']}）").font = Font(name=FONT, size=8, color="808080")
 
     # スプリント
     row = 8
-    section_title(ws, row, "現在のスプリント")
+    section_title(ws, row, f"現在のスプリント（{SPRINT_NOTE}）")
     if sprint:
         info = [
             ("スプリント", sprint["id"]),
             ("ゴール", sprint.get("goal", "")),
             ("期間", f"{fmt_jp(parse_date(sprint['start']))} 〜 {fmt_jp(parse_date(sprint['end']))}"),
             ("進捗", f"{sp_done:g} / {sp_total:g} pt（{sp_rate:.0%}）"),
-            ("PDCAフェーズ", sprint.get("pdca", "")),
+            (f"PDCAフェーズ（{PDCA_NOTE}）", sprint.get("pdca", "")),
         ]
         for i, (k, v) in enumerate(info, start=row + 1):
             ws.cell(row=i, column=1, value=k).font = Font(name=FONT, bold=True, size=10)
@@ -834,7 +862,7 @@ def build_dashboard(wb, ctx):
     else:
         for i, t in enumerate(alerts):
             r = start + i
-            vals = [f"{t['id']} {t['title']}", t.get("department"), t.get("assignee"),
+            vals = [f"{t['id']} {t['title']}", t.get("department"), role_name(t.get("assignee")),
                     fmt_jp(parse_date(t.get("due"))), fc_text(t), t["_flag"], t.get("note", "")]
             for c, v in enumerate(vals, start=1):
                 ws.cell(row=r, column=c, value=v)
@@ -907,9 +935,10 @@ def build_daily_sheet(wb, ctx):
     ws = wb.create_sheet("日次スプリント")
     ws.sheet_view.showGridLines = False
     set_widths(ws, [14, 10, 12, 12, 10, 14, 40, 30, 14])
-    ws["A1"] = "日次スプリント（9時 計画 → すぐ実行 → 17時 振り返り）"
+    ws["A1"] = "日次スプリント（1日ごとの計画。9時 計画 → すぐ実行 → 17時 振り返り）"
     ws["A1"].font = Font(name=FONT, size=14, bold=True, color="1F4E78")
-    ws["A2"] = (f"ベロシティ＝直近{VELOCITY_DAYS}営業日の完了ptの平均。今日の容量の目安：{ctx['velocity']:.1f} pt"
+    ws["A2"] = (f"pt＝しごとの大きさをあらわす数字（時間ではない）。約束pt＝その日に「ここまでやる」と決めた量、完了pt＝終わった量。"
+                f"ベロシティ＝直近{VELOCITY_DAYS}営業日の完了ptの平均で、今日の容量の目安は {ctx['velocity']:.1f} pt"
                 f"（{ctx['velocity_src']}）。{OWNER_CALL}のタスクはポイントに数えません")
     ws["A2"].font = Font(name=FONT, size=9, color="808080")
     headers = ["日付", "容量", "約束pt", "完了pt", "達成率", f"ベロシティ({VELOCITY_DAYS}日平均)", "計画したタスク", "持ち越し・止まった理由", "状態"]
@@ -1101,6 +1130,7 @@ def build_task_list(wb, ctx):
     for c, h in enumerate(headers, start=1):
         ws.cell(row=1, column=c, value=h)
     style_header(ws, 1, len(headers))
+    note_headers(ws, 1, len(headers))
     ws.freeze_panes = "D2"
     tasks = sorted(ctx["tasks"], key=lambda t: (t["status"] == "完了", t.get("_rank") or 999,
                                                  -(parse_date(t.get("done_date")) or date.min).toordinal()))
@@ -1160,7 +1190,7 @@ def build_gantt(wb, ctx):
     for i, t in enumerate(items):
         r = 3 + i
         due = parse_date(t.get("due"))
-        vals = [t["id"], t["title"], t.get("assignee"), t["status"], fmt_jp(due) if due else "―"]
+        vals = [t["id"], t["title"], role_name(t.get("assignee")), t["status"], fmt_jp(due) if due else "―"]
         for c, v in enumerate(vals, start=1):
             ws.cell(row=r, column=c, value=v)
         style_body(ws, r, r, nfix)
@@ -1189,6 +1219,7 @@ def build_sprint_history(wb, ctx):
     for c, h in enumerate(headers, start=1):
         ws.cell(row=1, column=c, value=h)
     style_header(ws, 1, len(headers))
+    note_headers(ws, 1, len(headers))
     for i, s in enumerate(ctx["data"].get("sprints", []), start=2):
         st = [t for t in ctx["tasks"] if t.get("sprint") == s["id"]]
         plan = sum(pt_of(t) for t in st)
@@ -1211,10 +1242,10 @@ def build_board_md(ctx):
     lines = ["# タスクボード", "",
              f"> 自動生成：{ctx['now']}（編集しないでください。正本は `data/tasks.json`）", "",
              f"- **全体の完了予定日**：{project_end_text(ctx)}",
-             f"- **ベロシティ**：{ctx['velocity']:.1f} pt/日（{ctx['velocity_src']}）"]
+             f"- **{VELOCITY_LABEL}**：{ctx['velocity']:.1f} pt/日（{ctx['velocity_src']}。pt＝しごとの大きさ）"]
     lines += [f"- {l}" for l in unscheduled_lines(ctx["open_tasks"])]
     if sprint:
-        lines.append(f"- **現在のスプリント**：{sprint['id']}「{sprint.get('goal', '')}」"
+        lines.append(f"- **現在のスプリント（{SPRINT_NOTE}）**：{sprint['id']}「{sprint.get('goal', '')}」"
                      f"（{fmt_jp(parse_date(sprint['start']))}〜{fmt_jp(parse_date(sprint['end']))}／{sprint.get('pdca', '')}）")
     alerts = [t for t in tasks if t["_flag"] in (FLAG_OVERDUE, FLAG_LATE)]
     if alerts:
@@ -1234,7 +1265,7 @@ def build_board_md(ctx):
         lines += ["| 順位 | ID | タイトル | 部署 | 担当 | 納期 | 完了予定 | 状態 |", "|---|---|---|---|---|---|---|---|"]
         for t in st:
             lines.append(f"| {t.get('_rank') or ''} | {t['id']} | {t['title']} | {t.get('department', '')} | "
-                         f"{t.get('assignee', '')} | {fmt_jp(parse_date(t.get('due')))} | {fc_text(t)} | {t['_flag']} |")
+                         f"{role_name(t.get('assignee'))} | {fmt_jp(parse_date(t.get('due')))} | {fc_text(t)} | {t['_flag']} |")
     return "\n".join(lines) + "\n"
 
 
@@ -1317,10 +1348,10 @@ def auto_run_warning(today, cal):
 
 def summary_text(ctx, limit=10, with_ids=False):
     lines = [f"[{AI_NAME} タスク状況 {fmt(ctx['today'])}] 全体完了予定 {project_end_text(ctx)}"
-             f"／ベロシティ {ctx['velocity']:.1f}pt/日（{ctx['velocity_src']}）"]
+             f"／{VELOCITY_LABEL} {ctx['velocity']:.1f}pt/日（{ctx['velocity_src']}）"]
     for t in ctx["open_tasks"][:limit]:
         due = parse_date(t.get("due"))
-        lines.append(f"  {t['_rank']}. {t['id']} {t['title']} [{t['status']}/{t.get('assignee', '')}] "
+        lines.append(f"  {t['_rank']}. {t['id']} {t['title']} [{t['status']}/{role_name(t.get('assignee'))}] "
                      f"納期 {fmt_jp(due) if due else '指定なし'} → 完了予定 {fc_text(t)} {t['_flag']}")
     if len(ctx["open_tasks"]) > limit:
         lines.append(f"  …ほか {len(ctx['open_tasks']) - limit} 件")
@@ -1490,7 +1521,7 @@ def plan_context(today, cal, ctx):
 
     for t in [t for t in ctx["open_tasks"] if t.get("assignee") != OWNER]:
         b = blocked_by(t)
-        waits = "、".join(f"{d}（{by_id[d].get('assignee')}）" for d in b)
+        waits = "、".join(f"{d}（{role_name(by_id[d].get('assignee'))}）" for d in b)
         note = f" ⛔ 待ち：{waits}" if b else ""
         marks = ("🆕新規 " if t["id"] in new_ids else "") + ("🔁要再見積もり " if t.get("reestimate") else "")
         lines.append(f"- {t['_rank']}. {marks}{t['id']} {t['title']} [{t['status']}] {t.get('points') or '未見積もり'}pt"
@@ -1714,7 +1745,7 @@ def write_excel(ctx):
     try:
         atomic_save(XLSX, lambda tmp: wb.save(tmp))   # 一時ファイルに作ってから置き換える。途中で止まっても、元の Excel は壊れない
     except OSError:   # Excel が開いている（Windows は PermissionError）ほか、保存先に書けないとき。落ちずに、ほかの生成物は書く
-        return "（タスク管理.xlsx を保存できませんでした。Excel を閉じてから、もう一度 /status を実行してください）"
+        return "（タスク管理.xlsx を保存できませんでした。Excel を閉じてから、もう一度 /ai-bunshin:status を実行してください）"
     return ""
 
 
@@ -1923,7 +1954,8 @@ def main():
                              ensure_ascii=False))
             return 0
         print("本人のフォルダ（00_タスク管理/data/tasks.json と 設定/config.json）が見つかりません。"
-              "00_タスク管理 があるフォルダで Claude を開き直してください（または AI_BUNSHIN_HOME にそのフォルダを指定）", file=sys.stderr)
+              "00_タスク管理 があるフォルダを開き直してください"
+              "（デスクトップアプリは「Code」タブでそのフォルダを選び直す。ターミナルはそのフォルダで claude を起動する）", file=sys.stderr)
         return 1
 
     try:
