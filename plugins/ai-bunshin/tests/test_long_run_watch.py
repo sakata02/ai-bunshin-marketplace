@@ -118,7 +118,7 @@ def grandchild_script(name, ignore_term=False):
     script = os.path.join(d, "run.sh")
     # 孫も TERM を無視する形（ignore_term）なら、KILL でしか止まらない
     inner = "sh -c \"trap '' TERM; sleep 120\" &" if ignore_term else "sleep 120 &"
-    open(script, "w").write(f"#!/bin/sh\n{trap}{inner}\necho $! > '{pidf}'\necho partial-output\nwait\n")
+    open(script, "w").write(f"#!/bin/sh\n{trap}{inner}\necho $! > '{pidf}'\necho $$ > '{d}/child.pid'\necho partial-output\nwait\n")
     os.chmod(script, 0o755)
     return script, pidf
 
@@ -168,6 +168,48 @@ def l4_bad_arguments_and_missing_command():
     assert run_limited(["--minutes", "0", "--stdout", out], ["true"]).returncode == 64
     assert run_limited(["--minutes", "-1", "--stdout", out], ["true"]).returncode == 64
     assert run_limited(["--minutes", "1", "--stdout", out], ["/no/such/command"]).returncode == 127
+
+
+def _signal_case(name, sig, ignore_term=False):
+    """外側（run_limited.py）にシグナルを送ると、偽 claude と孫が残らず、一時ファイル（.out.*）も残らない。おとりは残る。"""
+    decoy = start_decoy(name)
+    script, pidf = grandchild_script(name, ignore_term=ignore_term)
+    logs = os.path.join(BASE, name, "logs")
+    os.makedirs(logs, exist_ok=True)
+    out = os.path.join(logs, ".out.abc123")
+    p = subprocess.Popen([sys.executable, LIMITED, "--minutes", "5", "--grace", "1", "--stdout", out, "--", script],
+                         start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    CHILDREN.append(p)
+    gp = pid_from(pidf)
+    child = pid_from(os.path.join(BASE, name, "child.pid"))   # 偽 claude（run.sh）
+    t0 = time.time()
+    os.kill(p.pid, sig)
+    try:
+        rc = p.wait(timeout=15)
+    except subprocess.TimeoutExpired:
+        raise AssertionError("シグナルを受けても終わらない")
+    assert time.time() - t0 < 12, "終わるのが遅い"
+    assert rc == 128 + sig, rc
+    assert wait_dead(gp), "孫のプロセスが残っている"
+    assert wait_dead(child), "偽 claude が残っている"
+    assert not [f for f in os.listdir(logs) if f.startswith(".out.")], "一時ファイル（.out.*）が残っている"
+    assert decoy.poll() is None and alive(decoy.pid), "おとりまで止めた"
+
+
+@case
+def l5_term_stops_the_group_and_cleans_up():
+    _signal_case("l5", signal.SIGTERM)
+
+
+@case
+def l6_hup_and_int_do_the_same():
+    _signal_case("l6a", signal.SIGHUP)
+    _signal_case("l6b", signal.SIGINT)
+
+
+@case
+def l7_term_with_child_ignoring_term_is_killed_after_grace():
+    _signal_case("l7", signal.SIGTERM, ignore_term=True)
 
 
 # ---------- 2. 時間の上限の設定 ----------
@@ -388,6 +430,28 @@ def k4_canary_cli_exit_codes():
 
 
 @case
+def k6_rm_allowed_by_ng_allow_is_still_normal():
+    # 本人が rm を ng_allow で許可していても、見張りは壊れていない（--explain の2行目が「本人の許可する例外（ng_allow）に一致」）
+    for i, pat in enumerate(("^rm ", "rm", ".*", "x", "^rm x$")):
+        root = make_owner(f"k6_{i}", cfg={"ng_allow": [pat]})
+        ok, why = wc.canary(root, REAL_GUARD)
+        assert ok, (pat, why)
+    # 例外の一致以外で rm x が pass なら、今までどおり壊れている判定
+    root = make_owner("k6_none", cfg={"ng_allow": ["^rm "]})
+    for name, body in (("pass", ALL_PASS_GUARD),
+                       ("norule", 'print("判定：pass")\nprint("理由：当たる規則なし")\n'),
+                       ("other", 'print("判定：pass")\nprint("理由：別の理由で通した")\n')):
+        ok, why = wc.canary(root, fake_guard("k6_" + name, body))
+        assert not ok and why, (name, ok, why)
+    # 例外に一致したと答える見張りなら、rm x が pass でも正常（date は pass）
+    allow_guard = ('import sys\nif "rm" in sys.argv[-1]:\n    print("判定：pass")\n'
+                   '    print("理由：本人の許可する例外（ng_allow）に一致（当たった規則：x）")\n'
+                   'else:\n    print("判定：pass")\n    print("理由：当たる規則なし")\n')
+    ok, why = wc.canary(root, fake_guard("k6_allow", allow_guard))
+    assert ok, why
+
+
+@case
 def k5_canary_works_without_locale():
     # launchd のように文字コードを決めない環境でも、日本語の答えを読めて「正常」になる
     root = make_owner("k5")
@@ -486,6 +550,19 @@ def s5_timeout_mark_shown_then_expires_and_clears_per_phase():
     assert wc.read_timeout(auto) is None and wc.session_warnings(root, auto, now, guard=REAL_GUARD) == []
 
 
+@case
+def s6_friday_mark_is_visible_monday_morning_to_afternoon():
+    # 金曜の朝（計画＋実行で約4時間後）に止まった印が、月曜の朝〜夕方でも見える。5日たてば消える（営業日は数えず暦で4日）
+    root = make_owner("s6")
+    auto = os.path.join(root, "scripts", "auto")
+    fri = datetime(2026, 10, 30, 9, 0)
+    wc.mark_timeout(auto, "do", 180, fri)
+    for mon in (datetime(2026, 11, 2, 9, 0), datetime(2026, 11, 2, 12, 0), datetime(2026, 11, 2, 16, 59)):
+        ws = wc.session_warnings(root, auto, mon, guard=REAL_GUARD)
+        assert len(ws) == 1 and "時間の上限で止まりました" in ws[0], (mon, ws)
+    assert wc.session_warnings(root, auto, datetime(2026, 11, 3, 10, 0), guard=REAL_GUARD) == []
+
+
 # ---------- 6. daily_cycle.sh（作り物の claude で通して動かす） ----------
 print("## 6. 自動実行（daily_cycle.sh）")
 CYCLE = os.path.join(SCRIPTS, "auto", "daily_cycle.sh")
@@ -496,6 +573,8 @@ if "--session" in a:
     sys.exit(0)
 mode = os.environ.get("STUB_MODE", "plan")
 if "--plan-context" in a:
+    if mode == "holiday":
+        print("SKIP: 営業日ではない"); sys.exit(0)
     if mode == "do":
         print("OPEN"); sys.exit(0)
     n = os.path.join(os.environ["AI_BUNSHIN_HOME"], "plan_calls")
@@ -503,7 +582,7 @@ if "--plan-context" in a:
     open(n, "w").write(str(c + 1))
     print("OPEN" if c == 0 else "今日の計画は作成済み")
 if "--review-context" in a:
-    print("OPEN")
+    print({"skip": "SKIP: 今日の動きなし", "holiday": "SKIP: 営業日ではない"}.get(mode, "OPEN"))
     print("議事録の保存先: 01_スプリント/S1/daily/" + time.strftime("%Y%m%d") + "_振り返り.md")
 '''
 
@@ -706,6 +785,44 @@ def d8_success_of_same_phase_clears_the_mark():
 
 
 @case
+def d10_holiday_skip_does_not_clear_the_mark():
+    # 印を消すのは、Claude が実際に成功したときだけ。休日の SKIP（営業日ではない）では、成功の記録は書いても印は消さない
+    for phase, mode in (("review", "holiday"), ("plan", "holiday")):
+        c = make_cycle("d10_" + phase, "echo should-not-run")
+        auto = os.path.join(c["home"], "scripts", "auto")
+        wc.mark_timeout(auto, phase, 60)
+        r = run_cycle(c, phase, mode=mode)
+        assert r.returncode == 0, (phase, r.returncode, r.stderr[:200])
+        assert calls_of(c) == [], f"{phase}：休日なのに claude を起動した"
+        assert wc.read_timeout(auto) is not None, f"{phase}：休日の SKIP で印が消えた"
+        assert os.path.exists(os.path.join(auto, f"last_success_{phase}.txt")), "休日の SKIP の成功の記録は今までどおり書く"
+
+
+@case
+def d11_no_activity_skip_keeps_the_mark_and_writes_the_line():
+    # 「今日の動きなし」の分岐でも、今日の時間の上限の印があれば議事録に「時間の上限で止まった」を書く
+    c = make_cycle("d11", "echo should-not-run")
+    auto = os.path.join(c["home"], "scripts", "auto")
+    wc.mark_timeout(auto, "do", 180)
+    r = run_cycle(c, "review", mode="skip")
+    assert r.returncode == 0, (r.returncode, r.stderr[:200])
+    minutes = read(os.path.join(c["home"], "01_スプリント", "S1", "daily", datetime.now().strftime("%Y%m%d") + "_振り返り.md"))
+    assert "開催なし" in minutes and "時間の上限で止まった" in minutes and "180分" in minutes, minutes
+    assert len([ln for ln in minutes.splitlines() if "時間の上限で止まった" in ln]) == 1, minutes
+    assert wc.read_timeout(auto) is not None, "動きなしの SKIP で印が消えた"
+    # 印が無い・昨日以前の印なら、書かない
+    c = make_cycle("d11b", "echo should-not-run")
+    r = run_cycle(c, "review", mode="skip")
+    minutes = read(os.path.join(c["home"], "01_スプリント", "S1", "daily", datetime.now().strftime("%Y%m%d") + "_振り返り.md"))
+    assert "開催なし" in minutes and "時間の上限" not in minutes, minutes
+    c = make_cycle("d11c", "echo should-not-run")
+    wc.mark_timeout(os.path.join(c["home"], "scripts", "auto"), "do", 180, datetime.now() - timedelta(days=1, hours=1))
+    r = run_cycle(c, "review", mode="skip")
+    minutes = read(os.path.join(c["home"], "01_スプリント", "S1", "daily", datetime.now().strftime("%Y%m%d") + "_振り返り.md"))
+    assert "開催なし" in minutes and "時間の上限" not in minutes, minutes
+
+
+@case
 def d9_wait_for_previous_stage_follows_config():
     # 前の段階が動いている（ロックの持ち主が生きている）ときの待ち時間は、同じ設定から出る（review は do の上限）
     c = make_cycle("d9", "echo done", cfg={"auto": {"max_minutes": {"do": 1}}})
@@ -782,6 +899,28 @@ def t5_every_agent_does_not_call_other_agents_and_dev_a_has_the_rest():
     a = text_of("agents", "dev-a.md")
     assert "同じ失敗が2回続いたら3周目に入らず" in a and "`.bak` を残し" in a and "改名（`mv`）" in a and "戻しのコマンド" in a
     assert "最大3周" in a   # 今ある文は消えていない
+
+
+@case
+def t7_broken_watch_asks_the_owner_from_the_start():
+    # 部下も同じ壊れた見張りの下にいて戻せない。最初から本人に1行のコマンドを頼む（「部下に戻させ、戻せなければ」ではない）
+    step8 = [ln for ln in SPRINT.splitlines() if ln.startswith("8. ")][0]
+    rule = [ln for ln in COMMANDER.splitlines() if ln.startswith("- **見張りが壊れて Bash が全部止まったら**")][0]
+    for name, t in (("commander", rule), ("sprint 手順8", step8)):
+        assert "部下も同じ壊れた見張りの下にいて戻せない" in t, name
+        assert "最初から本人に" in t and "`! …`" in t, name
+        assert "戻させ" not in t and "戻せなければ" not in t, name
+        assert "戻しのコマンドは直す前に用意" in t, name
+    assert "／簡単なコマンドも止まる" not in step8     # 「A／B」のあいまいな並べ方をやめた
+    assert "または簡単なコマンドも止まる" in step8
+
+
+@case
+def t8_daily_plan_only_carries_over_after_a_time_limit_stop():
+    plan = text_of("skills", "daily-plan", "SKILL.md")
+    line = [ln for ln in plan.splitlines() if "last_timeout.txt" in ln][0]
+    assert "持ち越し" in line and "始めからやり直さず" in line, line
+    assert "見積もり直す" not in line and "2回続けて" not in line and "範囲を分けてから" not in line, line
 
 
 @case
