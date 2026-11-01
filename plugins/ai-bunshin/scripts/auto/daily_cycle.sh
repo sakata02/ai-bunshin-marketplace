@@ -110,11 +110,16 @@ done
 # 先にトラップを置いてからロックを書くので、ロックを書いたあと・claude の起動前に届いても、ロックは残らない
 LIMITED_PID=""   # 起動中の run_limited の PID（背景で動かして wait する）
 LAUNCHING=0      # 1＝起動の直前から PID を控えるまで（この間に届いたときは $! を使う）
-CUR_OUT=""       # 起動中の run_limited の出力の一時ファイル
+BG_BEFORE=""     # 起動の直前の $!（まだ背景に出していない・前の run_limited の PID のままのときは、使わない）
+CUR_OUT=""       # 起動中の run_limited の出力の一時ファイル（名前を決めたら、ファイルを作る前に控える）
 on_stop() {
   local name=$1 num=$2 pid=$LIMITED_PID
   trap '' TERM HUP INT   # 片づけの最中に重ねて届いても、途中でやめない
-  [ -z "$pid" ] && [ "$LAUNCHING" = 1 ] && pid=$!
+  if [ -z "$pid" ] && [ "$LAUNCHING" = 1 ]; then
+    pid=$!
+    [ "$pid" = "$BG_BEFORE" ] && pid=""   # 起動の直前と同じ＝まだ背景に出していない（0・空・前の PID）
+    case "$pid" in (''|*[!0-9]*|0|1) pid="" ;; esac   # kill に 0 を渡すと自分のグループ全体に届く。数でないもの・0・1 は使わない
+  fi
   if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
     kill -s TERM "$pid" 2>/dev/null   # run_limited は TERM・HUP・INT を同じに扱う（グループを止める → 猶予のあと KILL → 一時ファイルを消す）
     wait "$pid" 2>/dev/null           # 終わるまで待つ（最長でも猶予の2倍ほど）
@@ -197,12 +202,16 @@ run_claude() {
   local skill="$1" out start broken
   LIMIT_MIN=$(python3 "$WATCH" minutes "$ROOT" "$PHASE" 2>/dev/null)
   case "$LIMIT_MIN" in (''|*[!0-9.]*) LIMIT_MIN=60 ;; esac
-  out=$(mktemp "$LOG_DIR/.out.XXXXXX") || { log "一時ファイルを作れませんでした"; exit 1; }
+  # 一時ファイルの名前は自分で決める（mktemp の最中に届くと、名前を控える前にファイルだけ残るため）。名前を控えてから作る。
+  # ロックを持つ実行は1つだけなので、PID で足りる。前に強制終了された実行の残りがあっても、上書きされる
+  out="$LOG_DIR/.out.$$"
   CUR_OUT="$out"
+  : > "$out" || { log "一時ファイルを作れませんでした"; exit 1; }
   start=$(date '+%Y-%m-%d %H:%M:%S')
   log "claude を起動（時間の上限 ${LIMIT_MIN}分）"
   # 背景で動かして wait する（前景だと、シグナルを受けても run_limited と claude が残るため）。
   # 受けたときは on_stop が run_limited を止めて終わるので、ここに戻るのは run_limited が自分で終わったときだけ（STATUS はその終了コード）
+  BG_BEFORE=$!
   LAUNCHING=1
   python3 "$LIMITED" --minutes "$LIMIT_MIN" --stdout "$out" -- claude -p "$skill" \
     --permission-mode acceptEdits \

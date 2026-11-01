@@ -15,6 +15,7 @@ import os
 import signal
 import subprocess
 import sys
+import time
 
 TIMED_OUT = 124
 
@@ -27,13 +28,6 @@ def _killpg(pgid, sig):
 
 
 STOP_SIGNALS = (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)
-
-
-class Stopped(Exception):
-    """外側から TERM・HUP・INT を受けた。"""
-    def __init__(self, signum):
-        super().__init__(signum)
-        self.signum = signum
 
 
 def _stop_group(p, grace):
@@ -51,22 +45,20 @@ def _stop_group(p, grace):
         pass
 
 
+POLL = 0.2   # 待つ間隔（秒）。信号の記録と上限を、このたびに見る
+
+
 def run(cmd, seconds, stdout_path, grace=5.0):
-    state = {"sig": None, "armed": False}
+    """ハンドラは信号の番号を記録するだけ（例外は出さない）。本体は短い間隔で待ちを繰り返し、そのたびに「記録」と「上限」を見る。
+    これで、確認と待ちの間に届いた信号を取りこぼさない（届いても、次の見に行くまでの最大 POLL 秒で気づく）。
+    最初に届いた信号の番号を終了コードに使い、止める処理の途中に届いたものは無視する。"""
+    state = {"sig": None}
 
     def on_signal(signum, frame):
-        # 例外を出すのは、p.wait() で待っている間の最初の1回だけ。2回目以降（daily_cycle.sh が転送した TERM と、グループ全体に届いた TERM が
-        # 続けて届く、など）は記録するだけで、止めている最中や例外の処理の途中を割り込ませない（割り込むと、グループを止めずに落ちる）
         if state["sig"] is None:
             state["sig"] = signum
-        if state["armed"]:
-            state["armed"] = False
-            raise Stopped(signum)
 
     old = {s: signal.signal(s, on_signal) for s in STOP_SIGNALS}
-    got = None
-    rc = None
-    timed_out = False
     try:
         with open(stdout_path, "wb") as out:
             try:
@@ -74,29 +66,31 @@ def run(cmd, seconds, stdout_path, grace=5.0):
             except OSError as e:
                 print(f"起動できませんでした：{e}", file=sys.stderr)
                 return 127
-            try:
+            deadline = time.monotonic() + seconds
+            rc = None
+            stop = None   # "signal" か "timeout"
+            while True:
+                if state["sig"] is not None:   # 起動する前に届いたものも、ここで見つかる
+                    stop = "signal"
+                    break
+                remain = deadline - time.monotonic()
+                if remain <= 0:
+                    stop = "timeout"
+                    break
                 try:
-                    if state["sig"] is not None:   # 起動する前に届いていた
-                        raise Stopped(state["sig"])
-                    state["armed"] = True
-                    rc = p.wait(timeout=seconds)
+                    rc = p.wait(timeout=min(POLL, remain))
+                    break
                 except subprocess.TimeoutExpired:
-                    timed_out = True
-                finally:
-                    state["armed"] = False
-            except Stopped as e:   # 待っている間、または上の except・finally の途中で届いた
-                got = e.signum
-            if got is not None or timed_out:
-                for s in STOP_SIGNALS:        # 止めている間に重ねて届いても、途中でやめない
-                    signal.signal(s, signal.SIG_IGN)
+                    continue
+            if stop is not None:
                 _stop_group(p, grace)
-                if got is not None:
+                if stop == "signal":
                     try:
                         os.unlink(stdout_path)   # 止められた実行の一時ファイルは片付ける
                     except OSError:
                         pass
-                    return 128 + got
-                rc = TIMED_OUT
+                    return 128 + state["sig"]
+                return TIMED_OUT
     finally:
         for s, h in old.items():
             signal.signal(s, h)
