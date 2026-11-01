@@ -49,7 +49,10 @@ cd "$ROOT" || exit 1
 mark_ok() {
   local f="$ROOT/scripts/auto/last_success_$1.txt"
   date '+%Y-%m-%d %H:%M' > "$f.tmp.$$" && mv -f "$f.tmp.$$" "$f"
-  python3 "$WATCH" clear-timeout "$ROOT/scripts/auto" "$1" 2>/dev/null   # 同じ段階が後で成功したら「時間の上限で止めた」印を消す（T095）
+}
+# 「時間の上限で止めた」印を消すのは、Claude が実際に成功したときだけ（休日・済み・動きなしの SKIP では消さない。T095）
+clear_mark() {
+  python3 "$WATCH" clear-timeout "$ROOT/scripts/auto" "$1" 2>/dev/null
 }
 log() { echo "[$(date '+%H:%M:%S') $PHASE] $*" >> "$LOG"; }
 notify() {
@@ -137,6 +140,9 @@ case "$PHASE:$HEAD" in
     OUT=$(echo "$CONTEXT" | sed -n 's/^議事録の保存先: //p')
     mkdir -p "$(dirname "$OUT")"
     echo "# $(date +%Y-%m-%d) 振り返り — 開催なし（${HEAD#SKIP: }）" > "$OUT"
+    # 今日、自動実行が時間の上限で止まっていたら、動きなしの日でもその事実を議事録に残す（印は消さない）
+    STOPPED_LINE=$(python3 "$WATCH" timeout-line "$ROOT/scripts/auto" 2>/dev/null)
+    [ -n "$STOPPED_LINE" ] && echo "$STOPPED_LINE" >> "$OUT"
     notify "今日は動きがなかったので、振り返りは開きませんでした"
     mark_ok review
     exit 0 ;;
@@ -211,6 +217,7 @@ fi
 
 if [ $STATUS -eq 0 ] && [ -n "$RESULT" ]; then
   mark_ok "$PHASE"
+  clear_mark "$PHASE"
   notify "$(echo "$RESULT" | tail -3 | tr '\n' ' ')"
 else
   notify "${LABEL}に失敗しました（scripts/auto/logs/$TODAY.log）"
@@ -232,6 +239,7 @@ if [ "$PHASE" = "plan" ]; then
   run_claude "/ai-bunshin:daily-do"   # 上限（実行の分）はここで決め直す。計画で止まったら、ここには来ない
   if [ $STATUS -eq 0 ] && [ -n "$RESULT" ]; then
     mark_ok do
+    clear_mark do
     notify "$(echo "$RESULT" | tail -3 | tr '\n' ' ')"
   else
     notify "実行に失敗しました（scripts/auto/logs/$TODAY.log）"

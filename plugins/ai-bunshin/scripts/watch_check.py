@@ -13,7 +13,8 @@ ng_guard.py の判定は変えない。ここは読むだけ（印のファイ�
   watch_check.py wait-minutes <本人のフォルダ> <段階>  … 前の段階を待つ分（整数）。review は do の上限、ほかは plan の上限
   watch_check.py broken-since <本人のフォルダ> "YYYY-MM-DD HH:MM:SS"  … その時刻以降の「読めませんでした」の数
   watch_check.py mark-timeout <scripts/auto> <段階> <分>
-  watch_check.py clear-timeout <scripts/auto> <段階>  … 同じ段階の印だけ消す
+  watch_check.py clear-timeout <scripts/auto> <段階>  … 同じ段階の印だけ消す（Claude が実際に成功したときだけ呼ぶ）
+  watch_check.py timeout-line <scripts/auto>          … 今日の印があれば、議事録に書く1行を出す（無ければ空）
 """
 import json
 import math
@@ -31,8 +32,9 @@ DEFAULT_MINUTES = {"plan": 60, "do": 180, "review": 60}   # 計画 60分・実�
 BROKEN_THRESHOLD = 3          # 「見張りの入力を読めませんでした」がこの回数以上で知らせる
 BROKEN_WINDOW_HOURS = 24      # 起動時のまとめが数える期間
 TIMEOUT_MARK = "last_timeout.txt"
-TIMEOUT_MARK_DAYS = 3         # 印がこの日数より古ければ起動時のまとめには出さない
+TIMEOUT_MARK_DAYS = 4         # 印がこの日数より古ければ起動時のまとめには出さない（営業日は数えず暦で。金曜の印が月曜の夕方まで見える長さ）
 CANARY_SECONDS = 20
+ALLOW_REASON = "理由：本人の許可する例外（ng_allow）に一致"   # ng_guard.py --explain の2行目（例外で通ったとき）
 
 
 # ---------- 見張りの自己点検（canary） ----------
@@ -40,6 +42,7 @@ CANARY_SECONDS = 20
 def canary(root, guard=None, timeout=CANARY_SECONDS):
     """今その場で動いている見張り（guard。既定はこのファイルと同じ場所の ng_guard.py）を点検する。
     本人のフォルダ（root）の中で、"date" が pass・"rm x" が deny でなければ壊れているとみなす。
+    ただし本人が rm を ng_allow で許可していて、rm x が「本人の許可する例外（ng_allow）に一致」で pass のときは正常。
     返り値：(正常か, 理由の1行)。"""
     guard = Path(guard) if guard else GUARD
     if not guard.is_file():
@@ -58,8 +61,12 @@ def canary(root, guard=None, timeout=CANARY_SECONDS):
             return False, f"見張りを動かせません（{e.__class__.__name__}）"
         out = (r.stdout or b"").decode("utf-8", errors="replace")
         err = (r.stderr or b"").decode("utf-8", errors="replace")
-        first = out.splitlines()[0].strip() if out.strip() else ""
-        if r.returncode != 0 or first != f"判定：{want}":
+        lines = [ln.strip() for ln in out.splitlines()]
+        first = lines[0] if lines else ""
+        second = lines[1] if len(lines) > 1 else ""
+        # 本人が rm を ng_allow で許可しているときは、rm x が pass でも壊れていない（2行目が例外の一致を言っているときだけ）
+        allowed = command == "rm x" and first == "判定：pass" and second.startswith(ALLOW_REASON)
+        if r.returncode != 0 or (first != f"判定：{want}" and not allowed):
             tail = (err.strip().splitlines() or [""])[-1][:80]
             return False, f"点検「{command}」で {want} を返しませんでした（終了コード {r.returncode}）" + (f"：{tail}" if tail else "")
     return True, "正常"
@@ -171,6 +178,19 @@ def read_timeout(auto_dir):
         return None
 
 
+PHASE_NAMES = {"plan": "計画", "do": "実行", "review": "振り返り"}
+
+
+def timeout_line_today(auto_dir, now=None):
+    """今日の印があるときだけ、議事録に書く1行を返す（無い・昨日以前・壊れていれば空）。『今日の動きなし』の日でも止まった事実を残すため。"""
+    now = now or datetime.now()
+    m = read_timeout(auto_dir)
+    if not m or m[0].date() != now.date():
+        return ""
+    return (f"時間の上限で止まった（{PHASE_NAMES.get(m[1], m[1])}・{m[2]}分・{m[0].strftime('%H:%M')}）。"
+            "作業中のタスクと実行中の daily_sprints が残っている")
+
+
 def clear_timeout(auto_dir, phase):
     """同じ段階の印だけ消す（その段階が後で成功したとき）。"""
     m = read_timeout(auto_dir)
@@ -225,6 +245,9 @@ def main(argv):
             return 0
         if cmd == "mark-timeout" and len(args) == 3:
             mark_timeout(args[0], args[1], float(args[2]))
+            return 0
+        if cmd == "timeout-line" and len(args) == 1:
+            print(timeout_line_today(args[0]))
             return 0
         if cmd == "clear-timeout" and len(args) == 2:
             clear_timeout(args[0], args[1])
