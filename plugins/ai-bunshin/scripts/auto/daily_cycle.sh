@@ -105,8 +105,29 @@ while [ -f "$LOCK" ]; do
   sleep 60
   WAITED=$((WAITED + 1))
 done
-write_lock
+# ここから先は、ロックを持つ。TERM・HUP・INT（launchd の停止・端末を閉じる・Ctrl-C）を受けたら、起動中の run_limited（claude とその孫）を止めて、
+# ロックと一時ファイルを片づけ、ログに1行残して 128+シグナル番号で終わる（T095。mark_ok も印の書き込みもしない）。
+# 先にトラップを置いてからロックを書くので、ロックを書いたあと・claude の起動前に届いても、ロックは残らない
+LIMITED_PID=""   # 起動中の run_limited の PID（背景で動かして wait する）
+LAUNCHING=0      # 1＝起動の直前から PID を控えるまで（この間に届いたときは $! を使う）
+CUR_OUT=""       # 起動中の run_limited の出力の一時ファイル
+on_stop() {
+  local name=$1 num=$2 pid=$LIMITED_PID
+  trap '' TERM HUP INT   # 片づけの最中に重ねて届いても、途中でやめない
+  [ -z "$pid" ] && [ "$LAUNCHING" = 1 ] && pid=$!
+  if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+    kill -s TERM "$pid" 2>/dev/null   # run_limited は TERM・HUP・INT を同じに扱う（グループを止める → 猶予のあと KILL → 一時ファイルを消す）
+    wait "$pid" 2>/dev/null           # 終わるまで待つ（最長でも猶予の2倍ほど）
+  fi
+  [ -n "$CUR_OUT" ] && rm -f "$CUR_OUT"
+  log "シグナル（$name）を受けて止めました。claude を止め、ロックと一時ファイルを片づけました"
+  exit $((128 + num))
+}
 trap 'rm -f "$LOCK"' EXIT
+trap 'on_stop TERM 15' TERM
+trap 'on_stop HUP 1' HUP
+trap 'on_stop INT 2' INT
+write_lock
 
 # 待っている間に状況が変わることがあるので、もう一度確かめる
 if [ $WAITED -gt 0 ]; then
@@ -177,18 +198,27 @@ run_claude() {
   LIMIT_MIN=$(python3 "$WATCH" minutes "$ROOT" "$PHASE" 2>/dev/null)
   case "$LIMIT_MIN" in (''|*[!0-9.]*) LIMIT_MIN=60 ;; esac
   out=$(mktemp "$LOG_DIR/.out.XXXXXX") || { log "一時ファイルを作れませんでした"; exit 1; }
+  CUR_OUT="$out"
   start=$(date '+%Y-%m-%d %H:%M:%S')
   log "claude を起動（時間の上限 ${LIMIT_MIN}分）"
+  # 背景で動かして wait する（前景だと、シグナルを受けても run_limited と claude が残るため）。
+  # 受けたときは on_stop が run_limited を止めて終わるので、ここに戻るのは run_limited が自分で終わったときだけ（STATUS はその終了コード）
+  LAUNCHING=1
   python3 "$LIMITED" --minutes "$LIMIT_MIN" --stdout "$out" -- claude -p "$skill" \
     --permission-mode acceptEdits \
     --model opus \
     --allowedTools "$TOOLS" \
     --disallowedTools "$DENY" \
     "${ADD_DIR_ARGS[@]}" \
-    < /dev/null 2>> "$LOG"
+    < /dev/null 2>> "$LOG" &
+  LIMITED_PID=$!
+  LAUNCHING=0
+  wait "$LIMITED_PID"
   STATUS=$?
+  LIMITED_PID=""
   RESULT=$(cat "$out" 2>/dev/null)
   rm -f "$out"
+  CUR_OUT=""
   echo "$RESULT" >> "$LOG"
   log "終了 (exit=$STATUS)"
   # 補助：この実行の間に「見張りの入力を読めませんでした」が3回以上あれば、ログと通知に書く
