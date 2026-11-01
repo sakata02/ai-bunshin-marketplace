@@ -4,6 +4,9 @@
 - py だけの環境では -3 を付けて起動する
 - 日本語・スペースの入った引数とパス、hook の標準入力（JSON）、終了コード 2 と標準出力がそのまま届く
 - 標準出力が cp932 でも、絵文字の出力で落ちない（入口の .py が自分で UTF-8 にする）
+- 標準出力が CRLF になる偽物の python3 でも Python 3 と確かめる／確かめる python が標準入力を読んでも hook の JSON が届く／選ぶ順番
+- cp932 の指定で lock_check・setup_settings・watch_check・run_limited の日本語が UTF-8 で出る／ng_guard が絵文字入りの安全なコマンドを通す
+- リポジトリ直下の .gitattributes に *.sh text eol=lf がある
 - 直す前の hooks.json の形（`$(command -v python3 || …)`）では何が起きるかも並べて確かめる
 作り物の python3・python・py は一時フォルダの PATH に作る（本物の PATH は使わない）。
 実行：python3 tests/test_run_py.py（失敗があれば終了コード1）"""
@@ -41,6 +44,12 @@ def write_exe(path, text):
 REAL = sys.executable
 
 
+CRLF_WRAP = os.path.join(BASE, "crlf_wrap.py")   # 渡されたコマンドを動かし、標準出力の LF を CRLF にして返す
+with open(CRLF_WRAP, "w", encoding="utf-8") as _f:
+    _f.write("import subprocess, sys\nr = subprocess.run(sys.argv[1:], stdin=sys.stdin, capture_output=True)\n"
+             "sys.stdout.buffer.write(r.stdout.replace(b'\\n', b'\\r\\n'))\nsys.stderr.buffer.write(r.stderr)\nsys.exit(r.returncode)\n")
+
+
 def make_bin(name, **fakes):
     """一時フォルダの PATH を作る。bash だけ本物。fakes: python3= / python= / py= に 'real'（本物へ中継）・'broken'（動かない）・'py2'（Python 2 のふり）・'pylauncher'（-3 を取って本物へ）"""
     d = os.path.join(BASE, name)
@@ -56,6 +65,11 @@ def make_bin(name, **fakes):
             write_exe(p, "#!/bin/sh\nexit 0\n")
         elif kind == "py2":      # Python 2 のふり（-c の中身は見ずに 2 と答える）
             write_exe(p, '#!/bin/sh\nif [ "$1" = "-c" ]; then echo 2; exit 0; fi\necho "Python 2 では動きません" >&2\nexit 1\n')
+        elif kind == "crlf":     # Windows の Python 3 に近い偽物：-c のコードはそのまま動かし、標準出力の改行を CRLF にする（print は 3 の後ろに CR LF が付き、write は付かない）
+            write_exe(p, f'#!/bin/sh\nif [ "$1" = "-c" ]; then PICKED={cmd} exec "{REAL}" "{CRLF_WRAP}" "{REAL}" "$@"; fi\n'
+                         f'PICKED={cmd} exec "{REAL}" "$@"\n')
+        elif kind == "eater":    # -c のとき標準入力を最後まで読んで捨てる偽物（</dev/null が無いと hook の JSON を食べる）
+            write_exe(p, f'#!/bin/sh\nif [ "$1" = "-c" ]; then "{REAL}" -c "import sys; sys.stdin.buffer.read()"; fi\nPICKED={cmd} exec "{REAL}" "$@"\n')   # PATH に cat は無いので、本物の Python で読む
         elif kind == "pylauncher":   # Windows の py：-3 が付いたときだけ Python 3。付かないと Python 2 のふり
             write_exe(p, f'#!/bin/sh\nif [ "$1" = "-3" ]; then shift; PICKED=py3flag exec "{REAL}" "$@"; fi\n'
                          f'echo "py に -3 が付いていません" >&2\nif [ "$1" = "-c" ]; then echo 2; fi\nexit 1\n')
@@ -225,19 +239,61 @@ r = run_cp932(GUARD, [], stdin=stdin)
 check("7 ng_guard.py：cp932 指定でも UTF-8 の JSON（絵文字入り）を読んで止める", b'"deny"' in r.stdout and r.returncode == 0, (r.returncode, r.stdout[:300], r.stderr[-200:]))
 r = run_cp932(GUARD, ["--explain", "rm 😀"])
 check("7 ng_guard.py --explain：cp932 指定でも日本語の出力で落ちない", r.returncode == 0 and "判定：deny".encode() in r.stdout, (r.stdout[:200], r.stderr[-200:]))
-# ほかの入口：UTF-8 にする1行が入っている（動かして確かめにくい入口は文面で確かめる）
-for name in ("update_dashboard.py", "ng_guard.py", "lock_check.py", "watch_check.py", "calendar_today.py", "setup_settings.py", os.path.join("auto", "run_limited.py")):
-    src = open(os.path.join(SCRIPTS, name), encoding="utf-8").read()
-    tail = src.split('if __name__ == "__main__":')[-1]
-    check(f"7 {name}：入口で標準出力・標準エラーを UTF-8 にする（reconfigure。無い環境でも落ちない形）",
-          "reconfigure" in tail and "except" in tail, tail[:300])
+# ng_guard.py：安全なコマンド（絵文字・日本語入り）が cp932 指定でも通る（標準入力を UTF-8 で読めないと、読めない入力として止めてしまう）
+stdin = json.dumps({"tool_name": "Bash", "tool_input": {"command": "echo 😀 日本語"}, "cwd": R}, ensure_ascii=False).encode("utf-8")
+r = run_cp932(GUARD, [], stdin=stdin)
+check("7 ng_guard.py：cp932 指定でも、絵文字・日本語入りの安全なコマンドは止まらずに通る",
+      r.returncode == 0 and b'"deny"' not in r.stdout and b"Traceback" not in r.stderr, (r.returncode, r.stdout[:300], r.stderr[-200:]))
+# ほかの入口：cp932 の指定で動かし、日本語が UTF-8 で出るかを見る（文面ではなく、動きで確かめる）
+EMPTY = os.path.join(BASE, "空のフォルダ")
+os.makedirs(EMPTY)
+r = run_cp932(os.path.join(SCRIPTS, "lock_check.py"), ["--root", EMPTY])
+check("7 lock_check.py：cp932 指定でも、日本語が UTF-8 で出る", r.returncode == 0 and r.stdout.decode("utf-8", "replace").strip() == "OPEN: ロックなし", (r.returncode, r.stdout, r.stderr[-200:]))
+r = run_cp932(os.path.join(SCRIPTS, "setup_settings.py"), [R])   # R は設定/config.json がある＝セットアップ済み。何も書かずに日本語の案内を出す
+check("7 setup_settings.py：cp932 指定でも、日本語の案内が UTF-8 で出る", r.returncode == 1 and "セットアップ済みのフォルダなので何もしません" in r.stderr.decode("utf-8", "replace"), (r.returncode, r.stderr[-300:]))
 r = run_cp932(os.path.join(SCRIPTS, "watch_check.py"), [])
-check("7 watch_check.py：使い方（日本語）を cp932 指定でも出せる", "Traceback" not in r.stderr.decode("utf-8", "replace"), r.stderr[-300:])
+check("7 watch_check.py：cp932 指定でも、使い方の日本語が UTF-8 で出る", r.returncode == 64 and "長引き・止まりに気づくための小さな道具" in r.stderr.decode("utf-8", "replace"), (r.returncode, r.stderr[:200]))
+r = run_cp932(os.path.join(SCRIPTS, "auto", "run_limited.py"), ["--minutes", "0", "--stdout", os.path.join(BASE, "rl.out"), "--", "x"])
+check("7 run_limited.py：cp932 指定でも、使い方の日本語が UTF-8 で出る", r.returncode == 64 and "使い方：run_limited.py" in r.stderr.decode("utf-8", "replace"), (r.returncode, r.stderr[-300:]))
 CAL = os.path.join(SCRIPTS, "calendar_today.py")
 ics = os.path.join(BASE, "x.ics")
 open(ics, "w", encoding="utf-8").write("BEGIN:VCALENDAR\nBEGIN:VEVENT\nDTSTART;VALUE=DATE:20261104\nSUMMARY:会議😀\nEND:VEVENT\nEND:VCALENDAR\n")
 r = run_cp932(CAL, [ics, "2026-11-04"])
 check("7 calendar_today.py：絵文字の件名を cp932 指定でも出せる", r.returncode == 0 and "😀".encode("utf-8") in r.stdout, (r.returncode, r.stderr[-300:]))
+
+# --- 10. Windows の Python に近い偽物（改行が CRLF）でも Python 3 と確かめられる ---
+d10 = make_bin("t10", python3="crlf")
+new = sh(NEW_CMD, d10)
+check("10 標準出力が CRLF になる python3 でも Python 3 と確かめて、起動する", new.returncode == 0 and j(new).get("picked") == "python3" and j(new).get("major") == 3, new.stderr)
+d10b = make_bin("t10b", python3="broken", python="crlf")
+new = sh(NEW_CMD, d10b)
+check("10 python3 が偽物で、python が CRLF の Python 3 のとき：python に進んで起動する", new.returncode == 0 and j(new).get("picked") == "python" and j(new).get("major") == 3, new.stderr)
+check("10 （確認）偽物の素の出力は CRLF になっている（改行を出す print で確かめると別物になる）",
+      subprocess.run([os.path.join(d10, "python3"), "-c", "print(3)"], capture_output=True).stdout == b"3\r\n"
+      and subprocess.run([os.path.join(d10, "python3"), "-c", "import sys; sys.stdout.write('3')"], capture_output=True).stdout == b"3")
+
+# --- 11. 確かめる python が標準入力を読んでも、hook の JSON は後ろの Python に届く（</dev/null） ---
+d11 = make_bin("t11", python3="eater")
+payload = json.dumps({"tool_name": "Bash", "tool_input": {"command": "echo 日本語 😀"}}, ensure_ascii=False)
+new = sh(NEW_CMD, d11, stdin=payload.encode("utf-8"))
+check("11 確かめる python が標準入力を読む偽物でも、hook の JSON が欠けずに届く", new.returncode == 0 and j(new).get("stdin") == payload, new.stdout + new.stderr)
+
+# --- 12. 選ぶ順番：python3 → python → py -3 ---
+d12 = make_bin("t12", python3="real", python="real", py="pylauncher")
+check("12 全部動くとき、python3 が選ばれる", j(sh(NEW_CMD, d12)).get("picked") == "python3", sh(NEW_CMD, d12).stdout)
+d12b = make_bin("t12b", python3="broken", python="real", py="pylauncher")
+check("12 python3 が動かず python と py -3 が動くとき、python が選ばれる（py -3 が先にならない）", j(sh(NEW_CMD, d12b)).get("picked") == "python", sh(NEW_CMD, d12b).stdout)
+d12c = make_bin("t12c", python="real", py="pylauncher")
+check("12 python3 が無く python と py -3 があるとき、python が選ばれる", j(sh(NEW_CMD, d12c)).get("picked") == "python", sh(NEW_CMD, d12c).stdout)
+
+# --- 13. 改行コード：Windows で checkout しても *.sh が CRLF にならない ---
+ROOT = os.path.abspath(os.path.join(PLUGIN, "..", ".."))
+if os.path.isdir(os.path.join(ROOT, ".claude-plugin")):   # リポジトリの中で動かしているときだけ（インストールされたコピーには無い）
+    ga = os.path.join(ROOT, ".gitattributes")
+    lines = [l.split("#")[0].split() for l in open(ga, encoding="utf-8").read().splitlines()] if os.path.exists(ga) else []
+    check("13 .gitattributes：*.sh は LF（text eol=lf）で取り出す", any(l[:1] == ["*.sh"] and "text" in l and "eol=lf" in l for l in lines), lines)
+else:
+    note("13 .gitattributes：リポジトリの外なので確かめない")
 
 # --- 9. Mac の動きが変わらない：実物の python3 で、フックの形が今までと同じ結果 ---
 real_bin = make_bin("t9", python3="real")

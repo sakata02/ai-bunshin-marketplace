@@ -9,8 +9,9 @@
 # 見つからないとき：標準エラーに案内を書いて 127 で終わる（hook では 2 は「止める」の意味なので、2 は返さない）
 
 # Python 3 か確かめる（標準入力を読ませない：hook の JSON を食べないように /dev/null にする）
+# 改行を出さない：Windows の Python は print で "3\r\n" を出し、$(…) は \n だけを落とすので "3\r" が残って "3" と一致しない
 is_py3() {
-    [ "$("$@" -c 'import sys; print(sys.version_info[0])' </dev/null 2>/dev/null)" = "3" ]
+    [ "$("$@" -c 'import sys; sys.stdout.write(str(sys.version_info[0]))' </dev/null 2>/dev/null)" = "3" ]
 }
 
 if is_py3 python3; then
