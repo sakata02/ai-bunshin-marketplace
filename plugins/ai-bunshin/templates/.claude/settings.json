@@ -1,0 +1,38 @@
+{
+  "permissions": {
+    "deny": [
+      "Bash(rm:*)",
+      "Bash(rmdir:*)",
+      "Bash(trash:*)",
+      "Bash(unlink:*)",
+      "Bash(shred:*)",
+      "Bash(kill:*)",
+      "Bash(pkill:*)",
+      "Bash(killall:*)",
+      "Bash(sudo:*)",
+      "Bash(chmod:*)",
+      "Bash(chown:*)",
+      "Bash(git push:*)",
+      "Bash(git reset --hard:*)",
+      "Bash(git rebase:*)",
+      "Bash(git clean:*)",
+      "Bash(curl:*)",
+      "Bash(wget:*)",
+      "Bash(scp:*)",
+      "Bash(rsync:*)",
+      "Bash(ssh:*)",
+      "Bash(sftp:*)",
+      "Bash(launchctl:*)",
+      "Bash(defaults write:*)",
+      "Bash(crontab:*)",
+      "Bash(osascript:*)",
+      "Bash(find * -delete*)",
+      "Bash(xargs rm:*)",
+      "Edit(.claude/settings.json)",
+      "Edit(.claude/settings.local.json)"
+    ]
+  },
+  "enabledPlugins": {
+    "ai-bunshin@ai-bunshin-marketplace": true
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "name": "ai-bunshin-marketplace",
+  "description": "AI分身（ai-bunshin）の配布元。オープラン株式会社（非公式・β版・MIT）",
+  "owner": {
+    "name": "オープラン株式会社"
+  },
+  "plugins": [
+    {
+      "name": "ai-bunshin",
+      "source": "./plugins/ai-bunshin",
+      "description": "本人の業務を代行する AI 分身"
+    }
+  ]
+}
