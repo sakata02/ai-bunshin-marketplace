@@ -136,7 +136,7 @@ def minutes_for(root, phase):
     でも、全段階共通の数でもよい。0・負・文字・真偽・無限・config が読めないときは既定（60／180／60）。"""
     default = DEFAULT_MINUTES.get(phase, 60)
     try:
-        cfg = json.loads((Path(root) / "設定" / "config.json").read_text(encoding="utf-8"))
+        cfg = json.loads((Path(root) / "設定" / "config.json").read_text(encoding="utf-8-sig"))   # BOM 付き（メモ帳）でも読む
         mm = (cfg.get("auto") or {}).get("max_minutes")
     except (OSError, ValueError, AttributeError, UnicodeDecodeError):
         return default

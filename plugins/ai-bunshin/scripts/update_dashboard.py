@@ -6,6 +6,7 @@
   python3 scripts/update_dashboard.py --hook     # Claude Code の hook から呼ぶ（stdin の JSON を判定）
   python3 scripts/update_dashboard.py --session  # SessionStart hook 用
   python3 scripts/update_dashboard.py --today 2026-11-05  # 日付を指定して試算
+  python3 scripts/update_dashboard.py --today 2026-11-05 --now 10:30  # 時刻も固定する（同じ入力から同じ出力。テスト・試算用）
   python3 scripts/update_dashboard.py --plan-context     # 9時のプランニングの材料（1行目 OPEN/SKIP）
   python3 scripts/update_dashboard.py --review-context   # 17時の振り返り会議の材料（1行目 OPEN/SKIP）
   python3 scripts/update_dashboard.py --task T001 T002    # 指定のタスクだけを JSON で出す（読むだけ。何も書かない）
@@ -35,7 +36,9 @@ except ImportError:
     HAVE_OPENPYXL = False
 
 NO_OPENPYXL_NOTE = ("Excel（タスク管理.xlsx）を作る部品（openpyxl）が入っていないため、Excel の更新を飛ばしました。"
-                    "入れるには：`python3 -m pip install --user openpyxl`（Windows は `py -3 -m pip install --user openpyxl`）。"
+                    "入れるには：`python3 -m pip install --user openpyxl`"
+                    "（Windows で `python3` が動かないときは `python -m pip install --user openpyxl`、それも動かなければ"
+                    " `py -3 -m pip install --user openpyxl` の順。hook が Python を探す順番と同じ）。"
                     "タスクボード.md とお願いの一覧は更新しています。"
                     "入れるのは本人（AI は自分で入れない。本人に `! …` の形で打ってもらう）。入れても直らないときは、そのエラーを AI に伝えてもらう")
 
@@ -87,9 +90,76 @@ def setup_pending():
     return False
 
 
+class BadFile(ValueError):
+    """設定ファイルやタスク表が読めない・形が違う。メッセージは本人に見せる日本語（英語の内部エラーは入れない）。"""
+
+
+def load_json_file(path, label):
+    """JSON のファイルを読む。メモ帳が付ける BOM（先頭の目に見えない印）は無視する（utf-8-sig）。
+    読めない・空・壊れているときは、日本語の案内を持つ BadFile にする。"""
+    try:
+        text = Path(path).read_text(encoding="utf-8-sig")
+    except OSError as e:
+        raise BadFile(f"{label} を読めませんでした（{type(e).__name__}）。ファイルがあるか、ほかのアプリで開かれていないか確かめてください")
+    except UnicodeDecodeError:
+        raise BadFile(f"{label} の文字コードが UTF-8 ではありません。メモ帳なら「名前を付けて保存」で文字コードを UTF-8 にして保存し直してください")
+    return parse_json_text(text, label)
+
+
+def parse_json_text(text, label):
+    if text.startswith("﻿"):
+        text = text[1:]
+    if not text.strip():
+        raise BadFile(f"{label} が空です。中身を入れ直してください")
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as e:
+        raise BadFile(f"{label} を JSON として読めません（{e.lineno}行目 {e.colno}文字目の近く）。"
+                      "カンマや引用符の抜け、最後の項目の後ろの余分なカンマ、全角の記号がないか確かめてください。"
+                      "壊れたファイルは書き換えていません")
+
+
+def check_config(cfg):
+    """config.json の形の問題（使うところで落ちるもの）を日本語の一覧にする。問題がなければ空。"""
+    problems = []
+    for key in ("owner", "owner_call", "ai_name"):
+        if key in cfg and not isinstance(cfg[key], str):
+            problems.append(f"{key} は文字で書いてください")
+    if "departments" in cfg and not (isinstance(cfg["departments"], list)
+                                     and all(isinstance(x, str) for x in cfg["departments"])):
+        problems.append("departments は [\"総務\", \"技術開発部\"] のように、文字の一覧にしてください")
+    team = cfg.get("team")
+    if team is not None:
+        if not isinstance(team, dict):
+            problems.append("team は { } の形にしてください")
+        else:
+            if "off" in team and not (isinstance(team["off"], list) and all(isinstance(x, str) for x in team["off"])):
+                problems.append("team の off は、文字の一覧にしてください")
+            if "max" in team and (isinstance(team["max"], bool) or not isinstance(team["max"], (int, float))
+                                  or not float(team["max"]).is_integer()):
+                problems.append("team の max は整数にしてください")
+    return problems
+
+
+def load_config(path):
+    """(設定の辞書, エラーの案内)。読めないときは ({}, 案内)。呼び出し側（main）が案内を出して止まる（既定値のまま書き出さない）。"""
+    if not Path(path).exists():
+        return {}, None
+    try:
+        cfg = load_json_file(path, "設定/config.json")
+    except BadFile as e:
+        return {}, str(e)
+    if not isinstance(cfg, dict):
+        return {}, "設定/config.json は { } で始まる形にしてください（今は別の形です）。壊れたファイルは書き換えていません"
+    problems = check_config(cfg)
+    if problems:
+        return {}, "設定/config.json に問題があります：" + "／".join(problems) + "。壊れたファイルは書き換えていません"
+    return cfg, None
+
+
 ROOT = find_root() or Path(os.getcwd()).resolve()
 CONFIG_JSON = ROOT / "設定" / "config.json"
-_cfg = json.loads(CONFIG_JSON.read_text(encoding="utf-8")) if CONFIG_JSON.exists() else {}
+_cfg, CONFIG_ERROR = load_config(CONFIG_JSON)
 OWNER = _cfg.get("owner", "本人")                 # tasks.json の assignee に入る本人の名前
 OWNER_CALL = _cfg.get("owner_call", OWNER + "さん")  # 文章での呼び方
 AI_NAME = _cfg.get("ai_name", "AI")
@@ -259,6 +329,16 @@ EXTRA_FROM_DAY = 4   # 追加でタスクを取ってよいのは、計画のあ
 EXTRA_POINTS = 4     # 追加で取ってよい量：約束＋4pt まで
 EXTRA_CUTOFF = "16:30"  # この時刻を過ぎたら新しいタスクは取らない
 VELOCITY_DAYS = 3  # ベロシティ＝直近3営業日の日次スプリントの完了ptの平均（昨日の天気）
+# 初期ベロシティ（pt/日）。記録が VELOCITY_DAYS 日分たまるまでと、tasks.json の project に daily_capacity_default が無いときに使う。
+# 雛形（templates/tasks/tasks.json）の daily_capacity_default と計画のスキル（skills/daily-plan）の「初期値 8pt」は、この値に揃える
+# （tests/test_dashboard_robust.py が一致を確かめる）。値を変えるときは、この3つを一緒に直す
+DEFAULT_DAILY_CAPACITY = 8.0
+MIN_VELOCITY = 0.5   # 実績の平均がこれより低くても、完了予定日の計算ではこの値を下限にする（0 での割り算を防ぐ）
+GANTT_PAST_DAYS = 7      # ガントの左端：今日の何日前から出すか（開始日がもっと前のタスクがあればそこから）
+GANTT_AHEAD_DAYS = 14    # ガントの右端：今日の何日先まで最低でも出すか
+GANTT_MAX_DAYS = 120     # ガントの最大の日数。超えたぶんは切れる（切れたことは見出しに書く）
+OWN_DONE_SHOWN = 10      # 「<本人>の仕事」シートに出す、完了した自分のタスクの件数
+REQUESTS_DONE_SHOWN = 5  # お願いの一覧に出す、終わったお願いの件数
 
 STATUSES = ["Backlog", "ToDo", "作業中", "レビュー", "完了"]
 KINDS = ["判断", "申請", "設定", "確認", "送付", "提供"]   # AI から本人へのお願いの種類
@@ -338,6 +418,20 @@ def parse_date(s):
     if not s:
         return None
     return datetime.strptime(s, "%Y-%m-%d").date()
+
+
+_NOW_OVERRIDE = None   # --now で渡された「いま」。None なら本物の現在時刻
+
+
+def current_now():
+    """いまの日時。--now で固定できる（試算・テストで、同じ入力から同じ出力を得るため）。"""
+    return _NOW_OVERRIDE or datetime.now()
+
+
+def in_daily_dir(rel):
+    """相対パス（PurePath）が daily フォルダの中のファイルか。文字列の "/daily/" では、Windows の "\\" 区切りを見落とすので、
+    フォルダ名の並び（parts）で比べる。ファイル名や別のフォルダ名が daily を含むだけ（daily_report.md など）は当たらない。"""
+    return "daily" in rel.parent.parts
 
 
 def fmt(d):
@@ -463,14 +557,14 @@ def day_done_points(tasks, d):
 def calc_velocity(data, tasks, today, cal):
     """直近3営業日分の日次スプリントの完了ptの平均。記録が3日分たまるまでは初期値。"""
     cfg = data.get("project", {})
-    default = float(cfg.get("daily_capacity_default", cfg.get("default_velocity", 2.0)))
+    default = float(cfg.get("daily_capacity_default", cfg.get("default_velocity", DEFAULT_DAILY_CAPACITY)))
     past = sorted(parse_date(ds["date"]) for ds in data.get("daily_sprints", [])
                   if parse_date(ds["date"]) < today and cal.is_workday(parse_date(ds["date"])))
     if len(past) < VELOCITY_DAYS:
         return default, "初期値"
     recent = past[-VELOCITY_DAYS:]
     v = sum(day_done_points(tasks, d) for d in recent) / VELOCITY_DAYS
-    return max(v, 0.5), f"直近{VELOCITY_DAYS}営業日の実績"
+    return max(v, MIN_VELOCITY), f"直近{VELOCITY_DAYS}営業日の実績"
 
 
 def daily_rows(data, tasks):
@@ -1004,7 +1098,7 @@ def build_own_sheet(wb, ctx):
             by_dep.setdefault(dep, []).append(t["id"])
         if t.get("related"):
             by_dep.setdefault(t["related"], []).append(t["id"])
-    rows = own_tasks(ctx["tasks"]) + [t for t in own_tasks(ctx["tasks"], include_done=True) if t["status"] == "完了"][-10:]
+    rows = own_tasks(ctx["tasks"]) + [t for t in own_tasks(ctx["tasks"], include_done=True) if t["status"] == "完了"][-OWN_DONE_SHOWN:]
     for i, t in enumerate(rows, start=5):
         due = parse_date(t.get("due"))
         ai_part = "、".join(x for x in by_dep.get(t["id"], []) if x != t["id"])
@@ -1120,7 +1214,7 @@ def build_requests_md(ctx):
             if t.get("report_back"):
                 lines.append(f"- **終わったら教えてほしいこと**：{t['report_back']}")
     done = sorted([t for t in tasks if t.get("assignee") == OWNER and t["status"] == "完了" and t.get("kind") != OWN_KIND],
-                  key=lambda t: t.get("done_date") or "", reverse=True)[:5]
+                  key=lambda t: t.get("done_date") or "", reverse=True)[:REQUESTS_DONE_SHOWN]
     if done:
         lines += ["", "## 最近完了したお願い", ""]
         lines += [f"- ✅ {t['id']} {t['title']}（{fmt_jp(parse_date(t.get('done_date')))}）" for t in done]
@@ -1162,15 +1256,20 @@ def build_task_list(wb, ctx):
     ws.auto_filter.ref = f"A1:{get_column_letter(len(headers))}{max(len(tasks) + 1, 2)}"
 
 
+def gantt_range(starts, ends, today):
+    """ガントに出す期間 (左端, 右端, 切らなかったときの右端)。右端が GANTT_MAX_DAYS 日を超えるぶんは切る。"""
+    begin = min(list(starts) + [today - timedelta(days=GANTT_PAST_DAYS)])
+    true_finish = max(list(ends) + [today + timedelta(days=GANTT_AHEAD_DAYS)])
+    return begin, min(true_finish, begin + timedelta(days=GANTT_MAX_DAYS)), true_finish
+
+
 def build_gantt(wb, ctx):
     ws = wb.create_sheet("ガント")
     today, cal, tasks = ctx["today"], ctx["cal"], ctx["tasks"]
     items = sorted(tasks, key=lambda t: (t["status"] == "完了", t.get("_rank") or 999))
     starts = [parse_date(t.get("start")) or today for t in items]
     ends = [max(filter(None, [t["_forecast"], parse_date(t.get("due"))]), default=today) for t in items]
-    begin = min(starts + [today - timedelta(days=7)])
-    finish = max(ends + [today + timedelta(days=14)])
-    finish = min(finish, begin + timedelta(days=120))
+    begin, finish, true_finish = gantt_range(starts, ends, today)
     days = [begin + timedelta(days=i) for i in range((finish - begin).days + 1)]
 
     fixed = ["ID", "タイトル", "担当", "ステータス", "納期"]
@@ -1180,7 +1279,14 @@ def build_gantt(wb, ctx):
         ws.cell(row=2, column=c, value=h)
     style_header(ws, 2, nfix)
     ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=nfix)
-    ws.cell(row=1, column=1, value="■ 計画（開始〜完了予定）　■ 完了　◆ 納期　│ 今日").font = Font(name=FONT, size=9)
+    legend = "■ 計画（開始〜完了予定）　■ 完了　◆ 納期　│ 今日"
+    if true_finish > finish:   # 切れたことを見出しに書く（黙って切らない）
+        legend += (f"\n※ 表示は {fmt_jp(begin)}〜{fmt_jp(finish)}（{GANTT_MAX_DAYS}日）まで。"
+                   f"それより先（〜{fmt_jp(true_finish)}）の予定は表示していません")
+        ws.row_dimensions[1].height = 36
+    legend_cell = ws.cell(row=1, column=1, value=legend)
+    legend_cell.font = Font(name=FONT, size=9)
+    legend_cell.alignment = Alignment(wrap_text=True, vertical="top")
     for j, d in enumerate(days):
         col = nfix + 1 + j
         ws.column_dimensions[get_column_letter(col)].width = 3.2
@@ -1415,9 +1521,16 @@ def summary_text(ctx, limit=10, with_ids=False):
 def record_history(data):
     """前回の tasks.json との差分を history.jsonl に追記する。初回はスナップショットだけ作る。"""
     current = {t["id"]: {k: t.get(k) for k in HISTORY_FIELDS} for t in data.get("tasks", [])}
+    prev = None
     if SNAPSHOT_JSON.exists():
-        prev = json.loads(SNAPSHOT_JSON.read_text(encoding="utf-8"))
-        now = datetime.now().strftime("%Y-%m-%d %H:%M")
+        try:
+            prev = load_json_file(SNAPSHOT_JSON, ".snapshot.json")
+        except BadFile:
+            prev = None   # 控えが壊れていても止めない。差分は出さず、今の状態で作り直す（全部が「新規」になるのを防ぐ）
+        if not isinstance(prev, dict):
+            prev = None
+    if prev is not None:
+        now = current_now().strftime("%Y-%m-%d %H:%M")
         entries = []
         for tid, cur in current.items():
             old = prev.get(tid)
@@ -1434,17 +1547,29 @@ def record_history(data):
     atomic_write_text(SNAPSHOT_JSON, json.dumps(current, ensure_ascii=False, indent=1))
 
 
-def history_on(day):
+def read_history():
+    """history.jsonl の記録（1行1件）。壊れた行・形が違う行は飛ばす（手で編集されても止めない）。"""
     if not HISTORY_JSONL.exists():
         return []
-    key = fmt(day)
     out = []
-    for line in HISTORY_JSONL.read_text(encoding="utf-8").splitlines():
+    try:
+        lines = HISTORY_JSONL.read_text(encoding="utf-8-sig").splitlines()
+    except (OSError, UnicodeDecodeError):
+        return []
+    for line in lines:
         if line.strip():
-            e = json.loads(line)
-            if e["at"].startswith(key):
+            try:
+                e = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(e, dict) and isinstance(e.get("at"), str):
                 out.append(e)
     return out
+
+
+def history_on(day):
+    key = fmt(day)
+    return [e for e in read_history() if e["at"].startswith(key)]
 
 
 def md_section(text, heading):
@@ -1493,7 +1618,7 @@ def plan_context(today, cal, ctx):
     tds = today_sprint(data, today)
     if day_no <= EXTRA_FROM_DAY - 1:
         extra = f"不可（{EXTRA_FROM_DAY - 1}日目までは計画した分だけ）"
-    elif datetime.now().strftime("%H:%M") >= EXTRA_CUTOFF:
+    elif current_now().strftime("%H:%M") >= EXTRA_CUTOFF:
         extra = f"不可（{EXTRA_CUTOFF} を過ぎた）"
     elif tds:
         r = next(r for r in daily_rows(data, tasks) if r["ds"] is tds)
@@ -1508,19 +1633,16 @@ def plan_context(today, cal, ctx):
              f"計画の保存先: {(sprint_dir.relative_to(ROOT) if sprint_dir else '01_スプリント/<今のスプリント>')}/daily/{today.strftime('%Y%m%d')}_計画.md",
              f"今日の容量の目安: {ctx['velocity']:.1f} pt（{ctx['velocity_src']}）", "",
              f"今日は日次スプリント {day_no} 日目（計画ありの日を数える。3日目までは追加でタスクを取らない）",
-             f"現在時刻: {datetime.now().strftime('%H:%M')}",
+             f"現在時刻: {current_now().strftime('%H:%M')}",
              f"追加でタスクを取れるか: {extra}", "",
              "## 候補タスク（AI の未完了タスク、優先順。🆕＝前回の計画以降に登録、🔁＝要再見積もり → この2つと 8pt 以上を見積もる）"]
 
     prev_dates = sorted(ds["date"] for ds in data.get("daily_sprints", []) if ds["date"] < fmt(today))
     since = prev_dates[-1] if prev_dates else "0000-00-00"
     new_ids = set()
-    if HISTORY_JSONL.exists():
-        for line in HISTORY_JSONL.read_text(encoding="utf-8").splitlines():
-            if line.strip():
-                e = json.loads(line)
-                if e.get("change") == "新規" and e["at"][:10] >= since:
-                    new_ids.add(e["id"])
+    for e in read_history():
+        if e.get("change") == "新規" and e["at"][:10] >= since:
+            new_ids.add(e.get("id"))
 
     def blocked_by(t):
         return [d for d in dep_list(t) if d in by_id and by_id[d]["status"] != "完了"]
@@ -1645,7 +1767,7 @@ def review_context(today, cal, ctx):
     touched = []
     for base in (ROOT / "02_成果物", SPRINT_DIR):
         for p in base.rglob("*"):
-            if p.is_file() and not p.name.startswith(".") and datetime.fromtimestamp(p.stat().st_mtime).date() == today and "/daily/" not in str(p):
+            if p.is_file() and not p.name.startswith(".") and datetime.fromtimestamp(p.stat().st_mtime).date() == today and not in_daily_dir(p.relative_to(ROOT)):
                 touched.append(str(p.relative_to(ROOT)))
     reviewed = (today_sprint(ctx["data"], today) or {}).get("status") == "振り返り済み" or any(
         SPRINT_DIR.glob(f"*/daily/{day}_振り返り.md"))
@@ -1691,8 +1813,79 @@ def review_context(today, cal, ctx):
 
 # ---------- main ----------
 
-def validate(data):
+def is_number(v):
+    """数（真偽の値は数に数えない。nan・無限は除く）。"""
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+
+
+def is_date_text(v):
+    try:
+        return isinstance(v, str) and parse_date(v) is not None
+    except ValueError:
+        return False
+
+
+def validate_shape(data):
+    """tasks.json の形の問題（この先の計算で KeyError・ゼロ除算などになるもの）を、日本語の一覧にする。
+    形が合っていないと以降の検査ができないので、1つでもあれば validate はここで返す。"""
+    if not isinstance(data, dict):
+        return ["tasks.json は { } で始まる形にしてください（今は別の形です）"]
     errors = []
+    for key in ("tasks", "daily_sprints", "sprints"):
+        v = data.get(key, [])
+        if not isinstance(v, list):
+            errors.append(f"{key} は [ ] で囲んだ一覧にしてください")
+        elif any(not isinstance(x, dict) for x in v):
+            errors.append(f"{key} の中身は、1件ずつ {{ }} で囲んでください")
+    project = data.get("project", {})
+    if not isinstance(project, dict):
+        errors.append("project は { } の形にしてください")
+        project = {}
+    for key in ("daily_capacity_default", "default_velocity"):
+        if key in project and not (is_number(project[key]) and project[key] > 0):
+            errors.append(f"project の {key}（1日の容量の初期値）は、0 より大きい数にしてください（今は {project[key]!r}）。"
+                          f"書かなければ {DEFAULT_DAILY_CAPACITY:g} を使います")
+    hol = project.get("holidays", [])
+    if not isinstance(hol, list) or not all(is_date_text(h) for h in hol):
+        errors.append("project の holidays は、\"2026-11-03\" のような YYYY-MM-DD の文字の一覧にしてください")
+    if errors:
+        return errors
+    for t in data.get("tasks", []):
+        if not isinstance(t.get("id"), str):
+            errors.append(f"{t.get('id', '?')}: id は文字にしてください")
+        prog = t.get("progress")
+        if prog is not None and prog != "" and not is_number(prog):
+            errors.append(f"{t.get('id', '?')}: progress（進捗%）は数にしてください（今は {prog!r}）")
+        elif prog not in (None, "") and not 0 <= prog <= 100:
+            errors.append(f"{t.get('id', '?')}: progress（進捗%）は 0〜100 にしてください（今は {prog!r}）")
+    for i, ds in enumerate(data.get("daily_sprints", []), start=1):
+        where = f"日次スプリント（{i}件目{'・' + ds['date'] if isinstance(ds.get('date'), str) else ''}）"
+        if not is_date_text(ds.get("date")):
+            errors.append(f"{where}: date が YYYY-MM-DD 形式でありません（今は {ds.get('date')!r}）")
+        for key in ("planned", "added", "pulled", "carried_over"):
+            v = ds.get(key, [])
+            if not (isinstance(v, list) and all(isinstance(x, str) for x in v)):
+                errors.append(f"{where}: {key} は [\"T001\"] のような、タスク ID の一覧にしてください")
+        if ds.get("capacity") is not None and not is_number(ds["capacity"]):
+            errors.append(f"{where}: capacity（その日の容量）は数にしてください（今は {ds['capacity']!r}）。計画なしの日は null でかまいません")
+        if "committed" in ds and not is_number(ds["committed"]):
+            errors.append(f"{where}: committed は数にしてください（今は {ds['committed']!r}）")
+        if ds.get("blockers") and not isinstance(ds["blockers"], dict):
+            errors.append(f"{where}: blockers は {{ }} の形にしてください")
+    for i, sp in enumerate(data.get("sprints", []), start=1):
+        where = f"スプリント（{i}件目{'・' + sp['id'] if isinstance(sp.get('id'), str) else ''}）"
+        if not isinstance(sp.get("id"), str) or not sp.get("id"):
+            errors.append(f"{where}: id（S001 など）が必要です")
+        for key in ("start", "end"):
+            if not is_date_text(sp.get(key)):
+                errors.append(f"{where}: {key} が YYYY-MM-DD 形式でありません（今は {sp.get(key)!r}）")
+    return errors
+
+
+def validate(data):
+    errors = validate_shape(data)
+    if errors:
+        return errors
     ids = set()
     for t in data.get("tasks", []):
         for key in ("id", "title", "status"):
@@ -1717,7 +1910,7 @@ def validate(data):
         for key in ("start", "due", "done_date"):
             try:
                 parse_date(t.get(key))
-            except ValueError:
+            except (ValueError, TypeError):
                 errors.append(f"{t.get('id')}: {key} は YYYY-MM-DD 形式にしてください")
     pts = {t.get("id"): pt_of(t) for t in data.get("tasks", [])}
     dates = [ds.get("date") for ds in data.get("daily_sprints", [])]
@@ -1835,6 +2028,27 @@ def _make_backup(path, today, raw):
     raise OSError("控えの名前が決まりません")
 
 
+def parse_tasks_bytes(raw):
+    """tasks.json のバイト列を読む。BOM は無視し、読めないときは日本語の案内の BadFile（英語のエラーは見せない）。"""
+    try:
+        text = raw.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        raise BadFile("tasks.json の文字コードが UTF-8 ではありません。UTF-8 で保存し直してください。壊れたファイルは書き換えていません")
+    return parse_json_text(text, "tasks.json")
+
+
+def load_tasks(path):
+    """tasks.json を読んで辞書にする。読めない・空・壊れている・{ } で始まらないときは BadFile。"""
+    try:
+        raw = Path(path).read_bytes()
+    except OSError as e:
+        raise BadFile(f"tasks.json を読めませんでした（{type(e).__name__}）。ファイルがあるか、ほかのアプリで開かれていないか確かめてください")
+    data = parse_tasks_bytes(raw)
+    if not isinstance(data, dict):
+        raise BadFile("tasks.json は { } で始まる形にしてください（今は別の形です）。壊れたファイルは書き換えていません")
+    return data
+
+
 def migrate_tasks_json(path, today):
     """tasks.json の版が無い・古いときに、新しい形に移す。移したときは案内の1行、移さなかったときは None を返す。
     - 移すあいだは .tasks.json.migrate.lock を持つ（取れなければ、その回は移さない。ほかの実行が移している）
@@ -1846,7 +2060,7 @@ def migrate_tasks_json(path, today):
     path = Path(path)
 
     def needs_migration(raw):
-        data = json.loads(raw.decode("utf-8"))
+        data = parse_tasks_bytes(raw)
         return data if isinstance(data, dict) and schema_version_of(data) < SCHEMA_VERSION else None
 
     if needs_migration(path.read_bytes()) is None:   # ふだんはここで終わる（lock にも触らない）
@@ -1880,14 +2094,17 @@ def migrate_tasks_json(path, today):
 
 
 def run(today):
+    data = load_tasks(TASKS_JSON)
+    errors = validate(data)
+    if errors:   # 形に問題があるうちは、tasks.json に何も書かない（新しい形式への移しもしない）
+        raise ValueError("tasks.json の内容に問題があります。直すまで、生成物は更新しません（tasks.json は書き換えていません）:\n- "
+                         + "\n- ".join(errors))
     try:
         migrated = migrate_tasks_json(TASKS_JSON, today)
     except OSError as e:   # 移せなくても、タスク管理は止めない（元の tasks.json はそのまま。次の機会にまた試す）
         migrated = f"tasks.json を新しい形式に移せませんでした（今回は見送り）：{type(e).__name__}"
-    data = json.loads(TASKS_JSON.read_text(encoding="utf-8"))
-    errors = validate(data)
-    if errors:
-        raise ValueError("tasks.json の内容に問題があります:\n- " + "\n- ".join(errors))
+    except BadFile as e:   # 読み直したときに壊れていた（ほかの人が書き換え中など）。今回は見送り
+        migrated = f"tasks.json を新しい形式に移せませんでした（今回は見送り）：{e}"
     record_history(data)
     cal =Calendar(data.get("project", {}).get("holidays", []))
     tasks = data.get("tasks", [])
@@ -1906,7 +2123,7 @@ def run(today):
     ctx = dict(data=data, tasks=tasks, today=today, cal=cal, velocity=velocity, velocity_src=velocity_src, events=events,
                events_error=events_error, events_stale=events_stale,
                open_tasks=open_tasks, project_end=project_end, sprint=current_sprint(data, today),
-               now=datetime.now().strftime("%Y-%m-%d %H:%M"), migrated=migrated)
+               now=current_now().strftime("%Y-%m-%d %H:%M"), migrated=migrated)
 
     saved_note = write_excel(ctx)
     atomic_write_text(BOARD_MD, build_board_md(ctx))
@@ -1917,10 +2134,10 @@ def run(today):
 def show_tasks(ids):
     """--task：指定のタスクだけを JSON で標準出力へ。読むだけ（tasks.json の移行の書き戻しも、生成物の更新もしない）。"""
     try:
-        data = json.loads(TASKS_JSON.read_text(encoding="utf-8"))
+        data = load_tasks(TASKS_JSON)
         by_id = {t.get("id"): t for t in data.get("tasks", [])}
-    except (OSError, ValueError, AttributeError) as e:
-        print(f"tasks.json を読めませんでした: {e}", file=sys.stderr)
+    except (BadFile, AttributeError, TypeError) as e:
+        print(f"tasks.json を読めませんでした: {e}" if not isinstance(e, BadFile) else str(e), file=sys.stderr)
         return 1
     found = [by_id[i] for i in ids if i in by_id]
     print(json.dumps(found, ensure_ascii=False, indent=2))
@@ -1931,23 +2148,75 @@ def show_tasks(ids):
     return 0
 
 
+def cli_date(text):
+    try:
+        return parse_date(text)
+    except (ValueError, TypeError):
+        raise argparse.ArgumentTypeError(f"日付は 2026-11-05 のように YYYY-MM-DD で書いてください（今は {text!r}）")
+
+
+def cli_now(text):
+    """--now：'YYYY-MM-DD HH:MM'（日時）か 'HH:MM'（時刻だけ。日付は --today、無ければ今日）。"""
+    for fmt_, only_time in (("%Y-%m-%d %H:%M", False), ("%H:%M", True)):
+        try:
+            v = datetime.strptime(text, fmt_)
+        except ValueError:
+            continue
+        return v.time() if only_time else v
+    raise argparse.ArgumentTypeError(f"時刻は 10:30 か 2026-11-05 10:30 のように書いてください（今は {text!r}）")
+
+
+def failure_notice(message, args, code):
+    """失敗を、モードに合わせて伝える。session／hook の呼び出し元（Claude Code）は止めず、案内を additionalContext に入れる。
+    code は手動実行のときの終了コード。"""
+    if args.hook or args.session:
+        event = "PostToolUse" if args.hook else "SessionStart"
+        text = (f"[AI分身のタスク管理からのお知らせ] {message}\n"
+                "本人に伝えて、直し方を一緒に確かめてください（このままではタスクボード・Excel・お願いの一覧は更新されません）。")
+        print(json.dumps({"hookSpecificOutput": {"hookEventName": event, "additionalContext": text}}, ensure_ascii=False))
+        return 0
+    print(message, file=sys.stderr)
+    return code
+
+
 def main():
+    """入口。想定外の例外でも、英語のトレースバックは見せず、日本語の案内にする（hook・session は止めない＝終了コード 0、手動は 1）。"""
+    try:
+        return _main()
+    except (SystemExit, KeyboardInterrupt):
+        raise
+    except Exception as e:
+        class _Mode:
+            hook = "--hook" in sys.argv
+            session = "--session" in sys.argv
+        return failure_notice(f"ダッシュボード更新で想定外のエラーが起きました（{type(e).__name__}）。tasks.json や設定/config.json の中身に"
+                              "変わった書き方がないか確かめてください。直らなければ、この文面を AI に見せてください", _Mode, 1)
+
+
+def _main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--hook", action="store_true", help="PostToolUse hook として実行")
     ap.add_argument("--session", action="store_true", help="SessionStart hook として実行")
-    ap.add_argument("--today", help="基準日 YYYY-MM-DD（試算用）")
+    ap.add_argument("--today", type=cli_date, help="基準日 YYYY-MM-DD（試算用）")
+    ap.add_argument("--now", type=cli_now,
+                    help="いまの時刻を固定する（試算・テスト用）。'HH:MM' か 'YYYY-MM-DD HH:MM'。付けなければ本物の現在時刻")
     ap.add_argument("--review-context", action="store_true", help="振り返り会議の材料を表示（1行目 OPEN/SKIP）")
     ap.add_argument("--plan-context", action="store_true", help="プランニングの材料を表示（1行目 OPEN/SKIP）")
     ap.add_argument("--today-status", action="store_true", help="今日の日次スプリントの status を表示（なければ空）")
     ap.add_argument("--task", nargs="+", metavar="T0XX",
                     help="指定のタスクだけを JSON で表示（読むだけ。tasks.json・Excel・ボードなど何も書かない。無い ID は知らせて終了コード1）")
     args = ap.parse_args()
-    today = parse_date(args.today) if args.today else date.today()
+    today = args.today or date.today()
+    global _NOW_OVERRIDE
+    if args.now is not None:
+        _NOW_OVERRIDE = args.now if isinstance(args.now, datetime) else datetime.combine(today, args.now)
 
     if args.hook:
         try:
             payload = json.load(sys.stdin)
-        except json.JSONDecodeError:
+        except ValueError:   # JSON でない・文字コードが違う（どちらも ValueError）。hook は止めない
+            return 0
+        if not isinstance(payload, dict):
             return 0
         path = (payload.get("tool_input") or {}).get("file_path", "")
         if not path.endswith("tasks.json") or find_root() is None or not CONFIG_JSON.exists():
@@ -1986,6 +2255,9 @@ def main():
     if args.task:
         return show_tasks(args.task)
 
+    if CONFIG_ERROR:   # 設定が読めないまま既定値で進めると、別の名前のファイルを作ってしまう。案内を出して止まる（hook は止めない）
+        return failure_notice(f"ダッシュボード更新に失敗: {CONFIG_ERROR}", args, 1)
+
     try:
         ctx, note = run(today)
     except (ValueError, json.JSONDecodeError) as e:
@@ -1993,8 +2265,7 @@ def main():
         if args.hook:
             print(msg, file=sys.stderr)
             return 2  # Claude に修正を促す
-        print(msg, file=sys.stderr)
-        return 1
+        return failure_notice(msg, args, 1)
 
     if ctx.get("migrated") and (args.today_status or args.plan_context or args.review_context):
         print(ctx["migrated"], file=sys.stderr)   # 1行目の判定（OPEN/SKIP）を崩さないよう、標準エラーに出す
@@ -2036,7 +2307,7 @@ def main():
         try:
             sys.path.insert(0, str(Path(__file__).resolve().parent))
             import watch_check
-            long_run = watch_check.session_warnings(ROOT, AUTO_DIR, datetime.now(), call=OWNER_CALL)
+            long_run = watch_check.session_warnings(ROOT, AUTO_DIR, current_now(), call=OWNER_CALL)
         except Exception:   # 点検の失敗で起動時のまとめを止めない
             long_run = []
         if long_run:

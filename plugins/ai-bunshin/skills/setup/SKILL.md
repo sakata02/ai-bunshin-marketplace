@@ -79,7 +79,7 @@ description: AI 分身の初回セットアップ。新しく使い始める人�
 **4回目：守ってほしいこと**
 9. 共通の「必ず確認すること」（社外への送信・お金・人事・他の人を巻き込む判断・ファイルの削除）以外に、確認してほしいこと
 10. ほかに「やってはいけないこと」（追加の NG）
-11. 会社の休みの日（祝日以外。分かる範囲で）
+11. 会社の休みの日（祝日以外。分かる範囲で）。祝日は聞かずに AI が入れる（下の「ファイルを作る」の tasks.json の行。雛形の holidays は空なので、入れ忘れると祝日が営業日として数えられる）
 
 ## 3. ファイルを作る
 
@@ -108,7 +108,7 @@ description: AI 分身の初回セットアップ。新しく使い始める人�
 |---|---|
 | `CLAUDE.md`（本人設定） | `templates/CLAUDE.md` |
 | `設定/config.json` | `templates/config/config.json`。`path` には、`command -v claude` と openpyxl の入った `python3` のフォルダを含む PATH を入れる |
-| `00_タスク管理/data/tasks.json` | `templates/tasks/tasks.json`。holidays に質問11の休みと、その年の祝日を入れる |
+| `00_タスク管理/data/tasks.json` | `templates/tasks/tasks.json`。**雛形の holidays は空（`[]`）**。質問11の休みに加えて、今年と来年の日本の祝日を AI が調べて `"2026-11-03"` の形（YYYY-MM-DD）で入れる（本人が日本以外の国・地域で働くなら、先にどの国の祝日か確かめる）。空のままだと、祝日が営業日として数えられて完了予定日が1日ずれ、祝日にも朝の計画が動く。年が変わるときは、翌年の祝日を足す。書き方が違うと（`"11/3"` など）、update_dashboard.py が「holidays は YYYY-MM-DD の一覧にしてください」と知らせて止まる |
 | `04_ナレッジ/プロフィール.md`・`判断基準.md`・`部署一覧.md`・`改善ログ.md`・`役の書き方.md`・`ルール履歴/README.md` | `templates/knowledge/` の `profile.md`・`judgement.md`・`departments.md`・`improvement_log.md`・`roles.md`・`rule_history/README.md` |
 | `04_ナレッジ/プロダクトゴール.md`・`完成の定義.md`・`スクラムマスターの観察.md` | `templates/knowledge/` の `product_goal.md`・`definition_of_done.md`・`sm_observation.md` |
 | `04_ナレッジ/研修/研修の決まり.md` | `templates/knowledge/training/training_rules.md`（研修を担当する人だけ） |
