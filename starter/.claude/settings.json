@@ -3,7 +3,7 @@
     "ai-bunshin-marketplace": {
       "source": {
         "source": "github",
-        "repo": "{{GITHUB_REPO}}"
+        "repo": "sakata02/ai-bunshin-marketplace"
       },
       "autoUpdate": true
     }

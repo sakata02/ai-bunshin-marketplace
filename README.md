@@ -46,7 +46,7 @@
 
 ```bash
 # 1. 配布元を登録してプラグインを入れる
-claude plugin marketplace add {{GITHUB_REPO}}
+claude plugin marketplace add sakata02/ai-bunshin-marketplace
 mkdir -p ~/workspace/<名前>-ai && cd ~/workspace/<名前>-ai
 claude plugin install ai-bunshin@ai-bunshin-marketplace --scope project
 

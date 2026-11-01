@@ -71,10 +71,5 @@ PL
   launchctl unload "$PL" 2>/dev/null || true
   launchctl load "$PL"
 done
-# プラグイン化する前の旧い登録名が残っていれば外す（ファイルは消さずに .old にする）
-for old in ~/Library/LaunchAgents/com.davidharuka.daily-*.plist(N); do
-  launchctl unload "$old" 2>/dev/null || true
-  mv "$old" "$old.old"
-done
 echo "登録しました：計画 ${PLAN_H}:$(printf %02d $PLAN_M)（続けて実行）／振り返り ${REVIEW_H}:$(printf %02d $REVIEW_M)"
 launchctl list | grep ai-bunshin || true
