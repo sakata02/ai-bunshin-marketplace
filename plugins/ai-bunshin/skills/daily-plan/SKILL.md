@@ -11,7 +11,7 @@ description: 1日スプリントのプランニング（平日9時に自動。�
 
 引数：日付（YYYY-MM-DD、省略時は今日）。
 自動実行（`claude -p`）のときは本人がその場にいない。**質問せずに最後まで進める。**
-Bash は `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/update_dashboard.py" …` だけを使う。tasks.json は Read と Edit で直接直す（別のスクリプトは作らない）。ロックの確認のときだけ `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/lock_check.py"` も使ってよい（読むだけ）。
+Bash は `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/update_dashboard.py" …` だけを使う。tasks.json は Read と Edit で直接直す（別のスクリプトは作らない）。特定のタスクだけ見たいときは、tasks.json を全体で開かず `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/update_dashboard.py" --task T0XX T0YY` で出す（指定のタスクだけを JSON で出す。読むだけで何も書かない。無い ID は知らせて終了コード 1）。直すときは必要な所を Read してから Edit する。ロックの確認のときだけ `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/lock_check.py"` も使ってよい（読むだけ）。
 先に `.claude/ai-bunshin-details/daily-sprint.md` を読む（一度読んだら、この会話では読み直さない）。
 
 ## 0. 開くかどうか
@@ -25,7 +25,7 @@ Bash は `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/update_dashboard.py" …` だ�
 
 1. `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/update_dashboard.py" --plan-context` を実行する（日付を指定するときは `--today YYYY-MM-DD` も付ける）
 2. 1行目が `SKIP: …` なら、何もせずに終わる
-3. `04_ナレッジ/判断基準.md`、改善ログの「実施中の Try」、前日の `daily/*_振り返り.md`（「明日の要件確認」を含む）を読む
+3. `04_ナレッジ/判断基準.md`、改善ログの「実施中の Try」（`04_ナレッジ/改善ログ.md` の `## 実施中の Try` の節だけ。全体は開かない）、前日の `daily/*_振り返り.md` の `## 明日の Try` と `## 明日の要件確認` の2つの節だけを読む（見出しを `Grep` で探して、その節だけ Read する。ファイルは全体を開かない。前回の持ち越しは `--plan-context` の出力にある。ほかの節（①〜④・反論ラウンド・ルール変更の承認など）は、この計画では使わない。必要になったときだけ、その節を読む）
 4. 前日に出した要件確認のお願い（kind 確認）に、本人の返事があるかを tasks.json の note と受け入れ条件で確かめる（朝の自動計画は会話を読めないため、tasks.json に書かれたものだけが伝わる）
 5. **S### の確認**（`/ai-bunshin:sprint` の「0. 準備」の3と同じ手順。自動実行でも動くよう、Read・Edit・Write と update_dashboard.py だけを使う）。tasks.json の `sprints` が1つも無い、または今の S### の `end` が今日より前なら、先にこれを行ってから計画に入る：
    1. 今の S### があれば `status: "完了"` にし、`retro` に一言を書く（その期間の `daily/` の振り返りから）

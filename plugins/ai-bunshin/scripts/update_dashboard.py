@@ -8,6 +8,7 @@
   python3 scripts/update_dashboard.py --today 2026-11-05  # 日付を指定して試算
   python3 scripts/update_dashboard.py --plan-context     # 9時のプランニングの材料（1行目 OPEN/SKIP）
   python3 scripts/update_dashboard.py --review-context   # 17時の振り返り会議の材料（1行目 OPEN/SKIP）
+  python3 scripts/update_dashboard.py --task T001 T002    # 指定のタスクだけを JSON で出す（読むだけ。何も書かない）
 """
 import argparse
 import heapq
@@ -1913,6 +1914,23 @@ def run(today):
     return ctx, saved_note
 
 
+def show_tasks(ids):
+    """--task：指定のタスクだけを JSON で標準出力へ。読むだけ（tasks.json の移行の書き戻しも、生成物の更新もしない）。"""
+    try:
+        data = json.loads(TASKS_JSON.read_text(encoding="utf-8"))
+        by_id = {t.get("id"): t for t in data.get("tasks", [])}
+    except (OSError, ValueError, AttributeError) as e:
+        print(f"tasks.json を読めませんでした: {e}", file=sys.stderr)
+        return 1
+    found = [by_id[i] for i in ids if i in by_id]
+    print(json.dumps(found, ensure_ascii=False, indent=2))
+    missing = [i for i in ids if i not in by_id]
+    if missing:
+        print(f"tasks.json にありません: {', '.join(missing)}", file=sys.stderr)
+        return 1
+    return 0
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--hook", action="store_true", help="PostToolUse hook として実行")
@@ -1921,6 +1939,8 @@ def main():
     ap.add_argument("--review-context", action="store_true", help="振り返り会議の材料を表示（1行目 OPEN/SKIP）")
     ap.add_argument("--plan-context", action="store_true", help="プランニングの材料を表示（1行目 OPEN/SKIP）")
     ap.add_argument("--today-status", action="store_true", help="今日の日次スプリントの status を表示（なければ空）")
+    ap.add_argument("--task", nargs="+", metavar="T0XX",
+                    help="指定のタスクだけを JSON で表示（読むだけ。tasks.json・Excel・ボードなど何も書かない。無い ID は知らせて終了コード1）")
     args = ap.parse_args()
     today = parse_date(args.today) if args.today else date.today()
 
@@ -1962,6 +1982,9 @@ def main():
               "00_タスク管理 があるフォルダを開き直してください"
               "（デスクトップアプリは「Code」タブでそのフォルダを選び直す。ターミナルはそのフォルダで claude を起動する）", file=sys.stderr)
         return 1
+
+    if args.task:
+        return show_tasks(args.task)
 
     try:
         ctx, note = run(today)

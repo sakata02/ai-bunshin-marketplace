@@ -9,7 +9,7 @@ description: 1日スプリントの実行（平日9時の計画に続けて自�
 
 引数：日付（YYYY-MM-DD、省略時は今日）。
 自動実行（`claude -p`）のときは本人がその場にいない。**質問せずに最後まで進める。**
-Bash は `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/update_dashboard.py" …` だけを使う。tasks.json は Read と Edit で直接直す（別のスクリプトは作らない）。ロックの確認のときだけ `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/lock_check.py"` も使ってよい（読むだけ）。
+Bash は `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/update_dashboard.py" …` だけを使う。tasks.json は Read と Edit で直接直す（別のスクリプトは作らない）。特定のタスクだけ見たいときは、tasks.json を全体で開かず `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/update_dashboard.py" --task T0XX T0YY` で出す（指定のタスクだけを JSON で出す。読むだけで何も書かない。無い ID は知らせて終了コード 1）。直すときは必要な所を Read してから Edit する。ロックの確認のときだけ `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/lock_check.py"` も使ってよい（読むだけ）。
 
 ## 0. 準備
 
@@ -24,7 +24,7 @@ Bash は `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/update_dashboard.py" …` だ�
 
 1. `01_スプリント/<今のスプリント>/daily/YYYYMMDD_計画.md` を読む。なければ「今日の計画がないため実行しません」と出力して終わる
 2. tasks.json の `daily_sprints` の今日の行の `status` を `実行中` にする
-3. 実施中の Try（改善ログ）を確認する。指示書の「守ること」に入っているか確かめる
+3. 実施中の Try（`04_ナレッジ/改善ログ.md` の `## 実施中の Try` の節だけ。全体は開かない）を確認する。指示書の「守ること」に入っているか確かめる
 
 ## 1. 計画の順にタスクを進める
 
@@ -49,7 +49,7 @@ Bash は `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/update_dashboard.py" …` だ�
 ### 受け入れ条件に無いことに気づいたとき（作業中にプロダクトオーナーに確認）
 1. 作る人は、報告の「プロダクトオーナーへの確認」に書き、その部分は入れずに返す
 2. プロダクトオーナー（指揮官）が「足す／別のタスク／やらない」を決める
-3. 足すなら、同じ部下に SendMessage で続きを頼む（Agent ID は、手順3・4で `do_log.md` に書いたものを使う）。別のタスクなら tasks.json に登録する
+3. 足すなら、同じ部下に SendMessage で続きを頼む（Agent ID は、手順3・4で `do_log.md` に書いたものを使う。`do_log.md` は全体を開かず、`Grep` で「Agent ID」を含む行を探して、この実行で書いた行（末尾のほう）を使う）。別のタスクなら tasks.json に登録する
 4. 確認の中身と決定を、do_log に1行書く
 
 ### 計画した分が早く終わったとき（量で区切る）
