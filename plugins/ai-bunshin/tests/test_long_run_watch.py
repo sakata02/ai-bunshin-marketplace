@@ -35,6 +35,9 @@ CHILDREN = []   # テストが起動したプロセス（最後に必ず止め�
 
 def case(fn):
     global fails
+    only = os.environ.get("TEST_ONLY")   # 例：TEST_ONLY=e で名前が e で始まるケースだけ流す（調べるとき用。既定は全部）
+    if only and not fn.__name__.startswith(only):
+        return fn
     try:
         fn()
         print(f"  ok   {fn.__name__}")
@@ -102,7 +105,8 @@ def copy_plugin(name):
 
 # ---------- 1. run_limited.py ----------
 print("## 1. 時間の上限つきの起動（run_limited.py）")
-LIMITED = os.path.join(SCRIPTS, "auto", "run_limited.py")
+# 新旧の比べ：環境変数 RUN_LIMITED_UNDER_TEST に別の版の run_limited.py を指すと、その版で流せる（既定は今の版）
+LIMITED = os.environ.get("RUN_LIMITED_UNDER_TEST") or os.path.join(SCRIPTS, "auto", "run_limited.py")
 
 
 def run_limited(args, cmd, timeout=60):
@@ -210,6 +214,48 @@ def l6_hup_and_int_do_the_same():
 @case
 def l7_term_with_child_ignoring_term_is_killed_after_grace():
     _signal_case("l7", signal.SIGTERM, ignore_term=True)
+
+
+@case
+def l8_signals_in_a_row_still_stop_the_group_and_clean_up():
+    # TERM・HUP・INT が続けて届いても（daily_cycle.sh が転送した TERM と、グループ全体に届いた TERM が重なるときなど）、
+    # 例外で落ちず、起動したグループを止め、一時ファイルを消し、128+番号で終わる。
+    # 続けて届く信号は同じ番号だと1つにまとまってしまうので、別の番号を3つ、同じプロセスに続けて送る（このテスト自身のプロセスだけ）
+    import importlib.util
+    import threading
+    spec = importlib.util.spec_from_file_location("run_limited_under_test", LIMITED)
+    rl = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(rl)
+    sigs = (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)
+    saved = {s: signal.signal(s, signal.SIG_IGN) for s in sigs}   # run() の前後で、届き遅れたものでこのテストが落ちないように
+    d = os.path.join(BASE, "l8")
+    os.makedirs(d, exist_ok=True)
+    try:
+        for i in range(5):
+            out = os.path.join(d, f"out{i}")
+            pidf = os.path.join(d, f"pid{i}")
+
+            def fire():
+                t0 = time.time()
+                while time.time() - t0 < 10 and not (os.path.exists(out) and os.path.exists(pidf) and os.path.getsize(pidf) > 0):
+                    time.sleep(0.002)
+                time.sleep(0.05)
+                for s in sigs:
+                    os.kill(os.getpid(), s)
+
+            th = threading.Thread(target=fire)
+            th.start()
+            try:
+                rc = rl.run(["sh", "-c", f"echo $$ > '{pidf}'; exec sleep 60"], 60, out, grace=1.0)
+            finally:
+                th.join()
+            assert rc in (128 + int(s) for s in sigs), (i, rc)
+            assert wait_dead(int(open(pidf).read().strip()), 5), (i, "起動した子が残っている")
+            assert not os.path.exists(out), (i, "一時ファイルが残っている")
+    finally:
+        time.sleep(0.2)
+        for s, h in saved.items():
+            signal.signal(s, h)
 
 
 # ---------- 2. 時間の上限の設定 ----------
@@ -565,7 +611,8 @@ def s6_friday_mark_is_visible_monday_morning_to_afternoon():
 
 # ---------- 6. daily_cycle.sh（作り物の claude で通して動かす） ----------
 print("## 6. 自動実行（daily_cycle.sh）")
-CYCLE = os.path.join(SCRIPTS, "auto", "daily_cycle.sh")
+# 新旧の比べ：環境変数 CYCLE_UNDER_TEST に別の版の daily_cycle.sh を指すと、その版でこの節を流せる（既定は今の版）
+CYCLE = os.environ.get("CYCLE_UNDER_TEST") or os.path.join(SCRIPTS, "auto", "daily_cycle.sh")
 
 DASH_STUB = '''import os, sys, time
 a = sys.argv[1:]
@@ -617,14 +664,18 @@ def make_cycle(name, claude_body, cfg=None, guard=None):
     return dict(d=d, plugin=plugin, home=home, bindir=bindir, calls=calls, notes=notes)
 
 
-def run_cycle(c, phase, mode="plan", timeout=90):
+def cycle_env(c, mode):
     env = {k: v for k, v in os.environ.items() if k not in ("AI_BUNSHIN_AUTO_RUN", "CLAUDE_PROJECT_DIR")}
     env["AI_BUNSHIN_HOME"] = c["home"]
     env["PATH"] = c["bindir"] + os.pathsep + env.get("PATH", "")
     env["STUB_MODE"] = mode
     env["HOME"] = FAKE_HOME
+    return env
+
+
+def run_cycle(c, phase, mode="plan", timeout=90):
     return subprocess.run(["/bin/zsh", os.path.join(c["plugin"], "scripts", "auto", "daily_cycle.sh"), phase],
-                          capture_output=True, text=True, env=env, timeout=timeout)
+                          capture_output=True, text=True, env=cycle_env(c, mode), timeout=timeout)
 
 
 def read(p):
@@ -836,6 +887,246 @@ def d9_wait_for_previous_stage_follows_config():
     assert r.returncode == 1, (r.returncode, r.stderr[:200])
     assert "1分たっても終わらないため中止" in cycle_log(c), cycle_log(c)
     assert 55 < dt < 140, dt
+
+
+# ---------- 6b. daily_cycle.sh が TERM・HUP・INT を受けたとき（T095 の直し） ----------
+print("## 6b. 自動実行へのシグナル（TERM・HUP・INT）")
+SIGNALS = (("TERM", signal.SIGTERM), ("HUP", signal.SIGHUP), ("INT", signal.SIGINT))
+
+
+def start_cycle(c, phase, mode):
+    """daily_cycle.sh を別のセッションで起動する（シグナルを送る相手は、このテストが起動したこのプロセスだけ）。"""
+    p = subprocess.Popen(["/bin/zsh", os.path.join(c["plugin"], "scripts", "auto", "daily_cycle.sh"), phase],
+                         env=cycle_env(c, mode), start_new_session=True,
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    CHILDREN.append(p)
+    return p
+
+
+def stop_leftovers(pids):
+    """（新旧の比べで旧版が残したものも含め）このテストが起動した作り物を、最後に片づける。"""
+    for pid in pids:
+        for fn in (os.killpg, os.kill):
+            try:
+                fn(pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError, OSError):
+                pass
+
+
+def long_claude_body(d):
+    """居座る作り物の claude：自分の PID と孫（sleep）の PID を書いて待つ。"""
+    return f"echo $$ > '{d}/claude.pid'\nsleep 300 &\necho $! > '{d}/grand.pid'\nwait"
+
+
+def out_files(c):
+    d = os.path.join(c["home"], "scripts", "auto", "logs")
+    return [f for f in os.listdir(d) if f.startswith(".out.")] if os.path.isdir(d) else []
+
+
+def wait_out_file(c, sec=10):
+    t0 = time.time()
+    while time.time() - t0 < sec and not out_files(c):
+        time.sleep(0.05)
+
+
+def _cycle_signal_case(name, signame, sig, ignore_term=False):
+    decoy = start_decoy(name)
+    d = os.path.join(BASE, name)
+    body = ("trap '' TERM\n" if ignore_term else "") + long_claude_body(d)
+    c = make_cycle(name, body, cfg={"auto": {"max_minutes": {"review": 5}}})
+    auto = os.path.join(c["home"], "scripts", "auto")
+    p = start_cycle(c, "review", "review")
+    pids = []
+    problems = []   # 1つ見つけても止まらず、全部集めて最後にまとめて知らせる（新旧の比べで、どこが違うかを見るため）
+    try:
+        claude_pid = pid_from(os.path.join(d, "claude.pid"), 30)
+        grand = pid_from(os.path.join(d, "grand.pid"), 30)
+        pids = [claude_pid, grand]
+        wait_out_file(c)   # run_limited が claude を起動したあとに送る
+        os.kill(p.pid, sig)
+        try:
+            rc = p.wait(timeout=30)
+            if rc != 128 + sig:
+                problems.append(f"終了コードが {rc}（期待 {128 + sig}）")
+        except subprocess.TimeoutExpired:
+            problems.append("daily_cycle.sh が終わらない")
+        if not wait_dead(claude_pid, 12):
+            problems.append("偽 claude が残っている")
+        if not wait_dead(grand, 12):
+            problems.append("孫のプロセスが残っている")
+        if not (decoy.poll() is None and alive(decoy.pid)):
+            problems.append("おとりまで止めた")
+        if os.path.exists(os.path.join(auto, ".lock")):
+            problems.append("ロックが残っている")
+        if out_files(c):
+            problems.append("一時ファイル（.out.*）が残っている")
+        if os.path.exists(os.path.join(auto, "last_success_review.txt")):
+            problems.append("止められたのに成功の記録を書いた")
+        if wc.read_timeout(auto) is not None:
+            problems.append("シグナルで止まったのに「時間の上限」の印を書いた")
+        stops = [ln for ln in cycle_log(c).splitlines() if "シグナル" in ln]
+        if not (len(stops) == 1 and signame in stops[0]):
+            problems.append(f"止まったことのログが1行でない：{stops}")
+        if "終了 (exit=" in cycle_log(c):
+            problems.append("止められたのに、ふつうの終わり方のログを書いた")
+        if "失敗" in read(c["notes"]):
+            problems.append("止められたのに「失敗」と通知した")
+    finally:
+        stop_leftovers(pids)
+    assert not problems, f"{signame}：" + "／".join(problems) + (f"\nログ：{cycle_log(c)[-800:]}" if problems else "")
+
+
+@case
+def e1_term_stops_claude_and_grandchild_and_cleans_up():
+    _cycle_signal_case("e1", *SIGNALS[0])
+
+
+@case
+def e2_hup_stops_claude_and_grandchild_and_cleans_up():
+    _cycle_signal_case("e2", *SIGNALS[1])
+
+
+@case
+def e3_int_stops_claude_and_grandchild_and_cleans_up():
+    _cycle_signal_case("e3", *SIGNALS[2])
+
+
+@case
+def e4_term_with_claude_ignoring_term_is_killed_after_grace():
+    # TERM を無視する偽 claude でも、run_limited の猶予（5秒）のあと KILL で止まり、ロックと一時ファイルは残らない
+    _cycle_signal_case("e4", "TERM", signal.SIGTERM, ignore_term=True)
+
+
+@case
+def e9_term_to_the_whole_group_like_launchd_leaves_nothing():
+    # launchd が停止のときにするような、daily_cycle.sh のグループ全体への TERM。claude は別のセッションなので、グループへの TERM は届かない。
+    # それでも、孫まで止まり、ロックと一時ファイルが残らない（新旧の比べ：run_limited の導入前の版では、claude が同じグループなので届いた）
+    decoy = start_decoy("e9")
+    d = os.path.join(BASE, "e9")
+    c = make_cycle("e9", long_claude_body(d), cfg={"auto": {"max_minutes": {"review": 5}}})
+    auto = os.path.join(c["home"], "scripts", "auto")
+    p = start_cycle(c, "review", "review")
+    pids = []
+    problems = []
+    try:
+        pids = [pid_from(os.path.join(d, "claude.pid"), 30), pid_from(os.path.join(d, "grand.pid"), 30)]
+        wait_out_file(c)
+        os.killpg(p.pid, signal.SIGTERM)   # p はこのテストが新しいセッションで起動した daily_cycle.sh（そのグループだけに送る）
+        try:
+            p.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            problems.append("daily_cycle.sh が終わらない")
+        if not all(wait_dead(x, 12) for x in pids):
+            problems.append("偽 claude か孫が残っている")
+        if not (decoy.poll() is None and alive(decoy.pid)):
+            problems.append("おとりまで止めた")
+        if os.path.exists(os.path.join(auto, ".lock")):
+            problems.append("ロックが残っている")
+        if out_files(c):
+            problems.append("一時ファイル（.out.*）が残っている")
+    finally:
+        stop_leftovers(pids)
+    assert not problems, "／".join(problems) + f"\nログ：{cycle_log(c)[-800:]}"
+
+
+# ロックを書いたあと・claude を起動する前（見張りの自己点検の最中）にシグナルが届く。点検を数秒かかるものにして、その間に送る
+SLOW_THEN_REAL_GUARD = ('import os, sys, time\ntime.sleep(4)\n'
+                        'os.execv(sys.executable, [sys.executable, %r] + sys.argv[1:])\n' % REAL_GUARD)
+
+
+def _signal_before_launch(name, signame, sig):
+    c = make_cycle(name, "echo should-not-run", guard=SLOW_THEN_REAL_GUARD)
+    auto = os.path.join(c["home"], "scripts", "auto")
+    p = start_cycle(c, "review", "review")
+    try:
+        t0 = time.time()
+        while time.time() - t0 < 30 and not os.path.exists(os.path.join(auto, ".lock")):
+            time.sleep(0.02)
+        assert os.path.exists(os.path.join(auto, ".lock")), "ロックが書かれない"
+        time.sleep(0.5)   # 自己点検の最中
+        assert "claude を起動" not in cycle_log(c), "もう claude を起動している（テストの前提が崩れた）"
+        os.kill(p.pid, sig)
+        try:
+            rc = p.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            raise AssertionError(f"{signame}：終わらない")
+        assert rc == 128 + sig, (signame, rc)
+        assert not os.path.exists(os.path.join(auto, ".lock")), f"{signame}：起動前に受けたのにロックが残っている"
+        assert calls_of(c) == [], f"{signame}：止められたのに claude を起動した"
+        assert not os.path.exists(os.path.join(auto, "last_success_review.txt"))
+        assert wc.read_timeout(auto) is None
+        assert not out_files(c)
+    finally:
+        stop_leftovers([p.pid])
+
+
+@case
+def e5_signal_after_lock_before_claude_leaves_no_lock():
+    for signame, sig in SIGNALS:
+        _signal_before_launch("e5_" + signame, signame, sig)
+
+
+@case
+def e6_exit_codes_pass_through_unchanged():
+    # ふつうの終了（0）・失敗（0以外）・自分で KILL された（137）・子が 124 を返した。wait の戻りと子の終了コードを取り違えない
+    c = make_cycle("e6a", "echo done")
+    r = run_cycle(c, "review", mode="review")
+    assert r.returncode == 0 and "終了 (exit=0)" in cycle_log(c), (r.returncode, cycle_log(c))
+    for code in (1, 3, 42):
+        c = make_cycle(f"e6_{code}", f"echo partial\nexit {code}")
+        r = run_cycle(c, "review", mode="review")
+        assert r.returncode == 1, (code, r.returncode)
+        assert f"終了 (exit={code})" in cycle_log(c), (code, cycle_log(c))
+        assert "失敗" in read(c["notes"]) and not os.path.exists(os.path.join(c["home"], "scripts", "auto", "last_success_review.txt"))
+    c = make_cycle("e6_kill", "kill -9 $$")
+    r = run_cycle(c, "review", mode="review")
+    assert r.returncode == 1 and "終了 (exit=137)" in cycle_log(c), (r.returncode, cycle_log(c))
+    c = make_cycle("e6_124", "exit 124")   # 子が自分で 124 を返したときも、上限と同じ扱い（今までと同じ）
+    r = run_cycle(c, "review", mode="review")
+    assert r.returncode == 124 and "終了 (exit=124)" in cycle_log(c), (r.returncode, cycle_log(c))
+    c = make_cycle("e6_empty", "exit 0")   # 出力が空のまま 0 で終わったときは、今までどおり失敗扱い
+    r = run_cycle(c, "review", mode="review")
+    assert r.returncode == 1 and "終了 (exit=0)" in cycle_log(c), (r.returncode, cycle_log(c))
+
+
+@case
+def e7_plan_then_do_status_is_per_run():
+    # 計画の終了コードが、続けて動く実行の終了コードに混ざらない（計画は成功・実行は失敗 3）
+    body = """case "$2" in
+  /ai-bunshin:daily-plan) echo planned ;;
+  *) echo partial; exit 3 ;;
+esac"""
+    c = make_cycle("e7", body)
+    r = run_cycle(c, "plan", mode="plan")
+    log = cycle_log(c)
+    assert r.returncode == 1 and "終了 (exit=0)" in log and "終了 (exit=3)" in log, (r.returncode, log)
+    assert os.path.exists(os.path.join(c["home"], "scripts", "auto", "last_success_plan.txt"))
+    assert not os.path.exists(os.path.join(c["home"], "scripts", "auto", "last_success_do.txt"))
+
+
+@case
+def e8_signal_during_plan_does_not_continue_to_do():
+    # 計画の最中に TERM → 実行（daily-do）には入らない。続けて動く実行の最中に TERM → 実行の claude も止まる
+    d = os.path.join(BASE, "e8")
+    c = make_cycle("e8", f"""case "$2" in
+  /ai-bunshin:daily-plan) echo planned ;;
+  *) {long_claude_body(d)} ;;
+esac""", cfg={"auto": {"max_minutes": {"plan": 5, "do": 5}}})
+    auto = os.path.join(c["home"], "scripts", "auto")
+    p = start_cycle(c, "plan", "plan")
+    pids = []
+    try:
+        pids = [pid_from(os.path.join(d, "claude.pid"), 40), pid_from(os.path.join(d, "grand.pid"), 40)]   # 実行の claude
+        wait_out_file(c)
+        os.kill(p.pid, signal.SIGTERM)
+        rc = p.wait(timeout=30)
+        assert rc == 128 + signal.SIGTERM, rc
+        assert all(wait_dead(x, 12) for x in pids), "実行の claude か孫が残っている"
+        assert not os.path.exists(os.path.join(auto, ".lock")) and not out_files(c)
+        assert os.path.exists(os.path.join(auto, "last_success_plan.txt")), "止める前に済んだ計画の成功の記録は残る"
+        assert not os.path.exists(os.path.join(auto, "last_success_do.txt")) and wc.read_timeout(auto) is None
+    finally:
+        stop_leftovers(pids)
 
 
 # ---------- 7. ルール・スキル・部下の文（3章・10章5〜6が、どこにあるか） ----------
