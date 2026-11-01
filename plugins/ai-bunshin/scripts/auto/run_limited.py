@@ -82,6 +82,8 @@ def run(cmd, seconds, stdout_path, grace=5.0):
                     break
                 except subprocess.TimeoutExpired:
                     continue
+            if stop is None and state["sig"] is not None:
+                stop = "signal"   # 待ちから戻る瞬間に信号を記録していた（子が先に終わった）。残った孫を止めるため、止める道に入れる
             if stop is not None:
                 _stop_group(p, grace)
                 if stop == "signal":

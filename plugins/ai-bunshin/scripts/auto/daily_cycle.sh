@@ -25,7 +25,7 @@ import json, os, sys
 from pathlib import Path
 root = Path(sys.argv[1])
 try:
-    cfg = json.load(open(root / "設定" / "config.json", encoding="utf-8"))
+    cfg = json.load(open(root / "設定" / "config.json", encoding="utf-8-sig"))
 except Exception:
     sys.exit(0)
 for p in (cfg.get("dev") or {}).get("projects", []):
@@ -36,7 +36,7 @@ PY
 )"})
 ADD_DIR_ARGS=()
 for d in ${(u)ADD_DIRS}; do ADD_DIR_ARGS+=(--add-dir "$d"); done
-AI_NAME=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1], encoding="utf-8")).get("ai_name","AI"))' "$ROOT/設定/config.json" 2>/dev/null || echo AI)
+AI_NAME=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1], encoding="utf-8-sig")).get("ai_name","AI"))' "$ROOT/設定/config.json" 2>/dev/null || echo AI)
 LOG_DIR="$ROOT/scripts/auto/logs"
 LOCK="$ROOT/scripts/auto/.lock"
 TODAY=$(date +%Y%m%d)
@@ -113,7 +113,7 @@ LAUNCHING=0      # 1＝起動の直前から PID を控えるまで（この間�
 BG_BEFORE=""     # 起動の直前の $!（まだ背景に出していない・前の run_limited の PID のままのときは、使わない）
 CUR_OUT=""       # 起動中の run_limited の出力の一時ファイル（名前を決めたら、ファイルを作る前に控える）
 on_stop() {
-  local name=$1 num=$2 pid=$LIMITED_PID
+  local name=$1 num=$2 pid=$LIMITED_PID stopped=0
   trap '' TERM HUP INT   # 片づけの最中に重ねて届いても、途中でやめない
   if [ -z "$pid" ] && [ "$LAUNCHING" = 1 ]; then
     pid=$!
@@ -123,9 +123,15 @@ on_stop() {
   if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
     kill -s TERM "$pid" 2>/dev/null   # run_limited は TERM・HUP・INT を同じに扱う（グループを止める → 猶予のあと KILL → 一時ファイルを消す）
     wait "$pid" 2>/dev/null           # 終わるまで待つ（最長でも猶予の2倍ほど）
+    stopped=1
   fi
   [ -n "$CUR_OUT" ] && rm -f "$CUR_OUT"
-  log "シグナル（$name）を受けて止めました。claude を止め、ロックと一時ファイルを片づけました"
+  # ログの文は実際の動きに合わせる：run_limited が動いていたとき（claude を起動したあと）だけ「claude を止め」と書く
+  if [ "$stopped" = 1 ]; then
+    log "シグナル（$name）を受けて止めました。claude を止め、ロックと一時ファイルを片づけました"
+  else
+    log "シグナル（$name）を受けて止めました。起動中の claude はありませんでした。ロックと一時ファイルを片づけました"
+  fi
   exit $((128 + num))
 }
 trap 'rm -f "$LOCK"' EXIT

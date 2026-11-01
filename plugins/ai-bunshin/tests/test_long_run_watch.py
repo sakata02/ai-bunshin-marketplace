@@ -349,6 +349,69 @@ def l9_signal_at_every_line_of_run_is_not_lost():
             signal.signal(s, h)
 
 
+@case
+def l10_signal_recorded_then_child_finishes_first_still_stops_the_grandchild():
+    # 信号を記録したあとに、子が先に終わっても（待ちから戻る瞬間に届く）、残った孫を止めて 128+番号 で返し、一時ファイルを消す。
+    # 子（sh）は孫（sleep）を残して終わる。待ちの戻り際に自分へ信号を送る（Popen の戻りを包んで決める。送る相手はこのテストのプロセスだけ）
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("run_limited_under_test3", LIMITED)
+    rl = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(rl)
+    sigs = (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)
+    saved = {s: signal.signal(s, signal.SIG_IGN) for s in sigs}   # run() の前後で、届き遅れたものでこのテストが落ちないように
+    d = os.path.join(BASE, "l10")
+    os.makedirs(d, exist_ok=True)
+    real_popen = rl.subprocess.Popen
+
+    class Wrapped:
+        def __init__(self, *a, **k):
+            self._p = real_popen(*a, **k)
+            self.sig = None
+
+        def __getattr__(self, name):
+            return getattr(self._p, name)
+
+        def wait(self, timeout=None):
+            rc = self._p.wait(timeout=timeout)   # 子が終わるまでは、そのまま待つ
+            if self.sig is not None and not self.sent:
+                self.sent = True
+                os.kill(os.getpid(), self.sig)   # 子が終わった「その戻り際」に届く
+                time.sleep(0.05)
+            return rc
+        sent = False
+
+    try:
+        for i, sig in enumerate(sigs):
+            out = os.path.join(d, f"out{i}")
+            pidf = os.path.join(d, f"pid{i}")
+
+            def popen(*a, _sig=sig, **k):
+                w = Wrapped(*a, **k)
+                w.sig = _sig
+                return w
+            rl.subprocess.Popen = popen
+            try:
+                t0 = time.time()
+                rc = rl.run(["sh", "-c", f"sleep 60 & echo $! > '{pidf}'; exit 0"], 30, out, grace=1.0)
+            finally:
+                rl.subprocess.Popen = real_popen
+            assert rc == 128 + int(sig), (int(sig), "戻り値", rc)
+            assert time.time() - t0 < 10, "遅い"
+            assert wait_dead(int(open(pidf).read().strip()), 5), (int(sig), "子が先に終わったあと、孫が残っている")
+            assert not os.path.exists(out), (int(sig), "一時ファイルが残っている")
+    finally:
+        time.sleep(0.2)
+        for s, h in saved.items():
+            signal.signal(s, h)
+
+
+@case
+def l11_child_finishing_normally_without_a_signal_is_unchanged():
+    out = os.path.join(BASE, "l11_out")
+    r = run_limited(["--minutes", "1", "--stdout", out], ["sh", "-c", "echo hi; exit 3"])
+    assert r.returncode == 3 and open(out).read().strip() == "hi", (r.returncode, r.stderr)
+
+
 # ---------- 2. 時間の上限の設定 ----------
 print("## 2. 時間の上限の設定（auto.max_minutes）")
 
@@ -1369,6 +1432,8 @@ def _cycle_signal_case(name, signame, sig, ignore_term=False):
         stops = [ln for ln in cycle_log(c).splitlines() if "シグナル" in ln]
         if not (len(stops) == 1 and signame in stops[0]):
             problems.append(f"止まったことのログが1行でない：{stops}")
+        elif "claude を止め" not in stops[0] or "ありませんでした" in stops[0]:
+            problems.append(f"claude を止めたのに、ログがそう書いていない：{stops[0]}")
         if "終了 (exit=" in cycle_log(c):
             problems.append("止められたのに、ふつうの終わり方のログを書いた")
         if "失敗" in read(c["notes"]):
@@ -1486,16 +1551,27 @@ def e11_signal_just_before_the_second_launch_ignores_the_old_pid():
   *) echo should-not-run ;;
 esac"""
     c = patched_cycle("e11", body, '  LAUNCHING=1\n', hold_with_bystander(d, "plan"))
+    # 「前の $!」を生きた PID にする：実行の起動で BG_BEFORE=$! を控える直前に、居座るプロセスを背景に出す（$! がその PID になる）。
+    # 前の PID が死んでいると、kill -0 で弾かれて、BG_BEFORE との比べが無くても通ってしまう。生きていれば、比べが効いていないと TERM が届いて落ちる
+    path = os.path.join(c["plugin"], "scripts", "auto", "daily_cycle.sh")
+    text = read(path)
+    anchor2 = "  BG_BEFORE=$!\n"
+    assert text.count(anchor2) == 1, "BG_BEFORE の行が見つからない（または2つ以上）"
+    live = (f'  if [ "$PHASE" != plan ]; then\n    sleep 120 &\n    echo $! > "{d}/oldpid.pid"\n  fi\n')
+    open(path, "w", encoding="utf-8").write(text.replace(anchor2, live + anchor2, 1))
     auto = os.path.join(c["home"], "scripts", "auto")
     p = start_cycle(c, "plan", "plan")
     pids = []
     try:
-        pids = [pid_from(os.path.join(d, "bystander.pid"), 40)]   # 実行の起動の直前に着いた
+        pids = [pid_from(os.path.join(d, "bystander.pid"), 40), pid_from(os.path.join(d, "oldpid.pid"), 40)]   # 実行の起動の直前に着いた
         time.sleep(0.5)
+        assert alive(pids[1]), "前の PID に見立てたプロセスが、信号の前に死んでいる（テストの前提が崩れた）"
         os.kill(p.pid, signal.SIGTERM)
         rc = p.wait(timeout=30)
         assert rc == 143, rc
         assert alive(pids[0]), "関係ないプロセスまで止めた"
+        time.sleep(0.5)
+        assert alive(pids[1]), "前の $!（生きていた）に信号を送った"
         assert calls_of(c) == ["/ai-bunshin:daily-plan"], calls_of(c)
         assert not os.path.exists(os.path.join(auto, ".lock")) and not out_files(c)
         assert os.path.exists(os.path.join(auto, "last_success_plan.txt")) and not os.path.exists(os.path.join(auto, "last_success_do.txt"))
@@ -1573,6 +1649,9 @@ def _signal_before_launch(name, signame, sig):
         assert not os.path.exists(os.path.join(auto, "last_success_review.txt"))
         assert wc.read_timeout(auto) is None
         assert not out_files(c)
+        # ログの文は実際の動きと合わせる：起動していない claude を「止めた」と書かない
+        stops = [ln for ln in cycle_log(c).splitlines() if "シグナル" in ln]
+        assert len(stops) == 1 and "claude を止め" not in stops[0] and "起動中の claude はありませんでした" in stops[0], stops
     finally:
         stop_leftovers([p.pid])
 
@@ -1644,6 +1723,99 @@ esac""", cfg={"auto": {"max_minutes": {"plan": 5, "do": 5}}})
         assert not os.path.exists(os.path.join(auto, "last_success_do.txt")) and wc.read_timeout(auto) is None
     finally:
         stop_leftovers(pids)
+
+
+# ---------- 6c. BOM 付きの config.json（T110）／watch_check.py が動かないときの手数の既定 ----------
+print("## 6c. BOM 付きの config.json・watch_check.py が動かないとき")
+INSTALL = os.environ.get("INSTALL_UNDER_TEST") or os.path.join(SCRIPTS, "auto", "install.sh")
+
+
+def write_bom_config(home, cfg):
+    """メモ帳で保存したように、先頭に BOM（EF BB BF）を付けて config.json を書く。"""
+    with open(os.path.join(home, "設定", "config.json"), "wb") as f:
+        f.write(b"\xef\xbb\xbf" + json.dumps(cfg, ensure_ascii=False).encode("utf-8"))
+
+
+@case
+def h1_daily_cycle_reads_a_bom_config_for_the_name_and_the_dev_dirs():
+    repo = os.path.join(BASE, "h1_repo")
+    os.makedirs(repo)
+    d = os.path.join(BASE, "h1")
+    c = make_cycle("h1", args_body(d))
+    write_bom_config(c["home"], {"ai_name": "BOMのAI", "dev": {"projects": [{"path": repo}]}})
+    r = run_cycle(c, "review", mode="review")
+    assert r.returncode == 0, (r.returncode, r.stderr[:200])
+    assert "BOMのAI" in read(c["notes"]), f"通知の名前が config から読めていない（BOM で落ちて既定の AI になった）：{read(c['notes'])[:200]}"
+    assert "--add-dir " + repo in (args_of(d) or [""])[-1], f"開発の置き場所（--add-dir）が config から読めていない：{args_of(d)}"
+
+
+@case
+def h2_install_sh_reads_a_bom_config_for_the_schedule_and_the_path():
+    d = os.path.join(BASE, "h2")
+    home = os.path.join(d, "owner")
+    os.makedirs(os.path.join(home, "設定"))
+    fake_home = os.path.join(d, "home")
+    os.makedirs(os.path.join(fake_home, "Library", "LaunchAgents"))
+    bindir = os.path.join(d, "bin")
+    os.makedirs(bindir)
+    for name in ("launchctl", "osascript"):   # 本物の launchd には触らない（作り物に差し替える）
+        open(os.path.join(bindir, name), "w").write("#!/bin/sh\nexit 0\n")
+        os.chmod(os.path.join(bindir, name), 0o755)
+    write_bom_config(home, {"schedule": {"plan": "08:15", "review": "16:45"}, "path": "/opt/bom-test/bin:/usr/bin"})
+    env = {k: v for k, v in os.environ.items() if k not in ("AI_BUNSHIN_AUTO_RUN", "CLAUDE_PROJECT_DIR")}
+    env["HOME"] = fake_home
+    env["PATH"] = bindir + os.pathsep + env.get("PATH", "")
+    r = subprocess.run(["/bin/zsh", INSTALL, home], capture_output=True, text=True, env=env, timeout=60)
+    assert r.returncode == 0, (r.returncode, r.stdout[-300:], r.stderr[-300:])
+    assert "計画 8:15" in r.stdout and "振り返り 16:45" in r.stdout, r.stdout
+    run_sh = read(os.path.join(home, "scripts", "auto", "run.sh"))
+    assert 'export PATH="/opt/bom-test/bin:/usr/bin"' in run_sh, run_sh[:300]
+    plist = read(os.path.join(fake_home, "Library", "LaunchAgents", "com.ai-bunshin.daily-plan.plist"))
+    assert "<key>Hour</key><integer>8</integer>" in plist and "<key>Minute</key><integer>15</integer>" in plist, plist
+
+
+FAKE_WATCH_KINDS = {
+    "exits_1": "exit 1",
+    "empty": "exit 0",
+    "garbage": "echo 'abc'; exit 0",
+    "dead_python": "exec python3 -c 'import nonexistent_module_xyz'",
+}
+
+
+def install_fake_watch(c, turns_body):
+    """作り物の watch_check.py に差し替える：turns だけ壊し（turns_body をシェルで動かす）、ほかの呼び出し（canary など）は本物に渡す。"""
+    scripts = os.path.join(c["plugin"], "scripts")
+    os.rename(os.path.join(scripts, "watch_check.py"), os.path.join(scripts, "watch_real.py"))
+    open(os.path.join(scripts, "watch_check.py"), "w", encoding="utf-8").write(
+        "import os, subprocess, sys\n"
+        "if sys.argv[1:2] == ['turns']:\n"
+        f"    sys.exit(subprocess.run(['/bin/sh', '-c', {turns_body!r}]).returncode)\n"
+        "here = os.path.dirname(os.path.abspath(__file__))\n"
+        "sys.exit(subprocess.run([sys.executable, os.path.join(here, 'watch_real.py'), *sys.argv[1:]]).returncode)\n")
+
+
+@case
+def h3_dead_or_empty_watch_check_uses_the_shell_defaults_100_300_100():
+    # watch_check.py の turns が動かない・空・数でない値を返すとき、シェル側の既定（計画 100・実行 300・振り返り 100）になる。
+    # config に別の数を書いても、watch_check が答えない以上は既定（シェルは config を自分では読まない）
+    cfg = {"auto": {"max_turns": {"plan": 5, "do": 7, "review": 9}}}
+    for kind, body in FAKE_WATCH_KINDS.items():
+        d = os.path.join(BASE, f"h3_{kind}")
+        c = make_cycle(f"h3_{kind}", args_body(d), cfg=cfg)
+        install_fake_watch(c, body)
+        r = run_cycle(c, "plan", mode="plan")   # 計画 → 続けて実行
+        assert r.returncode == 0 and [turns_in(x) for x in args_of(d)] == ["100", "300"], (kind, [turns_in(x) for x in args_of(d)], r.stderr[:200])
+        d2 = os.path.join(BASE, f"h3r_{kind}")
+        c2 = make_cycle(f"h3r_{kind}", args_body(d2), cfg=cfg)
+        install_fake_watch(c2, body)
+        r = run_cycle(c2, "review", mode="review")
+        assert r.returncode == 0 and [turns_in(x) for x in args_of(d2)] == ["100"], (kind, [turns_in(x) for x in args_of(d2)], r.stderr[:200])
+        d3 = os.path.join(BASE, f"h3d_{kind}")   # 実行だけ（手動）。作り物の plan-context は 2 回目から「作成済み」を返すので 2 回動かす
+        c3 = make_cycle(f"h3d_{kind}", args_body(d3), cfg=cfg)
+        install_fake_watch(c3, body)
+        run_cycle(c3, "do", mode="plan")
+        r = run_cycle(c3, "do", mode="plan")
+        assert [turns_in(x) for x in args_of(d3)][-1:] == ["300"], (kind, [turns_in(x) for x in args_of(d3)], r.stderr[:200])
 
 
 # ---------- 7. ルール・スキル・部下の文（3章・10章5〜6が、どこにあるか） ----------

@@ -14,12 +14,12 @@ HOME_DIR="${1:A}"
 PLUGIN_ROOT="${0:A:h:h:h}"
 read PLAN_H PLAN_M REVIEW_H REVIEW_M <<< "$(python3 - "$HOME_DIR/設定/config.json" <<'PY'
 import json, sys
-c = json.load(open(sys.argv[1], encoding="utf-8")).get("schedule", {})
+c = json.load(open(sys.argv[1], encoding="utf-8-sig")).get("schedule", {})
 p = c.get("plan", "09:00").split(":"); r = c.get("review", "17:00").split(":")
 print(int(p[0]), int(p[1]), int(r[0]), int(r[1]))
 PY
 )"
-CONF_PATH=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1], encoding="utf-8")).get("path",""))' "$HOME_DIR/設定/config.json")
+CONF_PATH=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1], encoding="utf-8-sig")).get("path",""))' "$HOME_DIR/設定/config.json")
 RUN_PATH="${CONF_PATH:-$PATH}"
 
 mkdir -p "$HOME_DIR/scripts/auto/logs"
