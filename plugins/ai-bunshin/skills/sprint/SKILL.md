@@ -9,7 +9,7 @@ description: スクラム＋PDCAでスプリントを1つ実行する。ゴー�
 
 > 毎日の計画・実行・振り返りは 1日スプリント（`/ai-bunshin:daily-plan` → `/ai-bunshin:daily-do` → `/ai-bunshin:daily-review`、平日9時に計画→続けて実行、17時に振り返り）で回す。この手順は、本人との会話の中で依頼をその場で進めるときと、週のスプリント（S###）の区切りの Check 会議で使う。
 
-引数：対象のタスクID（例：`T001 T002`）または依頼内容。なければ tasks.json の優先順位上位から選ぶ。特定のタスクだけ見たいときは、tasks.json を全体で開かず `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/update_dashboard.py" --task T0XX T0YY` で出す（指定のタスクだけを JSON で出す。読むだけで何も書かない。無い ID は知らせて終了コード 1）。直すときは必要な所を Read してから Edit する。
+引数：対象のタスクID（例：`T001 T002`）または依頼内容。なければ tasks.json の優先順位上位から選ぶ。特定のタスクだけ見たいときは、tasks.json を全体で開かず `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/update_dashboard.py" --task T0XX T0YY` で出す（指定のタスクだけを JSON で出す。読むだけで何も書かない。無い ID は知らせて終了コード 1）。直すときは必要なところを Read してから Edit する。
 
 ## 0. 準備
 

@@ -54,7 +54,7 @@ description: AI 分身の初回セットアップ。新しく使い始める人�
 - デザインを入れたくない仕事（例：社内資料は自分で見るので不要）があれば聞いて、本人設定に書く
 
 **（3回目の続き）Google カレンダー**
-- 先に `.claude/ai-bunshin-details/calendar.md` を読む（セットアップの途中でまだ写されていないときは `${CLAUDE_PLUGIN_ROOT}/rules/details/calendar.md`)（一度読んだら、この会話では読み直さない）
+- 先に `.claude/ai-bunshin-details/calendar.md` を読む（セットアップの途中でまだコピーされていないときは `${CLAUDE_PLUGIN_ROOT}/rules/details/calendar.md`)（一度読んだら、この会話では読み直さない）
 - 「今日の予定を、タスクと一緒に見られるようにしますか？（Google カレンダー）」→ いいえなら飛ばす
 - はいなら、使い方に合わせて案内する（どちらも読むだけ）：
   - **チャットだけで使う人**：claude.ai の設定 → コネクタ（Connectors）→ Google Calendar をオンにして、Google アカウントでログインする。オンにしたら「今日の予定を見せて」で確かめる。config の `calendar` は `{"type": "connector"}`

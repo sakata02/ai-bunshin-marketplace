@@ -10,7 +10,7 @@ description: 毎日17時の振り返り会議。昨日の Try を検証し、今
 引数：日付（YYYY-MM-DD、省略時は今日）。
 
 自動実行（`claude -p`）のときは本人がその場にいない。**質問せず最後まで進め、判断が必要なことは「本人へのお願い」に登録する。**
-Bash は `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/update_dashboard.py" …` だけを使う。tasks.json は Read と Edit で直接直す（別のスクリプトは作らない）。特定のタスクだけ見たいときは、tasks.json を全体で開かず `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/update_dashboard.py" --task T0XX T0YY` で出す（指定のタスクだけを JSON で出す。読むだけで何も書かない。無い ID は知らせて終了コード 1）。直すときは必要な所を Read してから Edit する。ロックの確認のときだけ `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/lock_check.py"` も使ってよい（読むだけ）。
+Bash は `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/update_dashboard.py" …` だけを使う。tasks.json は Read と Edit で直接直す（別のスクリプトは作らない）。特定のタスクだけ見たいときは、tasks.json を全体で開かず `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/update_dashboard.py" --task T0XX T0YY` で出す（指定のタスクだけを JSON で出す。読むだけで何も書かない。無い ID は知らせて終了コード 1）。直すときは必要なところを Read してから Edit する。ロックの確認のときだけ `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/lock_check.py"` も使ってよい（読むだけ）。
 
 1日スプリント（9時 計画 → すぐ実行 → 17時 振り返り）の最後の会議。**目的は、ベロシティ（1日に完了できる pt）を上げること。**
 
