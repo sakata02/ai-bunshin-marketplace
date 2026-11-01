@@ -561,7 +561,7 @@ def t69_5_unexpected_exception_is_logged_to_auto_logs_and_message_names_it():
         files = [f for f in os.listdir(logdir) if f == "dashboard_error_20261102.log"]   # --now の日付で名前が決まる
         assert files, os.listdir(logdir) if os.path.isdir(logdir) else "logs が無い"
         body = open(os.path.join(logdir, files[0]), encoding="utf-8").read()
-        assert "Traceback" in body and "KeyError" in body and "boom" in body, body
+        assert "KeyError" in body and "boom" in body and "update_dashboard.py:" in body, body
         assert "scripts/auto/logs/" + files[0] in text, text
         assert "Traceback" not in text
         # 2回目は追記（上書きしない）
@@ -570,6 +570,8 @@ def t69_5_unexpected_exception_is_logged_to_auto_logs_and_message_names_it():
             MOD.main()
         body2 = open(os.path.join(logdir, files[0]), encoding="utf-8").read()
         assert body2.count("KeyError") >= 2 and body2.startswith(body[:50])
+        assert "--today" in body and "--now" in body and "2026-11-02 10:00" in body.split("\n")[0]   # 日時は入る
+        assert "--today 2026" not in body and "--now 2026" not in body, body   # 引数の値は入れない
         # ログが書けないとき（保存先が普通のファイル）も止まらない
         blocker = os.path.join(BASE, "not_a_dir")
         with open(blocker, "w") as f:
@@ -581,9 +583,70 @@ def t69_5_unexpected_exception_is_logged_to_auto_logs_and_message_names_it():
             rc = MOD.main()
         text = out.getvalue() + err.getvalue()
         assert rc == 1 and "Traceback" not in text and re.search(r"[ぁ-んァ-ン一-龥]", text), (rc, text)
-        assert "ログ" in text
+        assert "ログ" in text and "この文面を AI に見せてください" in text and "とログ" not in text, text
     finally:
         MOD.run, MOD.AUTO_DIR, sys.argv = saved_run, saved_auto, saved_argv
+
+
+SECRET = "秘密のタスク名ZZ9"
+
+
+@case
+def t69b_log_has_no_exception_text_paths_or_arg_values():
+    """ログに入れるのは、日時・オプション名・例外の型名・ファイル名:行番号 だけ。タスクの文字が例外の文面に入っても残らない。"""
+    saved_argv, saved_run = sys.argv, MOD.run
+
+    def boom2(today):
+        raise KeyError(SECRET)   # 例外の文面にタスクの文字が入る
+
+    MOD.run = boom2
+    try:
+        sys.argv = ["x", "--today", "2031-05-05", "--plan-context"]
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            MOD.main()
+        logdir = os.path.join(MOD_HOME, "scripts", "auto", "logs")
+        body = ""
+        for fn in os.listdir(logdir):
+            body += open(os.path.join(logdir, fn), encoding="utf-8").read()
+        assert "KeyError" in body, body
+        assert SECRET not in body and "raise KeyError" not in body, body            # 文面・ソースの行は書かない
+        assert "2031-05-05" not in body and "--today" in body and "--plan-context" in body, body   # 引数は名前だけ
+        assert "/" not in body.replace("scripts/auto/logs", ""), body                 # パス（プラグイン・本人のフォルダ）は書かない
+        assert SECRET not in out.getvalue() + err.getvalue()
+    finally:
+        MOD.run, sys.argv = saved_run, saved_argv
+
+
+@case
+def t69b_excel_failure_is_logged_without_task_text_and_message_names_log():
+    try:
+        import openpyxl  # noqa: F401
+    except ImportError:
+        print("      （openpyxl が無いので飛ばす）")
+        return
+    t = copy.deepcopy(TASKS)
+    t["tasks"][0]["note"] = [SECRET]
+    home = make_home(tasks=t)
+    r = run_dash(home, ["--today", "2026-11-02", "--now", "2026-11-02 10:00"])
+    assert r.returncode == 1, r.stderr
+    assert "scripts/auto/logs/dashboard_error_20261102.log" in r.stderr, r.stderr
+    assert SECRET not in r.stdout + r.stderr or "Cannot convert" not in r.stderr
+    body = open(os.path.join(home, "scripts", "auto", "logs", "dashboard_error_20261102.log"), encoding="utf-8").read()
+    assert SECRET not in body and "ValueError" in body and "Cannot convert" not in body, body
+
+
+@case
+def t69b_history_with_broken_lines_does_not_stop_plan_context():
+    home = make_home()
+    run_dash(home, ["--today", "2026-11-02"])
+    good = json.dumps({"at": "2026-11-01 09:00", "id": "T001", "change": "新規", "title": "a", "status": "ToDo"}, ensure_ascii=False)
+    with open(data_file(home, "history.jsonl"), "w", encoding="utf-8") as f:
+        f.write("{ 壊れた行\n" + good + "\n[1, 2]\n{\"at\": 5}\n\n{\"at\": \"2026-11-02 08:00\", \"change\": \"新規\"}\n")
+    for mode in (["--plan-context"], ["--review-context"]):
+        r = run_dash(home, ["--today", "2026-11-02"] + mode)
+        assert r.returncode == 0, (mode, r.stderr[-300:])
+        assert "Traceback" not in r.stderr
 
 
 # ---------- 既定値 ----------

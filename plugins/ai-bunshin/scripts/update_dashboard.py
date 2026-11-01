@@ -1563,7 +1563,7 @@ def record_history(data):
 
 
 def read_history():
-    """history.jsonl の記録（1行1件）。壊れた行・形が違う行は飛ばす（手で編集されても止めない）。"""
+    """history.jsonl の記録（1行1件）。壊れた行・形が違う行（at・id・change・title が文字でない）は飛ばす（手で編集されても止めない）。"""
     if not HISTORY_JSONL.exists():
         return []
     out = []
@@ -1577,7 +1577,7 @@ def read_history():
                 e = json.loads(line)
             except ValueError:
                 continue
-            if isinstance(e, dict) and isinstance(e.get("at"), str):
+            if isinstance(e, dict) and all(isinstance(e.get(k), str) for k in ("at", "id", "change", "title")):   # 使うところで KeyError にならない行だけ
                 out.append(e)
     return out
 
@@ -1958,9 +1958,11 @@ def write_excel(ctx):
         build_gantt(wb, ctx)
         build_sprint_history(wb, ctx)
     except (ValueError, TypeError) as e:   # 一覧や { } など、Excel のセルに入らない値（英語の "Cannot convert ..." をそのまま見せない）
+        logged = write_error_log(sys.argv[1:])
         raise BadFile("Excel（タスク管理.xlsx）に書けない値が tasks.json にあります。note・title・department など、文字や数のはずの項目に、"
                       "一覧（[ ]）や { } が入っていないか確かめてください"
-                      f"（内部のエラー：{type(e).__name__}）。tasks.json は書き換えていません") from e
+                      f"（内部のエラー：{type(e).__name__}）。tasks.json は書き換えていません。{log_note(logged)}"
+                      + ("" if logged else "直らなければ、この文面を AI に見せてください")) from e
     try:
         atomic_save(XLSX, lambda tmp: wb.save(tmp))   # 一時ファイルに作ってから置き換える。途中で止まっても、元の Excel は壊れない
     except OSError:   # Excel が開いている（Windows は PermissionError）ほか、保存先に書けないとき。落ちずに、ほかの生成物は書く
@@ -2193,25 +2195,35 @@ ERROR_LOG_PREFIX = "dashboard_error"
 
 
 def write_error_log(argv):
-    """想定外の例外のトレースバックを scripts/auto/logs/dashboard_error_YYYYMMDD.log に追記する。書けたらその場所（本人のフォルダからの
-    相対パス）、書けない・本人のフォルダが無いときは None（ログが書けなくても止めない）。"""
+    """想定外の例外の手がかりを scripts/auto/logs/dashboard_error_YYYYMMDD.log に追記する（except の中で呼ぶ）。書けたらその場所
+    （本人のフォルダからの相対パス）、書けない・本人のフォルダが無いときは None（ログが書けなくても止めない）。
+    入れるのは、日時・引数のうちオプション名だけ（値は入れない）・例外の型名・「ファイル名:行番号 (関数名)」の並びだけ。
+    例外の文面（タスクの文字などが入りうる）・ソースの行・フォルダのパス（プラグインのパスを含む）は書かない。"""
     if find_root() is None:
         return None
     try:
         import traceback
+        etype, _, tb = sys.exc_info()
+        options = [a.split("=", 1)[0] for a in argv if a.startswith("--")]
+        frames = [f"  {Path(fr.filename).name}:{fr.lineno} ({fr.name})" for fr in traceback.extract_tb(tb)]
         logdir = AUTO_DIR / "logs"
         logdir.mkdir(parents=True, exist_ok=True)
         path = logdir / f"{ERROR_LOG_PREFIX}_{current_now().strftime('%Y%m%d')}.log"
         with open(path, "a", encoding="utf-8") as f:
-            f.write(f"[{current_now().strftime('%Y-%m-%d %H:%M:%S')}] update_dashboard.py {' '.join(argv)}\n")
-            f.write(traceback.format_exc())
-            f.write("\n")
+            f.write(f"[{current_now().strftime('%Y-%m-%d %H:%M:%S')}] update_dashboard.py {' '.join(options)}\n")
+            f.write(f"例外の型: {etype.__name__ if etype else '不明'}\n")
+            f.write("\n".join(frames) + "\n\n")
         try:
             return path.relative_to(ROOT).as_posix()
         except ValueError:
-            return str(path)
+            return path.name
     except Exception:
         return None
+
+
+def log_note(logged):
+    """案内の文に入れる、ログの場所の1文。"""
+    return f"詳しい手がかりは {logged} に残しました。" if logged else "ログは書けませんでした。"
 
 
 def failure_notice(message, args, code):
@@ -2238,9 +2250,9 @@ def main():
             hook = "--hook" in sys.argv
             session = "--session" in sys.argv
         logged = write_error_log(sys.argv[1:])
-        where = (f"詳しいエラーは {logged} に残しました。" if logged else "詳しいエラーのログは書けませんでした。")
         return failure_notice(f"ダッシュボード更新で想定外のエラーが起きました（{type(e).__name__}）。tasks.json や設定/config.json の中身に"
-                              f"変わった書き方がないか確かめてください。{where}直らなければ、この文面とログを AI に見せてください", _Mode, 1)
+                              f"変わった書き方がないか確かめてください。{log_note(logged)}"
+                              + ("直らなければ、この文面とログを AI に見せてください" if logged else "直らなければ、この文面を AI に見せてください"), _Mode, 1)
 
 
 def _main():
