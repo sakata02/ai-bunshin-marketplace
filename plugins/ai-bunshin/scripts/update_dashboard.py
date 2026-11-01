@@ -820,7 +820,7 @@ def build_dashboard(wb, ctx):
             c.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
             c.fill = PatternFill("solid", fgColor="F2F2F2")
             c.border = BORDER
-    ws.row_dimensions[4].height = 42
+    ws.row_dimensions[4].height = 54   # 長い見出し（C4・G4・H4）が切れない高さ
     ws.row_dimensions[5].height = 32
     ws.cell(row=6, column=8, value=f"（{ctx['velocity_src']}）").font = Font(name=FONT, size=8, color="808080")
 
@@ -839,6 +839,10 @@ def build_dashboard(wb, ctx):
             ws.cell(row=i, column=1, value=k).font = Font(name=FONT, bold=True, size=10)
             ws.cell(row=i, column=2, value=v).font = BODY_FONT
             ws.merge_cells(start_row=i, start_column=2, end_row=i, end_column=7)
+            if len(k) > 14:   # 長い見出し（PDCAフェーズ＋説明）は折り返して、全文が見える高さにする
+                ws.cell(row=i, column=1).alignment = Alignment(wrap_text=True, vertical="center")
+                ws.cell(row=i, column=2).alignment = Alignment(vertical="center")
+                ws.row_dimensions[i].height = 32
         row += len(info) + 2
     else:
         ws.cell(row=row + 1, column=1, value="スプリントはまだありません").font = BODY_FONT
@@ -1138,7 +1142,7 @@ def build_task_list(wb, ctx):
         due = t.get("due")
         vals = [t.get("_rank") or "", t["id"], t["title"], t.get("department"), t.get("type", ""),
                 "部下E" if t.get("design") else "",
-                MEMBER_LABEL.get(t.get("assignee"), t.get("assignee")), MEMBER_LABEL.get(t.get("reviewer"), t.get("reviewer") or ""),
+                role_name(t.get("assignee")), role_name(t.get("reviewer")),
                 t["status"],
                 t["_flag"], t.get("points"), t.get("progress") or (100 if t["status"] == "完了" else 0),
                 parse_date(t.get("start")), parse_date(due) if due else "指定なし", (fc_text(t) if t["_state"] else t["_forecast"]),
@@ -1246,7 +1250,8 @@ def build_board_md(ctx):
     lines += [f"- {l}" for l in unscheduled_lines(ctx["open_tasks"])]
     if sprint:
         lines.append(f"- **現在のスプリント（{SPRINT_NOTE}）**：{sprint['id']}「{sprint.get('goal', '')}」"
-                     f"（{fmt_jp(parse_date(sprint['start']))}〜{fmt_jp(parse_date(sprint['end']))}／{sprint.get('pdca', '')}）")
+                     f"（{fmt_jp(parse_date(sprint['start']))}〜{fmt_jp(parse_date(sprint['end']))}／"
+                     f"{sprint.get('pdca', '')}{'（' + PDCA_NOTE + '）' if sprint.get('pdca') else ''}）")
     alerts = [t for t in tasks if t["_flag"] in (FLAG_OVERDUE, FLAG_LATE)]
     if alerts:
         lines += ["", "## 要注意", ""]
@@ -1278,7 +1283,7 @@ def assignment_warnings(tasks):
         typ = t.get("type")
         for who in (t.get("assignee"), t.get("reviewer")):
             if who in TEAM_OFF:
-                out.append(f"{t['id']}：{MEMBER_LABEL.get(who, who)} は本人設定で使わない（team.off）")
+                out.append(f"{t['id']}：{role_name(who)} は本人設定で使わない（team.off）")
         if not typ:
             out.append(f"{t['id']}：種類（type）が未設定")
             continue
@@ -1286,9 +1291,9 @@ def assignment_warnings(tasks):
         if makers is None:
             continue
         if t.get("assignee") not in makers:
-            out.append(f"{t['id']}：{typ} なのに作る人が {MEMBER_LABEL.get(t.get('assignee'), t.get('assignee'))}")
+            out.append(f"{t['id']}：{typ} なのに作る人が {role_name(t.get('assignee')) or '（未設定）'}")
         if t.get("reviewer") and t["reviewer"] not in reviewers:
-            out.append(f"{t['id']}：{typ} なのに確かめる人が {MEMBER_LABEL.get(t['reviewer'], t['reviewer'])}")
+            out.append(f"{t['id']}：{typ} なのに確かめる人が {role_name(t['reviewer'])}")
     return out
 
 
@@ -1381,7 +1386,7 @@ def summary_text(ctx, limit=10, with_ids=False):
     if tds:
         r = next(r for r in daily_rows(ctx["data"], ctx["tasks"]) if r["ds"] is tds)
         lines.append(f"[📅 今日の計画] {'、'.join(tds.get('planned', []))} — 約束 {r['committed']:g}pt／完了 {r['done_planned']:g}pt"
-                     f"（{tds.get('status', '')}）")
+                     f"（{tds.get('status', '')}。pt＝しごとの大きさ）")
     if LOCK_FILE.exists():
         # ロックの1・2行目（PID と段階名）だけを1行で出す。3行目の実行 ID は AI に見せない
         # （自分の実行かどうかは、ID を見て決めず lock_check.py の1行目で決める。T080）
@@ -1617,7 +1622,7 @@ def team_summary(ctx, today):
         days = (today - since).days
         flag = ("　← 2週間 呼ばれていない（やめる候補）" if n14 == 0 and days >= 14
                 else (f"（参加から{days}日。1週間のお試し中）" if m in joined and days < 7 else ""))
-        lines.append(f"- {MEMBER_LABEL.get(m, m)}（{m}）：直近7日 {n7} 件／14日 {n14} 件{flag}")
+        lines.append(f"- {role_name(m)}（{m}）：直近7日 {n7} 件／14日 {n14} 件{flag}")
     roles = {}
     for t in tasks:
         note = t.get("note") or ""

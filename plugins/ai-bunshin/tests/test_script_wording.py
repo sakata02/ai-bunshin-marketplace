@@ -119,6 +119,61 @@ else:
     check("Excel スプリント履歴：スプリント・計画pt の見出しに注釈", all(h in hheads and hheads[h].comment is not None for h in ("スプリント", "計画pt")), list(hheads))
     check("Excel 要注意タスク・ガント：作る人が役割名（部下C）", "部下C" in texts, "")
 
+# --- 5. ダッシュボードの見出しの折り返しと高さ（T074 の直し） ---
+if openpyxl is not None:
+    a_pdca = next((c for row in dash.iter_rows(min_row=9, max_row=14, max_col=1) for c in row
+                   if c.value and str(c.value).startswith("PDCAフェーズ（")), None)
+    check("Excel ダッシュボード：PDCAフェーズの見出し（A列）が折り返す", a_pdca is not None and a_pdca.alignment.wrap_text, a_pdca)
+    h_pdca = dash.row_dimensions[a_pdca.row].height if a_pdca else None
+    check("Excel ダッシュボード：PDCAフェーズの行が2行ぶん以上の高さ", h_pdca is not None and h_pdca >= 30, h_pdca)
+    check("Excel ダッシュボード：4行目（C4・G4・H4の見出し）の高さが54以上", (dash.row_dimensions[4].height or 0) >= 54, dash.row_dimensions[4].height)
+    check("Excel ダッシュボード：C4・G4・H4が折り返す", all(dash[c].alignment.wrap_text for c in ("C4", "G4", "H4")), "")
+
+# --- 6. 本人に見せる文言の追加（T074 の直し） ---
+dev_skill = open(os.path.join(HERE, "..", "skills", "dev", "SKILL.md"), encoding="utf-8").read()
+check("dev スキル：git switch の案内に ! を付けない（ターミナルで打つ形）", "! cd <リポジトリ> && git switch" not in dev_skill and "git switch <ブランチ>" in dev_skill)
+check("dev スキル：push の案内の ! は残す", "! git -C <リポジトリ> push -u origin <ブランチ>" in dev_skill)
+check("タスクボード：現在のスプリントの PDCA に説明が付く", re.search(r"現在のスプリント[^\n]*Do[^\n]*計画・実行・確認・改善のどの段階か", board) is not None, board[:700])
+
+# 今日の計画の行（起動時のまとめ）に pt の説明が付く。assignee が変わった値でも落ちず None と出ない
+R2 = os.path.join(BASE, "owner2")
+os.makedirs(os.path.join(R2, "設定"))
+os.makedirs(os.path.join(R2, "00_タスク管理", "data"))
+json.dump({"owner": "テスト", "owner_call": "テストさん", "ai_name": "テストAI", "departments": ["総務"]},
+          open(os.path.join(R2, "設定", "config.json"), "w", encoding="utf-8"), ensure_ascii=False)
+base_t = {"status": "ToDo", "points": 1, "department": "総務", "sprint": "S001"}
+d2 = {"project": {"name": "テストAI", "daily_capacity_default": 8.0, "holidays": []},
+      "daily_sprints": [{"date": TODAY.isoformat(), "capacity": 8, "planned": ["T001", "T002", "T003", "T005", "T006"],
+                         "committed": 5, "status": "実行中"}],
+      "sprints": DATA["sprints"],
+      "tasks": [
+          dict(base_t, id="T001", title="foo", assignee="foo", type="開発", reviewer="foo", priority=1),
+          dict(base_t, id="T002", title="null", assignee=None, type="資料", reviewer=None, priority=2),
+          dict(base_t, id="T003", title="無し", type="資料", priority=3),
+          dict(base_t, id="T004", title="本人", assignee="テスト", type="本人の仕事", kind="自分", priority=4),
+          dict(base_t, id="T005", title="指揮官", assignee="指揮官", type="開発", priority=5),
+          dict(base_t, id="T006", title="種類なし", assignee="dev-a", priority=6),
+      ]}
+json.dump(d2, open(os.path.join(R2, "00_タスク管理", "data", "tasks.json"), "w", encoding="utf-8"), ensure_ascii=False)
+for args in ([], ["--session"], ["--review-context"], ["--plan-context"]):
+    r2 = run(["--today", TODAY.isoformat(), *args], cwd=R2, home=R2)
+    check(f"assignee が foo・null・無し・本人・指揮官でも落ちない {args}", r2.returncode == 0 and "Traceback" not in r2.stderr, r2.stderr[-400:])
+    check(f"assignee が欠けていても None と出ない {args}", not re.search(r"\bNone\b", r2.stdout), [l for l in r2.stdout.splitlines() if "None" in l][:3])
+r2 = run(["--today", TODAY.isoformat()], cwd=R2, home=R2)
+plan_line = next((l for l in r2.stdout.splitlines() if l.startswith("[📅 今日の計画]")), "")
+check("起動時のまとめ：今日の計画の行に「pt＝しごとの大きさ」", "pt＝しごとの大きさ" in plan_line and "約束" in plan_line, plan_line or r2.stdout[:500])
+warn_line = next((l for l in r2.stdout.splitlines() if "振り分けの確認" in l), "")
+check("振り分けの確認：作る人が無いときは（未設定）と出る", "（未設定）" in warn_line, warn_line or r2.stdout[:500])
+check("振り分けの確認：foo はそのまま出る", "foo" in warn_line, warn_line)
+check("振り分けの確認：dev-a は部下C と出る（記号を出さない）", "dev-a" not in warn_line, warn_line)
+if openpyxl is not None:
+    wb2 = openpyxl.load_workbook(os.path.join(R2, "00_タスク管理", "タスク管理.xlsx"))
+    t2 = [str(c.value) for ws in wb2 for row in ws.iter_rows() for c in row if c.value is not None]
+    check("assignee が欠けていても Excel に None の文字が出ない", "None" not in t2, "")
+# 週の振り返り（金曜）のチームのまとめも落ちない
+rf = run(["--today", "2026-11-06", "--review-context"], cwd=R2, home=R2)
+check("金曜の振り返りの材料も assignee が変わった値で落ちない", rf.returncode == 0 and "Traceback" not in rf.stderr, rf.stderr[-400:])
+
 after = json.load(open(TASKS_PATH, encoding="utf-8"))["tasks"]
 check("tasks.json の値（assignee・reviewer）は変わらない（dev-a のまま）",
       [(t["assignee"], t["reviewer"]) for t in after] == [(t["assignee"], t["reviewer"]) for t in DATA["tasks"]], after)
