@@ -544,11 +544,15 @@ def t69_3_list_note_fails_in_japanese_and_tasks_json_bytes_stay_same():
 
 @case
 def t69_5_unexpected_exception_is_logged_to_auto_logs_and_message_names_it():
-    saved_argv, saved_run, saved_auto = sys.argv, MOD.run, MOD.AUTO_DIR
+    saved_argv, saved_run, saved_auto, saved_root = sys.argv, MOD.run, MOD.AUTO_DIR, MOD.ROOT
 
     def boom(today):
         raise KeyError("start")
 
+    # 他のテストのログ（固定日付が本物の今日と同じ日だと同じファイルになる）と混ぜないよう、このテストだけの置き場にする
+    own_root = type(MOD.ROOT)(os.path.join(BASE, "t69_5_home"))
+    MOD.ROOT = own_root
+    MOD.AUTO_DIR = own_root / "scripts" / "auto"
     MOD.run = boom
     try:
         sys.argv = ["x", "--today", "2026-11-02", "--now", "2026-11-02 10:00"]
@@ -557,15 +561,15 @@ def t69_5_unexpected_exception_is_logged_to_auto_logs_and_message_names_it():
             rc = MOD.main()
         text = out.getvalue() + err.getvalue()
         assert rc == 1, (rc, text)
-        logdir = os.path.join(MOD_HOME, "scripts", "auto", "logs")
+        logdir = os.path.join(str(own_root), "scripts", "auto", "logs")
         files = [f for f in os.listdir(logdir) if f == "dashboard_error_20261102.log"]   # --now の日付で名前が決まる
         assert files, os.listdir(logdir) if os.path.isdir(logdir) else "logs が無い"
         body = open(os.path.join(logdir, files[0]), encoding="utf-8").read()
         assert "KeyError" in body and "boom" in body and "update_dashboard.py:" in body, body
         assert "scripts/auto/logs/" + files[0] in text, text
         assert "Traceback" not in text
-        # 2回目は追記（上書きしない）
-        sys.argv = ["x"]
+        # 2回目は追記（上書きしない）。同じ日付を渡して、同じファイルに書かせる
+        sys.argv = ["x", "--today", "2026-11-02", "--now", "2026-11-02 10:00"]
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             MOD.main()
         body2 = open(os.path.join(logdir, files[0]), encoding="utf-8").read()
@@ -585,7 +589,7 @@ def t69_5_unexpected_exception_is_logged_to_auto_logs_and_message_names_it():
         assert rc == 1 and "Traceback" not in text and re.search(r"[ぁ-んァ-ン一-龥]", text), (rc, text)
         assert "ログ" in text and "この文面を AI に見せてください" in text and "とログ" not in text, text
     finally:
-        MOD.run, MOD.AUTO_DIR, sys.argv = saved_run, saved_auto, saved_argv
+        MOD.run, MOD.AUTO_DIR, MOD.ROOT, sys.argv = saved_run, saved_auto, saved_root, saved_argv
 
 
 SECRET = "秘密のタスク名ZZ9"

@@ -628,5 +628,108 @@ def c63_files_are_not_modified_by_materials():
     assert (open(p1, "rb").read(), open(p2, "rb").read()) == before
 
 
+# ---------- 直し（部下D の指摘）：BOM が先頭の行に付く・後ろの節・切ったしるし・同じ語の列・ちょうど上限・部署が空 ----------
+
+@case
+def c70_bom_on_first_line_heading_and_table_header():
+    h = make_home()
+    put(h, "業務の流れ.md", "## 業務の一覧\n\n| 業務 | 頻度 |\n|---|---|\n| 週報 | 毎日 |\n", bom=True)
+    put(h, "部署一覧.md", "| 部署 | 役割 | 主な業務 | 定例・締め切り | 関係者 |\n|---|---|---|---|---|\n| 技術部 | a | b | 毎週金曜 | c |\n", bom=True)
+    out = materials(h)
+    assert "週報（頻度：毎日）" in line(out, "- 業務の流れ（"), out
+    assert "技術部：毎週金曜" in line(out, "- 部署一覧の定例"), out
+    h = make_home()
+    put(h, "業務の流れ.md", "## 候補（未確認）\n\n- 月末の転記\n", bom=True)
+    assert "月末の転記" in line(materials(h), "- 業務の流れの候補")
+
+
+@case
+def c71_later_section_after_candidates_is_not_picked():
+    h = make_home()
+    put(h, "業務の流れ.md", "## 業務の一覧\n\n| 業務 |\n|---|\n| 週報 |\n\n## 候補（未確認）\n\n- 月末の転記\n\n"
+                            "## 別の節\n\n- 候補ではない箇条書き\n- もう一つ\n")
+    l = line(materials(h), "- 業務の流れの候補")
+    assert "月末の転記" in l and "候補ではない" not in l and "もう一つ" not in l, l
+    # 業務の一覧の後ろの節の表も読まない
+    put(h, "業務の流れ.md", "## 業務の一覧\n\n| 業務 |\n|---|\n| 週報 |\n\n## 別の節\n\n| 業務 |\n|---|\n| 別の表の行 |\n")
+    assert "別の表の行" not in line(materials(h), "- 業務の流れ（")
+
+
+@case
+def c72_cut_text_ends_with_ellipsis_and_fits():
+    h = make_home()
+    put(h, "業務の流れ.md", "## 業務の一覧\n\n| 業務 | 頻度 | 困っていること |\n|---|---|---|\n"
+                            f"| {'業' * 40} | 短い | {'困' * 40} |\n\n## 候補（未確認）\n\n- {'候' * 150}\n")
+    out = materials(h, [own("T001", "題" * 40)], events=[ev("件" * 100)], cfg=dict(REAL_CFG, calendar={"type": "ics"}))
+    l = line(out, "- 業務の流れ（").split("：", 1)[1]
+    assert "業" * 29 + "…（" in l and "困" * 29 + "…）" in l and "短い" in l, l
+    l = line(out, "- 業務の流れの候補").split("：", 1)[1]
+    assert l == "候" * 99 + "…", len(l)
+    l = line(out, EV_LABEL).split("：", 1)[1]
+    assert l == "件" * 59 + "…", len(l)
+    l = line(out, "- 本人の仕事").split("：", 1)[1]
+    assert l == "T001 " + "題" * 23 + "…", l
+    # ちょうどの長さなら「…」を付けない
+    put(h, "業務の流れ.md", f"## 業務の一覧\n\n| 業務 |\n|---|\n| {'業' * 30} |\n")
+    assert line(materials(h), "- 業務の流れ（").endswith("業" * 30)
+
+
+@case
+def c73_first_matching_column_is_used_when_two_columns_have_the_word():
+    h = make_home()
+    put(h, "業務の流れ.md", "## 業務の一覧\n\n| 業務名 | 業務の補足 | 頻度 | 頻度の目安 | 困っていること | 困っていることの補足 |\n|---|---|---|---|---|---|\n"
+                            "| 週報 | 補足A | 毎日 | 目安B | 手間 | 補足C |\n")
+    l = line(materials(h), "- 業務の流れ（")
+    assert "週報（頻度：毎日／困りごと：手間）" in l and "補足" not in l and "目安" not in l, l
+    h = make_home()
+    put(h, "部署一覧.md", "| 部署 | 部署メモ | 定例・締め切り | 定例・締め切り（補足） |\n|---|---|---|---|\n| 技術部 | メモ | 毎週 | 補足 |\n")
+    l = line(materials(h), "- 部署一覧の定例")
+    assert l.endswith("技術部：毎週"), l
+
+
+@case
+def c74_exactly_at_limit_has_no_hoka():
+    h = make_home()
+    rows = "".join(f"| 業務{i:02d} |\n" for i in range(10))
+    cands = "".join(f"- 候補{i}\n" for i in range(5))
+    put(h, "業務の流れ.md", f"## 業務の一覧\n\n| 業務 |\n|---|\n{rows}\n## 候補（未確認）\n\n{cands}")
+    drows = "".join(f"| 部署{i:02d} | r | m | 定例{i} | k |\n" for i in range(10))
+    put(h, "部署一覧.md", "| 部署 | 役割 | 業務 | 定例・締め切り | 関係者 |\n|---|---|---|---|---|\n" + drows)
+    ts = [own(f"T1{i:02d}", f"仕事{i:02d}") for i in range(10)]
+    for i in range(8):
+        ts += [req(f"T4{i}a", f"種類{chr(0x3042 + i)}の依頼", due="2026-11-03"), req(f"T4{i}b", f"種類{chr(0x3042 + i)}の依頼", due="2026-11-03")]
+    evs = [ev(f"会議{i:02d}") for i in range(10)]
+    out = materials(h, ts, events=evs, cfg=dict(REAL_CFG, calendar={"type": "ics"}))
+    for p in ("- 業務の流れ（", "- 業務の流れの候補", "- 部署一覧の定例", EV_LABEL, "- 本人の仕事", "- 繰り返すお願い"):
+        l = line(out, p)
+        assert "ほか" not in l, l
+    assert "業務09" in line(out, "- 業務の流れ（") and "候4" in line(out, "- 業務の流れの候補").replace("候補", "候")
+    assert "会議09" in line(out, EV_LABEL) and "T109" in line(out, "- 本人の仕事")
+    # 1件増えると「ほか 1 件」
+    put(h, "業務の流れ.md", f"## 業務の一覧\n\n| 業務 |\n|---|\n{rows}| 業務10 |\n")
+    assert "ほか 1 件" in line(materials(h), "- 業務の流れ（")
+
+
+@case
+def c75_empty_department_cell_prints_content_only():
+    h = make_home()
+    put(h, "部署一覧.md", "| 部署 | 役割 | 業務 | 定例・締め切り | 関係者 |\n|---|---|---|---|---|\n"
+                          "| | リーダー | 開発 | 毎週金曜に公開 | A |\n| 総務部 | 担当 | 庶務 | 月末に締め | B |\n| ？ | x | y | 四半期の棚卸し | z |\n")
+    l = line(materials(h), "- 部署一覧の定例").split("：", 1)[1]
+    assert l == "毎週金曜に公開／総務部：月末に締め／四半期の棚卸し", l
+    h = make_home()
+    put(h, "部署一覧.md", "| 役割 | 定例・締め切り |\n|---|---|\n| リーダー | 毎週金曜に公開 |\n")
+    assert line(materials(h), "- 部署一覧の定例").split("：", 1)[1] == "毎週金曜に公開"
+
+
+@case
+def c76_leading_date_is_removed_only_with_separator():
+    h = make_home()
+    put(h, "業務の流れ.md", "## 候補（未確認）\n\n- 3月10日までに提出する件\n- 11/5 会議の転記が多い\n- 2026-10-30／Entra の権限を取り消した\n"
+                            "- 2026/11/02：議事録の整形\n- 11月5日の件\n")
+    items = line(materials(h), "- 業務の流れの候補").split("：", 1)[1].split("；")
+    assert items == ["3月10日までに提出する件", "会議の転記が多い", "Entra の権限を取り消した", "議事録の整形", "11月5日の件"], items
+
+
 print(f"\n{'失敗 ' + str(fails) + ' 件' if fails else 'すべて通りました'}")
 sys.exit(1 if fails else 0)
