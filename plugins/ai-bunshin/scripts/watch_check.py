@@ -245,11 +245,11 @@ def session_warnings(root, auto_dir, now=None, guard=None, call="本人"):
     if (root / "設定" / "config.json").exists() or (root / "00_タスク管理" / "data" / "tasks.json").exists():
         ok, why = canary(root, guard)
         if not ok:
-            out.append(f"[⚠ 見張りが壊れている可能性]（{why[:60]}）直しが途中なら、元の版に戻してください。"
+            out.append(f"[⚠ 見張りが壊れている可能性]（{why[:60]}）直しが途中なら、元に戻してください。"
                        f"Bash が止まるときは{call}に `! …` の1行を頼みます")
     n = broken_count(root, now - timedelta(hours=BROKEN_WINDOW_HOURS), now, guard)
     if n >= BROKEN_THRESHOLD:
-        out.append(f"[⚠ 見張りがコマンドを読めない状態が続きました（{n}回）]見張りの直しが途中なら、元の版に戻してください")
+        out.append(f"[⚠ 見張りがコマンドを読めない状態が続きました（{n}回）]見張りの直しが途中なら、元に戻してください")
     m = read_timeout(auto_dir)
     if m and timedelta(0) <= now - m[0] <= timedelta(days=TIMEOUT_MARK_DAYS):
         name, unit = _stop_kind_label(m[3])

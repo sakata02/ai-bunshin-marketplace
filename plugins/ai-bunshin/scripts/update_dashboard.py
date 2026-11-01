@@ -2560,11 +2560,11 @@ def _main():
         sync_problems, sync_state = [], {}
         if sync_rules(sync_problems, sync_state):
             text = ("[共通ルールが更新されました] .claude/rules/ai-bunshin-common.md を読み直してから作業してください"
-                    "（この起動では古い版が読み込まれている可能性があります）\n") + text
+                    "（この起動では古いバージョンが読み込まれている可能性があります）\n") + text
         if sync_problems:   # 詳しい手順を写せなかった（本体が指すファイルが無い）。いちばん先頭に出す
             text = ("[共通ルールの詳細ファイルを写せませんでした] .claude/ai-bunshin-details/ に写せません"
                     f"（{'、'.join(sync_problems)}）。本人に伝えて、フォルダの書き込み権限などを確かめてください。"
-                    + ("それまでは、前の版の共通ルールで動きます\n" if sync_state.get("kept_old_body")
+                    + ("それまでは、前の共通ルールで動きます\n" if sync_state.get("kept_old_body")
                        else "それまでは、詳しい手順のファイルが無いまま動きます\n")) + text
         # 自動実行が止まっている知らせは、いちばん先頭（hook の出力は約2KBで切れるため）
         try:

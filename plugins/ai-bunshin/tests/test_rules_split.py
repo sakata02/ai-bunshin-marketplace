@@ -146,7 +146,7 @@ def need_old():
     global SKIPS
     if not OLD:
         SKIPS += 1
-        print(f"  SKIP （git で {OLD_COMMIT} の版が読めない）")
+        print(f"  SKIP（分割前の共通ルール（git の {OLD_COMMIT}）が読めないので、前と比べるこの確認は飛ばします）")
         return False
     return True
 
@@ -417,7 +417,7 @@ def c1_daily_cycle_syncs_through_the_same_function_before_claude():
 @case
 def c2_daily_cycle_run_writes_details_even_when_it_skips():
     if not shutil.which("zsh"):
-        print("       SKIP（zsh なし）")
+        print("       SKIP（zsh が入っていないので、daily_cycle.sh を動かすこの確認は飛ばします）")
         return
     today = datetime.date.today().isoformat()
     root = old_style_owner()
@@ -705,12 +705,12 @@ def g3_folder_table_lists_the_details_copy_after_the_rules_copy():
 
 @case
 def g4_warning_text_matches_what_happened():
-    # 前の本体が残った場合だけ「前の版の共通ルールで動きます」
+    # 前の本体が残った場合だけ「前の共通ルールで動きます」
     root = old_style_owner()
     open(details_dir(root), "w").write("x")
     _, ctx = session(root)
     first = ctx.splitlines()[0]
-    assert "前の版の共通ルールで動きます" in first and "無いまま" not in first, first
+    assert "前の共通ルールで動きます" in first and "無いまま" not in first, first
     # 前の本体が無く、新しい本体を写した場合は事実どおり
     root = make_owner()
     os.makedirs(os.path.join(root, ".claude"))
@@ -740,7 +740,7 @@ def run_cycle(root):
 @case
 def g5_daily_cycle_logs_the_copy_warning_only_when_there_is_one():
     if not shutil.which("zsh"):
-        print("       SKIP（zsh なし）")
+        print("       SKIP（zsh が入っていないので、daily_cycle.sh を動かすこの確認は飛ばします）")
         return
     root = old_style_owner()
     open(details_dir(root), "w").write("x")   # 写せない状態
@@ -753,5 +753,5 @@ def g5_daily_cycle_logs_the_copy_warning_only_when_there_is_one():
     assert "写せませんでした" not in log and "hookSpecificOutput" not in log, log
 
 
-print(f"\n失敗 {fails} 件" + (f"（SKIP {SKIPS} 件）" if SKIPS else ""))
+print(f"\n失敗 {fails} 件" + (f"（飛ばした確認 {SKIPS} 件）" if SKIPS else ""))
 sys.exit(1 if fails else 0)

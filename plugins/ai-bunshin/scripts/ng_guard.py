@@ -2628,7 +2628,7 @@ def legacy_decision(payload, root_new):
     except DeadlineExceeded:
         raise
     except Exception:  # 前の版も、読めないときは中を止めた
-        return ("見張りの入力を読めませんでした（前の版の判定）", "（入力不明）", root_new) if root_new is not None else None
+        return ("見張りの入力を読めませんでした（前のバージョンの判定）", "（入力不明）", root_new) if root_new is not None else None
     finally:
         _set_flags(L)
 
