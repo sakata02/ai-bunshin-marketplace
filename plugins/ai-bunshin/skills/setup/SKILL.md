@@ -188,5 +188,5 @@ description: AI 分身の初回セットアップ。新しく使い始める人�
 - お願いへの返事：「T0XX やった」「T0XX は無い」「T0XX はこう変えて」
 - 見る場所：`00_タスク管理/タスク管理.xlsx` と `<呼び方>へのお願い.md`
 - 最初の3日は使用量を測る期間。ときどき `/usage` で残りを見てほしい
-- 起動時のまとめ（Claude を開いたときに出る今日の状況）が出ないときは、NG の見張りも動いていない可能性がある。まず Python 3 が動くかを `! [ "$(python -c 'import sys; sys.stdout.write(str(sys.version_info[0]))')" = "3" ]; echo $?` で確かめる（0 と出れば動いている。`python` が無い環境では、`python3`、`py -3` に替えて試す）
+- 起動時のまとめ（Claude を開いたときに出る今日の状況）が出ないときは、NG の見張りも動いていない可能性がある。まず hook と同じ順番で、Python 3 が動くかを `! for c in python3 python "py -3"; do [ "$($c -c 'import sys; sys.stdout.write(str(sys.version_info[0]))' 2>/dev/null)" = "3" ] && { echo "動く：$c"; break; }; done` で確かめる。何も出なければ Python 3 を入れる。`動く：` と出たのにまとめが出ないなら、AI に相談する（Windows では未確認）
 - 分からない言葉（スプリント・ベロシティ・約束pt など）が出たら、「言葉の意味を教えて」と聞けば説明する（`/ai-bunshin:status` の最後の「ことばの説明」）
