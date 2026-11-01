@@ -5,6 +5,7 @@
 - 写し：`update_dashboard.py` の `sync_rules()` が、本体（`.claude/rules/ai-bunshin-common.md`）と同時に、details を本人のフォルダの `.claude/ai-bunshin-details/` へ写す（`.claude/rules/` の下に置くと毎回読み込まれてしまうため、外に置く）。詳しい手順を先に写し、写せなかったときは前の本体を残して、起動時のまとめの先頭に「[共通ルールの詳細ファイルを写せませんでした]」を出す。元に無くなった写しは消さない（本体の表にないので読まれない）。自動実行は、Claude を起動する前の `update_dashboard.py --session`（`daily_cycle.sh`）を通るので、同じ関数で写る
 - 見張り：`ng_guard.py` の `PROTECTED_PATHS`・`PROTECTED_TARGETS` に `.claude/ai-bunshin-details/` を足した（判定の方式は変えていない）。写しへの Write・Edit・Bash の書き込みは止め、読むだけは通す
 - スキル：該当する手順に「先に `.claude/ai-bunshin-details/x.md` を読む」を足した（intake・daily-plan・daily-do・daily-review・sprint・dev・setup）。移した節を指していた参照（指揮官ルールの「ポイントの基準」「部下を増やすときのルール」「業務改善（システム化）の提案」「振り返りと Try」「文章のスタイルを育てる」「モデルと考える深さ」の表）に details の場所を足した。dev の「ポイントの基準（開発）」は、実際の見出しに合わせて「ポイントの基準」の「開発の場合」に直した
+- 分割後の小さな直し：本体の「モデルと考える深さ」に Haiku・外部 AI を使わない行（原文のまま。details にも残す）を戻した／末尾の表の tasks-json の行に「完了にするときは `done_date` を入れる」を足した／フォルダ規約に `.claude/ai-bunshin-details/` の行を足した／写せなかったときの警告を事実どおりに分けた（前の本体を残した場合だけ「前の版の共通ルールで動きます」、前の本体が無い場合は「詳しい手順のファイルが無いまま動きます」）／自動実行（`daily_cycle.sh`）は、写せなかった警告があるときだけログに1行残す
 - テスト：`tests/test_rules_split.py`（古い版 8101a02 の全行が本体か details に残る突き合わせ、写し、自動実行、見張り、参照、tasks.json の手直しで止まる項目の一覧）
 - なぜ：トークンの節約。毎回読み込まれる共通ルールが大きく、部下・会話の開始時の量が増えていた（T101。ルール分割の設計 B）。読み漏れの弱点（会話の中は指揮官の判断に頼る）は、同じ読み忘れが2回続いたら、その節を本体に戻して対処する
 

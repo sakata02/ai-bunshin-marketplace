@@ -197,12 +197,13 @@ def _copy_head(src):
             "起動のたびに上書きされる -->\n\n")
 
 
-def sync_rules(warnings=None):
+def sync_rules(warnings=None, state=None):
     """共通の指揮官ルールを本人のフォルダに写す（hook の出力は長いと切れるため）。
     本体 → .claude/rules/ai-bunshin-common.md（自動で読み込まれる）／詳しい手順（rules/details/*.md）→ .claude/ai-bunshin-details/
     （.claude/rules/ の外。必要なときだけ読む。T101）。詳しい手順を先に写してから本体を写す（本体が指すファイルが無い時間を作らない）。
     写せなかったものは warnings（リスト）に1件ずつ足す。詳しい手順が写せなかったときは、前の本体が残っていればそれを残す
     （前の本体は全部入りで、詳しい手順が無くても動く）。元に無くなった写しは消さない（本体の表にないので読まれない）。
+    state（辞書）を渡すと、前の本体を残したときに state["kept_old_body"] = True を入れる（警告の言い方を事実に合わせるため）。
     中身が変わったら True。"""
     if not RULES_MD.exists():
         return False
@@ -229,6 +230,8 @@ def sync_rules(warnings=None):
             mine.append(f"{e.__class__.__name__}")
     problems += mine
     if mine and RULES_COPY.exists():
+        if state is not None:
+            state["kept_old_body"] = True
         return changed   # 前の本体を残す
     RULES_COPY.parent.mkdir(parents=True, exist_ok=True)
     text = _copy_head(RULES_MD) + RULES_MD.read_text(encoding="utf-8")
@@ -1951,14 +1954,15 @@ def main():
         text += f"\n{ctx['migrated']}"
     if args.session:
         # 共通の指揮官ルールは .claude/rules/ai-bunshin-common.md に写す（自動で読み込まれる）
-        sync_problems = []
-        if sync_rules(sync_problems):
+        sync_problems, sync_state = [], {}
+        if sync_rules(sync_problems, sync_state):
             text = ("[共通ルールが更新されました] .claude/rules/ai-bunshin-common.md を読み直してから作業してください"
                     "（この起動では古い版が読み込まれている可能性があります）\n") + text
         if sync_problems:   # 詳しい手順を写せなかった（本体が指すファイルが無い）。いちばん先頭に出す
             text = ("[共通ルールの詳細ファイルを写せませんでした] .claude/ai-bunshin-details/ に写せません"
                     f"（{'、'.join(sync_problems)}）。本人に伝えて、フォルダの書き込み権限などを確かめてください。"
-                    "それまでは、前の版の共通ルールで動きます\n") + text
+                    + ("それまでは、前の版の共通ルールで動きます\n" if sync_state.get("kept_old_body")
+                       else "それまでは、詳しい手順のファイルが無いまま動きます\n")) + text
         # 自動実行が止まっている知らせは、いちばん先頭（hook の出力は約2KBで切れるため）
         try:
             clean_old_tmp()

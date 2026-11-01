@@ -37,6 +37,7 @@ NEW_STUB_SENTENCES = {
     "- iCal の非公開 URL はチャットに貼らせない（キーチェーンなどに入れる）",
     "- 本人名義の文章（記事・コラムなど）を書く前に読む",
     "- tasks.json を手で書き換える前に読む（項目のルールとポイントの基準）",
+    "| `.claude/ai-bunshin-details/` | 共通ルールの詳しい手順の自動コピー（直接編集しない） |",
 }
 TAIL_HEADING = "## 詳しい手順のファイル（必要なときに読む）"
 
@@ -617,6 +618,84 @@ def f1_the_validation_table_matches_what_the_script_does():
 @case
 def f2_the_untouched_base_passes():
     assert run_with(lambda t: None) == 0
+
+
+# ---------- G. T101 の小さな直し ----------
+print("## G. 本体の小さな直しと警告の出し方")
+HAIKU_LINE = "- Haiku は使わない（品質を優先）。別の会社の AI（Codex など）でのレビューは、外部へ渡すことになるので使わない（使うなら本人の判断）"
+
+
+@case
+def g1_haiku_line_is_in_the_body_right_after_the_models_pointer_and_stays_in_details():
+    assert HAIKU_LINE in details_text("models").split("\n"), "models.md から消えた"
+    assert BODY_LINES.count(HAIKU_LINE) == 1, "本体に原文のまま1行ある"
+    i = BODY_LINES.index(HAIKU_LINE)
+    assert BODY_LINES[i - 1].startswith("- 詳細：`.claude/ai-bunshin-details/models.md`"), BODY_LINES[i - 1]
+
+
+@case
+def g2_tasks_json_row_says_done_date_is_needed_when_completing():
+    rows = [l for l in BODY_LINES if l.startswith("| `.claude/ai-bunshin-details/tasks-json.md`")]
+    assert len(rows) == 1, rows
+    assert rows[0].endswith("状態を変えるだけなら読まない。ただし完了にするときは `done_date` を入れる |"), rows[0]
+
+
+@case
+def g3_folder_table_lists_the_details_copy_after_the_rules_copy():
+    i = next(i for i, l in enumerate(BODY_LINES) if l.startswith("| `.claude/rules/ai-bunshin-common.md` |"))
+    row = BODY_LINES[i + 1]
+    assert row.startswith("| `.claude/ai-bunshin-details/` |"), row
+    assert "自動コピー" in row and "直接編集しない" in row, row
+
+
+@case
+def g4_warning_text_matches_what_happened():
+    # 前の本体が残った場合だけ「前の版の共通ルールで動きます」
+    root = old_style_owner()
+    open(details_dir(root), "w").write("x")
+    _, ctx = session(root)
+    first = ctx.splitlines()[0]
+    assert "前の版の共通ルールで動きます" in first and "無いまま" not in first, first
+    # 前の本体が無く、新しい本体を写した場合は事実どおり
+    root = make_owner()
+    os.makedirs(os.path.join(root, ".claude"))
+    open(details_dir(root), "w").write("x")
+    _, ctx = session(root)
+    first = ctx.splitlines()[0]
+    assert "詳しい手順のファイルが無いまま動きます" in first and "前の版" not in first, first
+
+
+def run_cycle(root):
+    today = datetime.date.today().isoformat()
+    t = json.load(open(os.path.join(root, "00_タスク管理", "data", "tasks.json"), encoding="utf-8"))
+    t["project"]["holidays"] = [today]
+    json.dump(t, open(os.path.join(root, "00_タスク管理", "data", "tasks.json"), "w", encoding="utf-8"), ensure_ascii=False)
+    fakebin = os.path.join(BASE, "fakebin_claude")
+    os.makedirs(fakebin, exist_ok=True)
+    with open(os.path.join(fakebin, "claude"), "w") as f:
+        f.write("#!/bin/sh\nexit 1\n")
+    os.chmod(os.path.join(fakebin, "claude"), 0o755)
+    env = env_for(root, {"AI_BUNSHIN_HOME": root, "PATH": fakebin + os.pathsep + os.environ.get("PATH", "")})
+    r = subprocess.run(["zsh", CYCLE, "plan"], capture_output=True, text=True, cwd=root, env=env, timeout=120)
+    assert r.returncode == 0, r.stdout + r.stderr
+    logs = os.path.join(root, "scripts", "auto", "logs")
+    return "\n".join(read(os.path.join(logs, f)) for f in sorted(os.listdir(logs))) if os.path.isdir(logs) else ""
+
+
+@case
+def g5_daily_cycle_logs_the_copy_warning_only_when_there_is_one():
+    if not shutil.which("zsh"):
+        print("       SKIP（zsh なし）")
+        return
+    root = old_style_owner()
+    open(details_dir(root), "w").write("x")   # 写せない状態
+    log = run_cycle(root)
+    lines = [l for l in log.splitlines() if "写せませんでした" in l]
+    assert len(lines) == 1, log
+    assert "ai-bunshin-details" in lines[0] and "{" not in lines[0] and "hookSpecificOutput" not in lines[0], lines[0]
+    root = old_style_owner()   # 写せる状態：警告の行は無く、ふだんの出力もログに混ざらない
+    log = run_cycle(root)
+    assert "写せませんでした" not in log and "hookSpecificOutput" not in log, log
 
 
 print(f"\n失敗 {fails} 件" + (f"（SKIP {SKIPS} 件）" if SKIPS else ""))

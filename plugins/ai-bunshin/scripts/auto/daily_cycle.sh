@@ -64,7 +64,10 @@ write_lock() { printf '%s\n%s\n%s\n' "$$" "${LABEL}（$(date '+%H:%M')開始）"
 
 log "開始"
 # 共通ルールの写し（.claude/rules/ai-bunshin-common.md）を、Claude を起動する前に最新にする
-CLAUDE_PROJECT_DIR="$ROOT" python3 "$DASH" --session < /dev/null > /dev/null 2>> "$LOG"
+# ふだんの出力は捨てる。写せなかった警告があるときだけ、その1行を $LOG に残す（朝に誰も見ていなくても後から分かるように）
+SESSION_OUT=$(CLAUDE_PROJECT_DIR="$ROOT" python3 "$DASH" --session < /dev/null 2>> "$LOG")
+COPY_WARN=$(printf '%s' "$SESSION_OUT" | grep -o '\[共通ルールの詳細ファイルを写せませんでした\][^\\]*' | head -1)
+[ -n "$COPY_WARN" ] && log "警告 $COPY_WARN"
 
 # 営業日でなければ何もしない（祝日は tasks.json の holidays を使う）
 CONTEXT=$(python3 "$DASH" $CTX < /dev/null 2>> "$LOG")

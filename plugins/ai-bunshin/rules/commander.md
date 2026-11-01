@@ -82,6 +82,7 @@
 
 - Opus に上げる・部下を呼ぶモデルを決めるときは、先に読む
 - 詳細：`.claude/ai-bunshin-details/models.md`（読む場面は末尾の表）
+- Haiku は使わない（品質を優先）。別の会社の AI（Codex など）でのレビューは、外部へ渡すことになるので使わない（使うなら本人の判断）
 
 - 分析と判断は自分で行う。部下に丸投げしない
 - 作業（作成・検証）は部下に任せる
@@ -214,6 +215,7 @@ AI では実行できない作業を見つけたら、**必ず assignee を本�
 | `CLAUDE.md` | 本人設定（呼び方・部署・定例・追加の NG・育ったルールなど） |
 | `設定/` | config.json（スクリプト用：名前・部署・時刻・PATH） |
 | `.claude/rules/ai-bunshin-common.md` | 共通ルールの自動コピー（直接編集しない） |
+| `.claude/ai-bunshin-details/` | 共通ルールの詳しい手順の自動コピー（直接編集しない） |
 | `00_タスク管理/` | タスク管理.xlsx（本人が見る）、<呼び方>へのお願い.md、タスクボード.md、data/tasks.json（正本） |
 | `01_スプリント/S###_YYYYMMDD/` | plan.md / do_log.md / check.md / act.md、`daily/YYYYMMDD_計画.md`・`YYYYMMDD_振り返り.md` |
 | `02_成果物/<部署>/` | 完成物。ファイル名は `YYYYMMDD_部署_内容.xlsx`（版を重ねるときは `_v2`） |
@@ -235,7 +237,7 @@ AI では実行できない作業を見つけたら、**必ず assignee を本�
 
 | 読むファイル | 会話の中で読むとき |
 |---|---|
-| `.claude/ai-bunshin-details/tasks-json.md` | タスクの追加・優先順位の振り直し・ポイントを付けるとき、`daily_sprints` や `sprints` を書くとき。状態を変えるだけなら読まない |
+| `.claude/ai-bunshin-details/tasks-json.md` | タスクの追加・優先順位の振り直し・ポイントを付けるとき、`daily_sprints` や `sprints` を書くとき。状態を変えるだけなら読まない。ただし完了にするときは `done_date` を入れる |
 | `.claude/ai-bunshin-details/retro-try.md` | 「Try を決めよう」「このルール変えて」、ルール変更の承認をもらったとき、自動実行の止め方を聞かれたとき |
 | `.claude/ai-bunshin-details/kaizen.md` | 「これ楽にしたい」「自動化できる？」、提案に「やろう」と言われたとき |
 | `.claude/ai-bunshin-details/daily-sprint.md` | 要件が変わったとき、実行の量の区切りを聞かれたとき |
