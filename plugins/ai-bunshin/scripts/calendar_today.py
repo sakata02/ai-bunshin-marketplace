@@ -424,6 +424,12 @@ def format_events(evs, day, error=None, stale=None):
 
 
 if __name__ == "__main__":
+    # Windows は標準出力が cp932 のことがあり、絵文字で落ちる。入口で UTF-8 にする（reconfigure が無い環境でも落ちない）
+    for _stream in (sys.stdout, sys.stderr):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
     # 試し方：python3 calendar_today.py <ICS ファイル> [YYYY-MM-DD]
     text = Path(sys.argv[1]).read_text(encoding="utf-8")
     d = date.fromisoformat(sys.argv[2]) if len(sys.argv) > 2 else date.today()

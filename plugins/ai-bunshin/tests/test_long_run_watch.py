@@ -349,6 +349,69 @@ def l9_signal_at_every_line_of_run_is_not_lost():
             signal.signal(s, h)
 
 
+@case
+def l10_signal_recorded_then_child_finishes_first_still_stops_the_grandchild():
+    # 信号を記録したあとに、子が先に終わっても（待ちから戻る瞬間に届く）、残った孫を止めて 128+番号 で返し、一時ファイルを消す。
+    # 子（sh）は孫（sleep）を残して終わる。待ちの戻り際に自分へ信号を送る（Popen の戻りを包んで決める。送る相手はこのテストのプロセスだけ）
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("run_limited_under_test3", LIMITED)
+    rl = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(rl)
+    sigs = (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)
+    saved = {s: signal.signal(s, signal.SIG_IGN) for s in sigs}   # run() の前後で、届き遅れたものでこのテストが落ちないように
+    d = os.path.join(BASE, "l10")
+    os.makedirs(d, exist_ok=True)
+    real_popen = rl.subprocess.Popen
+
+    class Wrapped:
+        def __init__(self, *a, **k):
+            self._p = real_popen(*a, **k)
+            self.sig = None
+
+        def __getattr__(self, name):
+            return getattr(self._p, name)
+
+        def wait(self, timeout=None):
+            rc = self._p.wait(timeout=timeout)   # 子が終わるまでは、そのまま待つ
+            if self.sig is not None and not self.sent:
+                self.sent = True
+                os.kill(os.getpid(), self.sig)   # 子が終わった「その戻り際」に届く
+                time.sleep(0.05)
+            return rc
+        sent = False
+
+    try:
+        for i, sig in enumerate(sigs):
+            out = os.path.join(d, f"out{i}")
+            pidf = os.path.join(d, f"pid{i}")
+
+            def popen(*a, _sig=sig, **k):
+                w = Wrapped(*a, **k)
+                w.sig = _sig
+                return w
+            rl.subprocess.Popen = popen
+            try:
+                t0 = time.time()
+                rc = rl.run(["sh", "-c", f"sleep 60 & echo $! > '{pidf}'; exit 0"], 30, out, grace=1.0)
+            finally:
+                rl.subprocess.Popen = real_popen
+            assert rc == 128 + int(sig), (int(sig), "戻り値", rc)
+            assert time.time() - t0 < 10, "遅い"
+            assert wait_dead(int(open(pidf).read().strip()), 5), (int(sig), "子が先に終わったあと、孫が残っている")
+            assert not os.path.exists(out), (int(sig), "一時ファイルが残っている")
+    finally:
+        time.sleep(0.2)
+        for s, h in saved.items():
+            signal.signal(s, h)
+
+
+@case
+def l11_child_finishing_normally_without_a_signal_is_unchanged():
+    out = os.path.join(BASE, "l11_out")
+    r = run_limited(["--minutes", "1", "--stdout", out], ["sh", "-c", "echo hi; exit 3"])
+    assert r.returncode == 3 and open(out).read().strip() == "hi", (r.returncode, r.stderr)
+
+
 # ---------- 2. 時間の上限の設定 ----------
 print("## 2. 時間の上限の設定（auto.max_minutes）")
 
@@ -408,6 +471,67 @@ def m4_cli_prints_minutes():
     assert r.stdout.strip() == "180", r.stdout
     r = subprocess.run([sys.executable, os.path.join(SCRIPTS, "watch_check.py"), "wait-minutes", root, "review"], capture_output=True, text=True)
     assert r.stdout.strip() == "180", r.stdout
+
+
+# ---------- 2b. 手数の上限の設定（T066：auto.max_turns） ----------
+print("## 2b. 手数の上限の設定（auto.max_turns）")
+PHASES = ("plan", "do", "review")
+TURN_DEFAULT = {"plan": 100, "do": 300, "review": 100}
+
+
+@case
+def u1_turns_default_100_300_100_when_not_set():
+    root = make_owner("u1")
+    assert {p: wc.turns_for(root, p) for p in PHASES} == TURN_DEFAULT
+    root = make_owner("u1b", {"auto": {"max_minutes": 30}})   # 時間の上限だけ書いてあっても、手数は既定
+    assert {p: wc.turns_for(root, p) for p in PHASES} == TURN_DEFAULT
+
+
+@case
+def u2_invalid_turns_fall_back_to_that_phases_default():
+    bads = ("abc", 0, -1, 1.5, True, False, {}, [], None, "5", "", float("inf"), float("nan"), [3], 1e30, 0.0, -0.5)
+    for i, bad in enumerate(bads):
+        for form in ("single", "dict"):
+            val = bad if form == "single" else {p: bad for p in PHASES}
+            root = make_owner(f"u2_{i}_{form}", {"auto": {"max_turns": val}})
+            got = {p: wc.turns_for(root, p) for p in PHASES}
+            assert got == TURN_DEFAULT, (bad, form, got)   # どの段階でも同じ値に戻さず、その段階の既定に戻る
+
+
+@case
+def u3_partial_config_changes_only_the_written_phase():
+    root = make_owner("u3", {"auto": {"max_turns": {"do": 7}}})
+    assert {p: wc.turns_for(root, p) for p in PHASES} == {"plan": 100, "do": 7, "review": 100}
+    root = make_owner("u3b", {"auto": {"max_turns": {"plan": 5, "do": "x", "review": 0}}})
+    assert {p: wc.turns_for(root, p) for p in PHASES} == {"plan": 5, "do": 300, "review": 100}   # 悪い値の段階だけ既定
+    root = make_owner("u3c", {"auto": {"max_turns": {"review": 1}}})
+    assert wc.turns_for(root, "review") == 1   # 1 は通す（下限）
+
+
+@case
+def u4_broken_or_missing_config_uses_defaults():
+    root = make_owner("u4")
+    open(os.path.join(root, "設定", "config.json"), "w").write("{broken")
+    assert {p: wc.turns_for(root, p) for p in PHASES} == TURN_DEFAULT
+    os.remove(os.path.join(root, "設定", "config.json"))
+    assert {p: wc.turns_for(root, p) for p in PHASES} == TURN_DEFAULT
+    for bad_auto in ("oops", [], 5, None):
+        root = make_owner("u4_" + str(type(bad_auto).__name__), {"auto": bad_auto})
+        assert {p: wc.turns_for(root, p) for p in PHASES} == TURN_DEFAULT, bad_auto
+    open(os.path.join(root, "設定", "config.json"), "wb").write(b"\xef\xbb\xbf" + json.dumps({"auto": {"max_turns": {"do": 9}}}).encode())
+    assert wc.turns_for(root, "do") == 9   # BOM 付きでも読む
+    assert wc.turns_for(root, "nonsense") == 100   # 知らない段階は計画と同じ既定
+
+
+@case
+def u5_cli_prints_turns_and_a_single_number_applies_to_all():
+    root = make_owner("u5", {"auto": {"max_turns": {"do": 0, "review": 12}}})
+    run = lambda *a: subprocess.run([sys.executable, os.path.join(SCRIPTS, "watch_check.py"), *a], capture_output=True, text=True)
+    assert run("turns", root, "do").stdout.strip() == "300"
+    assert run("turns", root, "review").stdout.strip() == "12"
+    assert run("turns", root, "plan").stdout.strip() == "100"
+    root = make_owner("u5b", {"auto": {"max_turns": 40}})
+    assert [wc.turns_for(root, p) for p in PHASES] == [40, 40, 40]
 
 
 # ---------- 3. ng_log の「読めませんでした」 ----------
@@ -700,6 +824,83 @@ def s6_friday_mark_is_visible_monday_morning_to_afternoon():
     assert wc.session_warnings(root, auto, datetime(2026, 11, 3, 10, 0), guard=REAL_GUARD) == []
 
 
+@case
+def w1_old_three_column_mark_reads_as_minutes():
+    root = make_owner("w1")
+    auto = os.path.join(root, "scripts", "auto")
+    now = datetime.now()
+    at = (now - timedelta(hours=1)).strftime("%Y-%m-%d %H:%M")
+    open(os.path.join(auto, wc.TIMEOUT_MARK), "w", encoding="utf-8").write(f"{at}\tdo\t180\n")   # 古い3列の印
+    m = wc.read_timeout(auto)
+    assert m and m[1] == "do" and m[2] == "180" and m[3] == "minutes", m
+    ws = wc.session_warnings(root, auto, now, guard=REAL_GUARD)
+    assert len(ws) == 1 and "時間の上限で止まりました" in ws[0] and "180分" in ws[0] and "手数" not in ws[0], ws
+    line = wc.timeout_line_today(auto, now)
+    assert "時間の上限で止まった" in line and "180分" in line and "回" not in line, line
+    # 4列目が知らない値・空のときも minutes と読む（安全な側）
+    for tail in ("\tfoo", "\t", "\tTURNS"):
+        open(os.path.join(auto, wc.TIMEOUT_MARK), "w", encoding="utf-8").write(f"{at}\tdo\t180{tail}\n")
+        assert wc.read_timeout(auto)[3] == "minutes", tail
+
+
+@case
+def w2_turns_mark_is_written_with_a_fourth_column_and_read_back():
+    root = make_owner("w2")
+    auto = os.path.join(root, "scripts", "auto")
+    now = datetime.now()
+    wc.mark_timeout(auto, "do", 300, now - timedelta(hours=1), kind="turns")
+    raw = open(os.path.join(auto, wc.TIMEOUT_MARK), encoding="utf-8").read().rstrip("\n").split("\t")
+    assert len(raw) == 4 and raw[1:] == ["do", "300", "turns"], raw
+    m = wc.read_timeout(auto)
+    assert m[1] == "do" and m[2] == "300" and m[3] == "turns", m
+    # 時間の上限の印も4列目（minutes）を書く。既存の呼び方（kind を渡さない）は minutes
+    wc.mark_timeout(auto, "plan", 60, now)
+    raw = open(os.path.join(auto, wc.TIMEOUT_MARK), encoding="utf-8").read().rstrip("\n").split("\t")
+    assert raw[1:] == ["plan", "60", "minutes"], raw
+    assert wc.read_timeout(auto)[3] == "minutes"
+    try:
+        wc.mark_timeout(auto, "plan", 60, now, kind="bogus")
+        raise AssertionError("知らない種類を通した")
+    except ValueError:
+        pass
+
+
+@case
+def w3_turns_mark_says_count_not_minutes_everywhere():
+    root = make_owner("w3")
+    auto = os.path.join(root, "scripts", "auto")
+    now = datetime.now()
+    wc.mark_timeout(auto, "do", 300, now - timedelta(hours=1), kind="turns")
+    ws = wc.session_warnings(root, auto, now, guard=REAL_GUARD)
+    assert len(ws) == 1 and "手数の上限で止まりました" in ws[0] and "300回" in ws[0], ws
+    assert "分" not in ws[0].replace("時分", "") and "時間の上限" not in ws[0], ws
+    line = wc.timeout_line_today(auto, now)
+    assert "手数の上限で止まった" in line and "実行" in line and "300回" in line, line
+    assert "分" not in line.replace("時分", "").split("。")[0] and "時間の上限" not in line, line
+    assert "作業中のタスクと実行中の daily_sprints が残っている" in line
+    # 古くなれば出ない・同じ段階の成功で消える（時間の上限と同じ）
+    assert wc.session_warnings(root, auto, now + timedelta(days=5), guard=REAL_GUARD) == []
+    wc.clear_timeout(auto, "plan")
+    assert wc.read_timeout(auto) is not None
+    wc.clear_timeout(auto, "do")
+    assert wc.read_timeout(auto) is None
+
+
+@case
+def w4_cli_mark_timeout_takes_an_optional_kind():
+    root = make_owner("w4")
+    auto = os.path.join(root, "scripts", "auto")
+    run = lambda *a: subprocess.run([sys.executable, os.path.join(SCRIPTS, "watch_check.py"), *a], capture_output=True, text=True)
+    assert run("mark-timeout", auto, "review", "100", "turns").returncode == 0
+    m = wc.read_timeout(auto)
+    assert m[1] == "review" and m[2] == "100" and m[3] == "turns", m
+    assert run("mark-timeout", auto, "do", "0.05").returncode == 0     # 種類を省くと minutes（daily_cycle.sh の今の呼び方）
+    m = wc.read_timeout(auto)
+    assert m[2] == "0.05" and m[3] == "minutes", m
+    r = run("mark-timeout", auto, "do", "5", "bogus")
+    assert r.returncode != 0 and wc.read_timeout(auto)[3] == "minutes", (r.returncode, r.stderr)   # 知らない種類は書かない
+
+
 # ---------- 6. daily_cycle.sh（作り物の claude で通して動かす） ----------
 print("## 6. 自動実行（daily_cycle.sh）")
 # 新旧の比べ：環境変数 CYCLE_UNDER_TEST に別の版の daily_cycle.sh を指すと、その版でこの節を流せる（既定は今の版）
@@ -851,7 +1052,7 @@ def d4_finishing_before_limit_behaves_as_before():
     assert r.returncode == 0, (r.returncode, r.stderr[:300])
     log = cycle_log(c)
     assert "時間の上限（" not in log.replace("時間の上限 ", "") and "止めました" not in log, log
-    assert "claude を起動（時間の上限 60分）" in log
+    assert "claude を起動（時間の上限 60分・手数の上限 100回）" in log, log   # T066：起動の行に手数の上限も出す
     assert wc.read_timeout(os.path.join(c["home"], "scripts", "auto")) is None
     assert os.path.exists(os.path.join(c["home"], "scripts", "auto", "last_success_review.txt"))
     assert not os.path.exists(os.path.join(c["home"], "scripts", "auto", ".lock"))
@@ -980,6 +1181,179 @@ def d9_wait_for_previous_stage_follows_config():
     assert 55 < dt < 140, dt
 
 
+# ---------- 6a. 手数の上限（T066）：claude に --max-turns を付ける・上限の文面を見分ける ----------
+print("## 6a. 手数の上限（daily_cycle.sh）")
+TURNS_MSG = "Error: Reached max turns ({n})"
+
+
+def args_body(d, tail="echo done"):
+    """claude に渡された引数を、1回ごとに1行で残す作り物。"""
+    return f"echo \"$*\" >> '{d}/args.txt'\n{tail}"
+
+
+def args_of(d):
+    return [ln for ln in read(os.path.join(d, "args.txt")).splitlines() if ln.strip()]
+
+
+def turns_in(arg_line):
+    parts = arg_line.split()
+    return parts[parts.index("--max-turns") + 1] if "--max-turns" in parts else None
+
+
+@case
+def g1_default_max_turns_are_100_300_100_per_phase():
+    d = os.path.join(BASE, "g1_review")
+    c = make_cycle("g1_review", args_body(d))
+    r = run_cycle(c, "review", mode="review")
+    assert args_of(d) and turns_in(args_of(d)[-1]) == "100", (args_of(d), r.stderr[:200])
+    # 実行だけ（手動）：作り物の plan-context は 1 回目が「計画なし」・2 回目から「作成済み」を返すので、2 回動かす
+    d = os.path.join(BASE, "g1_do")
+    c = make_cycle("g1_do", args_body(d))
+    run_cycle(c, "do", mode="plan")
+    r = run_cycle(c, "do", mode="plan")
+    assert args_of(d) and turns_in(args_of(d)[-1]) == "300", (args_of(d), r.stderr[:200])
+    # 計画→続けて実行：計画100、実行300
+    d = os.path.join(BASE, "g1_plan")
+    c = make_cycle("g1_plan", args_body(d))
+    r = run_cycle(c, "plan", mode="plan")
+    a = args_of(d)
+    assert r.returncode == 0 and [turns_in(x) for x in a] == ["100", "300"], (a, r.stderr[:200])
+
+
+@case
+def g2_config_changes_only_the_written_phase_and_the_second_launch_uses_do_limit():
+    d = os.path.join(BASE, "g2")
+    c = make_cycle("g2", args_body(d), cfg={"auto": {"max_turns": {"plan": 5, "do": 7}}})
+    r = run_cycle(c, "plan", mode="plan")
+    a = args_of(d)
+    assert r.returncode == 0 and [turns_in(x) for x in a] == ["5", "7"], (a, r.stderr[:200])     # 破られ方 10：実行は実行の上限に決め直す
+    assert calls_of(c) == ["/ai-bunshin:daily-plan", "/ai-bunshin:daily-do"]
+    d = os.path.join(BASE, "g2b")
+    c = make_cycle("g2b", args_body(d), cfg={"auto": {"max_turns": {"do": 7}}})
+    run_cycle(c, "review", mode="review")
+    assert turns_in(args_of(d)[-1]) == "100"   # 書いていない段階は既定
+
+
+@case
+def g3_invalid_or_broken_config_uses_each_phases_default_in_the_real_run():
+    for i, bad in enumerate(("abc", 0, -1, 1.5, True, {}, [])):
+        d = os.path.join(BASE, f"g3_{i}")
+        c = make_cycle(f"g3_{i}", args_body(d), cfg={"auto": {"max_turns": {"review": bad, "plan": bad, "do": bad}}})
+        r = run_cycle(c, "plan", mode="plan")
+        assert [turns_in(x) for x in args_of(d)] == ["100", "300"], (bad, args_of(d), r.stderr[:200])
+    d = os.path.join(BASE, "g3_broken")
+    c = make_cycle("g3_broken", args_body(d))
+    open(os.path.join(c["home"], "設定", "config.json"), "w").write("{broken")
+    r = run_cycle(c, "review", mode="review")
+    assert r.returncode == 0 and turns_in(args_of(d)[-1]) == "100", (args_of(d), r.stderr[:200])
+
+
+@case
+def g4_exit_1_with_the_limit_message_on_the_last_line_is_a_turns_stop():
+    d = os.path.join(BASE, "g4")
+    body = f"echo 'working...'\necho '{TURNS_MSG.format(n=7)}'\nexit 1"
+    c = make_cycle("g4", body, cfg={"auto": {"max_turns": {"review": 7}}})
+    r = run_cycle(c, "review", mode="review")
+    assert r.returncode == 124, (r.returncode, r.stdout[:200], r.stderr[:300])
+    log = cycle_log(c)
+    assert "手数の上限（7回）で振り返りを止めました。続きは会話で" in log, log
+    notes = read(c["notes"])
+    assert "手数の上限（7回）で振り返りを止めました。続きは会話で" in notes, notes
+    assert "失敗" not in notes and "時間の上限" not in notes and "分" not in notes.replace("分間", ""), notes   # 失敗の通知は出さない・「N分」と出さない
+    m = wc.read_timeout(os.path.join(c["home"], "scripts", "auto"))
+    assert m and m[1] == "review" and m[2] == "7" and m[3] == "turns", m
+    assert not os.path.exists(os.path.join(c["home"], "scripts", "auto", ".lock")), "ロックが残っている"
+    assert not os.path.exists(os.path.join(c["home"], "scripts", "auto", "last_success_review.txt")), "止めたのに成功の記録を書いた"
+    assert not [f for f in os.listdir(os.path.join(c["home"], "scripts", "auto", "logs")) if f.startswith(".out.")]
+
+
+@case
+def g5_the_message_in_the_middle_or_with_other_exit_code_is_an_ordinary_result():
+    # 6：途中の行に同じ文面（最後は別）→ ふつうの失敗
+    body = f"echo '{TURNS_MSG.format(n=3)}'\necho 'something else'\nexit 1"
+    c = make_cycle("g5a", body)
+    r = run_cycle(c, "review", mode="review")
+    assert r.returncode == 1 and "失敗" in read(c["notes"]) and "手数の上限（" not in read(c["notes"]) + cycle_log(c), (r.returncode, read(c["notes"]))
+    assert wc.read_timeout(os.path.join(c["home"], "scripts", "auto")) is None
+    # 7：終了コード 0 で本文に同じ文面 → ふつうの成功
+    body = f"echo 'こう出ることがあります'\necho '{TURNS_MSG.format(n=3)}'\nexit 0"
+    c = make_cycle("g5b", body)
+    r = run_cycle(c, "review", mode="review")
+    assert r.returncode == 0 and wc.read_timeout(os.path.join(c["home"], "scripts", "auto")) is None, (r.returncode, read(c["notes"]))
+    assert os.path.exists(os.path.join(c["home"], "scripts", "auto", "last_success_review.txt"))
+    assert "手数の上限（" not in read(c["notes"]) + cycle_log(c)
+    # 終了コードが 1 でないとき（2・124 以外）は、文面があってもふつうの失敗
+    c = make_cycle("g5c", f"echo '{TURNS_MSG.format(n=3)}'\nexit 2")
+    r = run_cycle(c, "review", mode="review")
+    assert r.returncode == 1 and "失敗" in read(c["notes"]) and wc.read_timeout(os.path.join(c["home"], "scripts", "auto")) is None
+
+
+@case
+def g6_near_miss_messages_are_ordinary_failures():
+    # 文面が少しでも違えば（安全な側）ふつうの失敗：末尾の空白・数が無い・数が数字でない・前に文字がある・大文字小文字
+    for i, last in enumerate(("Error: Reached max turns (7) ", "Error: Reached max turns ()", "Error: Reached max turns (x)",
+                              "error: reached max turns (7)", "[Error: Reached max turns (7)]", "Error: Reached max turns (7) extra",
+                              "Error: Reached max turns 7", "Error: Reached max turns (-7)")):
+        c = make_cycle(f"g6_{i}", f"printf '%s\\n' '{last}'\nexit 1")
+        r = run_cycle(c, "review", mode="review")
+        assert r.returncode == 1 and "失敗" in read(c["notes"]), (last, r.returncode, read(c["notes"]))
+        assert wc.read_timeout(os.path.join(c["home"], "scripts", "auto")) is None, last
+
+
+@case
+def g7_trailing_blank_lines_are_ignored_and_the_number_in_the_message_is_used():
+    body = f"printf 'a\\n%s\\n\\n\\n' '{TURNS_MSG.format(n=42)}'\nexit 1"
+    c = make_cycle("g7", body)    # 設定は既定（100）だが、出力の数（42）を使う
+    r = run_cycle(c, "review", mode="review")
+    assert r.returncode == 124, (r.returncode, r.stderr[:200])
+    assert "手数の上限（42回）" in read(c["notes"]) and wc.read_timeout(os.path.join(c["home"], "scripts", "auto"))[2] == "42"
+
+
+@case
+def g8_stopped_plan_by_turns_does_not_continue_to_do_and_do_stop_marks_do():
+    d = os.path.join(BASE, "g8")
+    body = f"echo \"$*\" >> '{d}/args.txt'\necho '{TURNS_MSG.format(n=5)}'\nexit 1"
+    c = make_cycle("g8", body, cfg={"auto": {"max_turns": {"plan": 5}}})
+    r = run_cycle(c, "plan", mode="plan")
+    assert r.returncode == 124 and calls_of(c) == ["/ai-bunshin:daily-plan"], (r.returncode, calls_of(c))
+    m = wc.read_timeout(os.path.join(c["home"], "scripts", "auto"))
+    assert m and m[1] == "plan" and m[3] == "turns", m
+    assert not os.path.exists(os.path.join(c["home"], "scripts", "auto", ".lock"))
+    # 計画は終わり、続けて入った実行が手数の上限に届く
+    d = os.path.join(BASE, "g8b")
+    body = f'''case "$2" in
+  /ai-bunshin:daily-plan) echo planned ;;
+  *) echo '{TURNS_MSG.format(n=9)}'; exit 1 ;;
+esac'''
+    c = make_cycle("g8b", body, cfg={"auto": {"max_turns": {"do": 9}}})
+    r = run_cycle(c, "plan", mode="plan")
+    assert r.returncode == 124 and calls_of(c) == ["/ai-bunshin:daily-plan", "/ai-bunshin:daily-do"], (r.returncode, calls_of(c))
+    m = wc.read_timeout(os.path.join(c["home"], "scripts", "auto"))
+    assert m and m[1] == "do" and m[2] == "9" and m[3] == "turns", m
+    assert "手数の上限（9回）で実行を止めました" in read(c["notes"]) and "失敗" not in read(c["notes"]), read(c["notes"])
+    assert os.path.exists(os.path.join(c["home"], "scripts", "auto", "last_success_plan.txt"))
+
+
+@case
+def g9_same_phase_success_clears_a_turns_mark():
+    c = make_cycle("g9", "echo done")
+    auto = os.path.join(c["home"], "scripts", "auto")
+    wc.mark_timeout(auto, "review", 100, kind="turns")
+    r = run_cycle(c, "review", mode="review")
+    assert r.returncode == 0 and wc.read_timeout(auto) is None, (r.returncode, wc.read_timeout(auto))
+
+
+@case
+def g10_time_limit_path_is_unchanged_and_writes_minutes_kind():
+    d = os.path.join(BASE, "g10")
+    c = make_cycle("g10", hang_body(d, "g"), cfg={"auto": {"max_minutes": {"review": 0.05}}})
+    r = run_cycle(c, "review", mode="review")
+    assert r.returncode == 124, (r.returncode, r.stderr[:200])
+    assert "時間の上限（0.05分）で振り返りを止めました" in read(c["notes"]) and "手数" not in read(c["notes"])
+    m = wc.read_timeout(os.path.join(c["home"], "scripts", "auto"))
+    assert m and m[2] == "0.05" and m[3] == "minutes", m
+
+
 # ---------- 6b. daily_cycle.sh が TERM・HUP・INT を受けたとき（T095 の直し） ----------
 print("## 6b. 自動実行へのシグナル（TERM・HUP・INT）")
 SIGNALS = (("TERM", signal.SIGTERM), ("HUP", signal.SIGHUP), ("INT", signal.SIGINT))
@@ -1058,6 +1432,8 @@ def _cycle_signal_case(name, signame, sig, ignore_term=False):
         stops = [ln for ln in cycle_log(c).splitlines() if "シグナル" in ln]
         if not (len(stops) == 1 and signame in stops[0]):
             problems.append(f"止まったことのログが1行でない：{stops}")
+        elif "claude を止め" not in stops[0] or "ありませんでした" in stops[0]:
+            problems.append(f"claude を止めたのに、ログがそう書いていない：{stops[0]}")
         if "終了 (exit=" in cycle_log(c):
             problems.append("止められたのに、ふつうの終わり方のログを書いた")
         if "失敗" in read(c["notes"]):
@@ -1175,16 +1551,27 @@ def e11_signal_just_before_the_second_launch_ignores_the_old_pid():
   *) echo should-not-run ;;
 esac"""
     c = patched_cycle("e11", body, '  LAUNCHING=1\n', hold_with_bystander(d, "plan"))
+    # 「前の $!」を生きた PID にする：実行の起動で BG_BEFORE=$! を控える直前に、居座るプロセスを背景に出す（$! がその PID になる）。
+    # 前の PID が死んでいると、kill -0 で弾かれて、BG_BEFORE との比べが無くても通ってしまう。生きていれば、比べが効いていないと TERM が届いて落ちる
+    path = os.path.join(c["plugin"], "scripts", "auto", "daily_cycle.sh")
+    text = read(path)
+    anchor2 = "  BG_BEFORE=$!\n"
+    assert text.count(anchor2) == 1, "BG_BEFORE の行が見つからない（または2つ以上）"
+    live = (f'  if [ "$PHASE" != plan ]; then\n    sleep 120 &\n    echo $! > "{d}/oldpid.pid"\n  fi\n')
+    open(path, "w", encoding="utf-8").write(text.replace(anchor2, live + anchor2, 1))
     auto = os.path.join(c["home"], "scripts", "auto")
     p = start_cycle(c, "plan", "plan")
     pids = []
     try:
-        pids = [pid_from(os.path.join(d, "bystander.pid"), 40)]   # 実行の起動の直前に着いた
+        pids = [pid_from(os.path.join(d, "bystander.pid"), 40), pid_from(os.path.join(d, "oldpid.pid"), 40)]   # 実行の起動の直前に着いた
         time.sleep(0.5)
+        assert alive(pids[1]), "前の PID に見立てたプロセスが、信号の前に死んでいる（テストの前提が崩れた）"
         os.kill(p.pid, signal.SIGTERM)
         rc = p.wait(timeout=30)
         assert rc == 143, rc
         assert alive(pids[0]), "関係ないプロセスまで止めた"
+        time.sleep(0.5)
+        assert alive(pids[1]), "前の $!（生きていた）に信号を送った"
         assert calls_of(c) == ["/ai-bunshin:daily-plan"], calls_of(c)
         assert not os.path.exists(os.path.join(auto, ".lock")) and not out_files(c)
         assert os.path.exists(os.path.join(auto, "last_success_plan.txt")) and not os.path.exists(os.path.join(auto, "last_success_do.txt"))
@@ -1262,6 +1649,9 @@ def _signal_before_launch(name, signame, sig):
         assert not os.path.exists(os.path.join(auto, "last_success_review.txt"))
         assert wc.read_timeout(auto) is None
         assert not out_files(c)
+        # ログの文は実際の動きと合わせる：起動していない claude を「止めた」と書かない
+        stops = [ln for ln in cycle_log(c).splitlines() if "シグナル" in ln]
+        assert len(stops) == 1 and "claude を止め" not in stops[0] and "起動中の claude はありませんでした" in stops[0], stops
     finally:
         stop_leftovers([p.pid])
 
@@ -1335,6 +1725,99 @@ esac""", cfg={"auto": {"max_minutes": {"plan": 5, "do": 5}}})
         stop_leftovers(pids)
 
 
+# ---------- 6c. BOM 付きの config.json（T110）／watch_check.py が動かないときの手数の既定 ----------
+print("## 6c. BOM 付きの config.json・watch_check.py が動かないとき")
+INSTALL = os.environ.get("INSTALL_UNDER_TEST") or os.path.join(SCRIPTS, "auto", "install.sh")
+
+
+def write_bom_config(home, cfg):
+    """メモ帳で保存したように、先頭に BOM（EF BB BF）を付けて config.json を書く。"""
+    with open(os.path.join(home, "設定", "config.json"), "wb") as f:
+        f.write(b"\xef\xbb\xbf" + json.dumps(cfg, ensure_ascii=False).encode("utf-8"))
+
+
+@case
+def h1_daily_cycle_reads_a_bom_config_for_the_name_and_the_dev_dirs():
+    repo = os.path.join(BASE, "h1_repo")
+    os.makedirs(repo)
+    d = os.path.join(BASE, "h1")
+    c = make_cycle("h1", args_body(d))
+    write_bom_config(c["home"], {"ai_name": "BOMのAI", "dev": {"projects": [{"path": repo}]}})
+    r = run_cycle(c, "review", mode="review")
+    assert r.returncode == 0, (r.returncode, r.stderr[:200])
+    assert "BOMのAI" in read(c["notes"]), f"通知の名前が config から読めていない（BOM で落ちて既定の AI になった）：{read(c['notes'])[:200]}"
+    assert "--add-dir " + repo in (args_of(d) or [""])[-1], f"開発の置き場所（--add-dir）が config から読めていない：{args_of(d)}"
+
+
+@case
+def h2_install_sh_reads_a_bom_config_for_the_schedule_and_the_path():
+    d = os.path.join(BASE, "h2")
+    home = os.path.join(d, "owner")
+    os.makedirs(os.path.join(home, "設定"))
+    fake_home = os.path.join(d, "home")
+    os.makedirs(os.path.join(fake_home, "Library", "LaunchAgents"))
+    bindir = os.path.join(d, "bin")
+    os.makedirs(bindir)
+    for name in ("launchctl", "osascript"):   # 本物の launchd には触らない（作り物に差し替える）
+        open(os.path.join(bindir, name), "w").write("#!/bin/sh\nexit 0\n")
+        os.chmod(os.path.join(bindir, name), 0o755)
+    write_bom_config(home, {"schedule": {"plan": "08:15", "review": "16:45"}, "path": "/opt/bom-test/bin:/usr/bin"})
+    env = {k: v for k, v in os.environ.items() if k not in ("AI_BUNSHIN_AUTO_RUN", "CLAUDE_PROJECT_DIR")}
+    env["HOME"] = fake_home
+    env["PATH"] = bindir + os.pathsep + env.get("PATH", "")
+    r = subprocess.run(["/bin/zsh", INSTALL, home], capture_output=True, text=True, env=env, timeout=60)
+    assert r.returncode == 0, (r.returncode, r.stdout[-300:], r.stderr[-300:])
+    assert "計画 8:15" in r.stdout and "振り返り 16:45" in r.stdout, r.stdout
+    run_sh = read(os.path.join(home, "scripts", "auto", "run.sh"))
+    assert 'export PATH="/opt/bom-test/bin:/usr/bin"' in run_sh, run_sh[:300]
+    plist = read(os.path.join(fake_home, "Library", "LaunchAgents", "com.ai-bunshin.daily-plan.plist"))
+    assert "<key>Hour</key><integer>8</integer>" in plist and "<key>Minute</key><integer>15</integer>" in plist, plist
+
+
+FAKE_WATCH_KINDS = {
+    "exits_1": "exit 1",
+    "empty": "exit 0",
+    "garbage": "echo 'abc'; exit 0",
+    "dead_python": "exec python3 -c 'import nonexistent_module_xyz'",
+}
+
+
+def install_fake_watch(c, turns_body):
+    """作り物の watch_check.py に差し替える：turns だけ壊し（turns_body をシェルで動かす）、ほかの呼び出し（canary など）は本物に渡す。"""
+    scripts = os.path.join(c["plugin"], "scripts")
+    os.rename(os.path.join(scripts, "watch_check.py"), os.path.join(scripts, "watch_real.py"))
+    open(os.path.join(scripts, "watch_check.py"), "w", encoding="utf-8").write(
+        "import os, subprocess, sys\n"
+        "if sys.argv[1:2] == ['turns']:\n"
+        f"    sys.exit(subprocess.run(['/bin/sh', '-c', {turns_body!r}]).returncode)\n"
+        "here = os.path.dirname(os.path.abspath(__file__))\n"
+        "sys.exit(subprocess.run([sys.executable, os.path.join(here, 'watch_real.py'), *sys.argv[1:]]).returncode)\n")
+
+
+@case
+def h3_dead_or_empty_watch_check_uses_the_shell_defaults_100_300_100():
+    # watch_check.py の turns が動かない・空・数でない値を返すとき、シェル側の既定（計画 100・実行 300・振り返り 100）になる。
+    # config に別の数を書いても、watch_check が答えない以上は既定（シェルは config を自分では読まない）
+    cfg = {"auto": {"max_turns": {"plan": 5, "do": 7, "review": 9}}}
+    for kind, body in FAKE_WATCH_KINDS.items():
+        d = os.path.join(BASE, f"h3_{kind}")
+        c = make_cycle(f"h3_{kind}", args_body(d), cfg=cfg)
+        install_fake_watch(c, body)
+        r = run_cycle(c, "plan", mode="plan")   # 計画 → 続けて実行
+        assert r.returncode == 0 and [turns_in(x) for x in args_of(d)] == ["100", "300"], (kind, [turns_in(x) for x in args_of(d)], r.stderr[:200])
+        d2 = os.path.join(BASE, f"h3r_{kind}")
+        c2 = make_cycle(f"h3r_{kind}", args_body(d2), cfg=cfg)
+        install_fake_watch(c2, body)
+        r = run_cycle(c2, "review", mode="review")
+        assert r.returncode == 0 and [turns_in(x) for x in args_of(d2)] == ["100"], (kind, [turns_in(x) for x in args_of(d2)], r.stderr[:200])
+        d3 = os.path.join(BASE, f"h3d_{kind}")   # 実行だけ（手動）。作り物の plan-context は 2 回目から「作成済み」を返すので 2 回動かす
+        c3 = make_cycle(f"h3d_{kind}", args_body(d3), cfg=cfg)
+        install_fake_watch(c3, body)
+        run_cycle(c3, "do", mode="plan")
+        r = run_cycle(c3, "do", mode="plan")
+        assert [turns_in(x) for x in args_of(d3)][-1:] == ["300"], (kind, [turns_in(x) for x in args_of(d3)], r.stderr[:200])
+
+
 # ---------- 7. ルール・スキル・部下の文（3章・10章5〜6が、どこにあるか） ----------
 print("## 7. ルール・スキル・部下の文")
 
@@ -1386,6 +1869,37 @@ def t4_daily_do_and_review_and_plan_know_the_time_limit():
     assert "last_timeout.txt" in text_of("skills", "daily-review", "SKILL.md") and "時間の上限で止まった" in text_of("skills", "daily-review", "SKILL.md")
     plan = text_of("skills", "daily-plan", "SKILL.md")
     assert "last_timeout.txt" in plan and "持ち越し" in plan
+
+
+@case
+def x1_daily_do_sprint_dev_have_the_eight_calls_per_task_per_day_rule_and_keep_the_old_stops():
+    # T066 B：1タスクで部下を呼ぶのは、その日の合計8回まで。今の「最大3周」「同じ失敗が2回続いたら3周目に入らない」は消えていない
+    for name, t in (("daily-do", DAILY_DO), ("sprint", SPRINT), ("dev", DEV)):
+        for key in ("1タスクで部下を呼ぶのは、その日の合計8回まで", "作る・確かめる・デザインの呼び出し", "SendMessage での続き", "Check 会議", "今どこ？",
+                    "翌朝0から", "do_log の開始の行", "最大3周", "目標ではない"):
+            assert key in t, (name, key)
+        assert "3周目に入らない" in t or "3周目に入らず" in t, name
+        assert "どれかに先に届いたら止める" in t, name
+        assert "止めずに" in t and "本人に1行伝える" in t, (name, "会話の中の扱い")
+    for key in ("手戻りの上限", "blockers", "次のタスクへ", "デザインの呼び出しと続きでも開始の行を書く", "同じ失敗が2回続いたら3周目に入らず報告する",
+                "手戻り3周："):
+        assert key in DAILY_DO, key
+    assert "手戻りの上限" in DEV and "blockers" in DEV
+    assert "ここでは決めない" not in SPRINT and "S10" in SPRINT      # 「決めない」を、この決まりへの参照に直した
+    assert "`/ai-bunshin:daily-do` の「部下を出すとき」" in SPRINT and "`/ai-bunshin:daily-do` の「部下を出すとき」" in DEV
+
+
+@case
+def x2_skills_know_both_kinds_of_stop_mark():
+    assert "--max-turns" in DAILY_DO and "auto.max_turns" in DAILY_DO and "計画 100・実行 300・振り返り 100" in DAILY_DO
+    assert "部下の中の手数は数えられない" in DAILY_DO and "`turns`" in DAILY_DO and "`minutes`" in DAILY_DO
+    assert "auto.max_minutes" in DAILY_DO and "計画 60分・実行 180分・振り返り 60分" in DAILY_DO      # 時間の上限は変えていない
+    plan = text_of("skills", "daily-plan", "SKILL.md")
+    review = text_of("skills", "daily-review", "SKILL.md")
+    line = [ln for ln in plan.splitlines() if "last_timeout.txt" in ln][0]
+    assert "手数の上限" in line and "`turns`" in line and "4列目が無ければ `minutes`" in line, line
+    rline = [ln for ln in review.splitlines() if "last_timeout.txt" in ln][0]
+    assert "手数の上限で止まった" in rline and "時間の上限で止まった" in rline and "N回" in rline and "4列目が無ければ `minutes`" in rline, rline
 
 
 @case

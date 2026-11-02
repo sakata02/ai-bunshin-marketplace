@@ -25,7 +25,19 @@ def main():
         return 1
     tpl = json.loads(TEMPLATE.read_text(encoding="utf-8"))
     path = home / ".claude" / "settings.json"
-    cur = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    cur = {}
+    if path.exists():
+        try:
+            # メモ帳で保存すると先頭に BOM（目に見えない印）が付くことがあるので、utf-8-sig で読む
+            cur = json.loads(path.read_text(encoding="utf-8-sig"))
+        except (ValueError, OSError) as e:
+            where = f"{e.lineno}行目 {e.colno}文字目の近く" if isinstance(e, json.JSONDecodeError) else type(e).__name__
+            print(f"{path} を読めませんでした（{where}）。カンマや引用符の抜けがないか確かめてください。"
+                  "壊れたファイルは書き換えていません", file=sys.stderr)
+            return 1
+        if not isinstance(cur, dict):
+            print(f"{path} は {{ }} で始まる形にしてください。壊れたファイルは書き換えていません", file=sys.stderr)
+            return 1
     deny = cur.setdefault("permissions", {}).setdefault("deny", [])
     added = [r for r in tpl["permissions"]["deny"] if r not in deny]
     deny.extend(added)
@@ -46,4 +58,10 @@ def main():
 
 
 if __name__ == "__main__":
+    # Windows は標準出力が cp932 のことがあり、絵文字で落ちる。入口で UTF-8 にする（reconfigure が無い環境でも落ちない）
+    for _stream in (sys.stdout, sys.stderr):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
     sys.exit(main())

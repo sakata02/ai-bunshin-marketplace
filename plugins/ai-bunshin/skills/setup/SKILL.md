@@ -20,9 +20,10 @@ description: AI 分身の初回セットアップ。新しく使い始める人�
 
 | 確認 | 方法 | 足りないとき |
 |---|---|---|
-| OS | `uname`（見つからないと出たら Windows とみなす） | Mac 以外は自動実行が使えない（手動で `/ai-bunshin:daily-plan` などを使う）と伝えて続ける。Windows では hook が `python3` を呼べるか（`python3 --version`）も確かめ、無ければ止めて Python の入れ方を案内する。Windows の朝・夕方の自動実行は、手順5の「Windows の人」を案内する |
-| Python 3 | `python3 --version`（Windows で `python3` が無いときは `python --version`、`py -3 --version`） | `! brew install python`（Mac）など。**Windows** は https://www.python.org/downloads/ からインストーラを入れる（入れるとき「Add python.exe to PATH」にチェック）。入れたら Claude を開き直す |
-| openpyxl | `python3 -c "import openpyxl"`（Windows は `py -3 -c "import openpyxl"`） | `! python3 -m pip install --user openpyxl`（Windows は `! py -3 -m pip install --user openpyxl`。`py` が無ければ `python -m pip …`）。「externally-managed-environment」と出たら、`! python3 -m venv ~/.ai-bunshin-venv && ~/.ai-bunshin-venv/bin/pip install openpyxl` を案内し、config.json の `path` の先頭に `~/.ai-bunshin-venv/bin`（絶対パス）を入れる（この venv の手順は Mac 向け。Windows で同じ表示が出たら、`bin` を `Scripts` に読み替えるのが基本だが【未確認】なので、本人と確かめながら進める） |
+| OS | `uname`（見つからないと出たら Windows とみなす） | Mac 以外は自動実行が使えない（手動で `/ai-bunshin:daily-plan` などを使う）と伝えて続ける。Windows でも hook が動くように作ってある：hook は `scripts/run_py.sh` を通り、`python3` → `python` → `py -3` の順に、実際に動いて Python 3 と確かめられたものを自動で選ぶ（Windows の `python3` は Microsoft Store を開くだけの偽物のことがあるため、名前だけでは選ばない）。そのため Windows では、下の「Python 3」の行でどれか1つが動けばよく、動くものが無ければ止めて Python の入れ方を案内する。この仕組みは bash（Windows は Git for Windows の Git Bash）で動く【Windows の実機では未確認】。Windows の朝・夕方の自動実行は、手順5の「Windows の人」を案内する |
+| Python 3 | `python3 --version`（Windows で `python3` が無い、または Microsoft Store が開いたときは、`python --version`、`py -3 --version` を順に試す。どれか1つで「Python 3.x」と出ればよい） | `! brew install python`（Mac）など。**Windows** は https://www.python.org/downloads/ からインストーラを入れる（入れるとき「Add python.exe to PATH」にチェック）。入れたら Claude を開き直す |
+| openpyxl | `python3 -c "import openpyxl"`（Windows で `python3` が動かないときは `python -c "import openpyxl"`、それも動かなければ `py -3 -c "import openpyxl"` の順に試す） | `! python3 -m pip install --user openpyxl`（Windows で `python3` が動かないときは `! python -m pip …`、それも動かなければ `! py -3 -m pip …` の順）。「externally-managed-environment」と出たら、`! python3 -m venv ~/.ai-bunshin-venv && ~/.ai-bunshin-venv/bin/pip install openpyxl` を案内し、config.json の `path` の先頭に `~/.ai-bunshin-venv/bin`（絶対パス）を入れる（**この venv の手順は、Mac の自動実行（`config.json` の `path`）にしか効かない**。会話の中の hook は、ふだんの `python3` を使うので、venv の openpyxl は見えず、Excel の更新だけ飛ばされる（タスクボードとお願いの一覧は更新される）。Windows で同じ表示が出たら、`bin` を `Scripts` に読み替えるのが基本だが【未確認】なので、本人と確かめながら進める） |
+| まとめて入れる（`scripts/requirements.txt`：openpyxl・python-pptx・tzdata） | 上の確認が足りないものが複数あるとき、またはまとめて入れたいとき | `! python3 -m pip install --user -r "<プラグインの場所>/scripts/requirements.txt"`（Windows で `python3` が動かないときは `! python -m pip install --user -r "<プラグインの場所>\scripts\requirements.txt"`、それも動かなければ `! py -3 -m pip …` の順）。`<プラグインの場所>` は AI が実際のパス（`${CLAUDE_PLUGIN_ROOT}`）に読み替えて示す。tzdata は Windows の予定の時刻に要る（Mac は無くても動く）。python-pptx は部下A が PowerPoint を作るときに使う。「externally-managed-environment」と出たら、上の openpyxl の行と同じ扱い |
 | 置き場所 | 今のフォルダが空か、仕事用のフォルダか | 新しいフォルダを作り（`mkdir -p ~/workspace/<名前>-ai`）、そこでプラグインを入れて（`cd ~/workspace/<名前>-ai && claude plugin install ai-bunshin@ai-bunshin-marketplace --scope project`）、そのフォルダで claude を起動し直すよう案内する。**Claude を開き直す前の作業なので、`!` を付けずにターミナル（Windows は PowerShell か Git Bash）で打ってもらう**。古い PowerShell は `&&` が使えないので、1行ずつに分ける。デスクトップアプリの人は、README の「A. デスクトップアプリ」（starter フォルダを開くだけ）の方が簡単 |
 
 ※ インストールのコマンドは AI が実行しない（NG）。本人に打ってもらう。
@@ -78,7 +79,7 @@ description: AI 分身の初回セットアップ。新しく使い始める人�
 **4回目：守ってほしいこと**
 9. 共通の「必ず確認すること」（社外への送信・お金・人事・他の人を巻き込む判断・ファイルの削除）以外に、確認してほしいこと
 10. ほかに「やってはいけないこと」（追加の NG）
-11. 会社の休みの日（祝日以外。分かる範囲で）
+11. 会社の休みの日（祝日以外。分かる範囲で）。祝日は聞かずに AI が入れる（下の「ファイルを作る」の tasks.json の行。雛形の holidays は空なので、入れ忘れると祝日が営業日として数えられる）
 
 ## 3. ファイルを作る
 
@@ -107,7 +108,7 @@ description: AI 分身の初回セットアップ。新しく使い始める人�
 |---|---|
 | `CLAUDE.md`（本人設定） | `templates/CLAUDE.md` |
 | `設定/config.json` | `templates/config/config.json`。`path` には、`command -v claude` と openpyxl の入った `python3` のフォルダを含む PATH を入れる |
-| `00_タスク管理/data/tasks.json` | `templates/tasks/tasks.json`。holidays に質問11の休みと、その年の祝日を入れる |
+| `00_タスク管理/data/tasks.json` | `templates/tasks/tasks.json`。**雛形の holidays は空（`[]`）**。質問11の休みに加えて、今年と来年の日本の祝日を AI が調べて `"2026-11-03"` の形（YYYY-MM-DD）で入れる（本人が日本以外の国・地域で働くなら、先にどの国の祝日か確かめる）。空のままだと、祝日が営業日として数えられて完了予定日が1日ずれ、祝日にも朝の計画が動く。年が変わるときは、翌年の祝日を足す。書き方が違うと（`"11/3"` など）、update_dashboard.py が「holidays は YYYY-MM-DD の一覧にしてください」と知らせて止まる |
 | `04_ナレッジ/プロフィール.md`・`判断基準.md`・`部署一覧.md`・`改善ログ.md`・`役の書き方.md`・`ルール履歴/README.md` | `templates/knowledge/` の `profile.md`・`judgement.md`・`departments.md`・`improvement_log.md`・`roles.md`・`rule_history/README.md` |
 | `04_ナレッジ/プロダクトゴール.md`・`完成の定義.md`・`スクラムマスターの観察.md` | `templates/knowledge/` の `product_goal.md`・`definition_of_done.md`・`sm_observation.md` |
 | `04_ナレッジ/研修/研修の決まり.md` | `templates/knowledge/training/training_rules.md`（研修を担当する人だけ） |
@@ -187,4 +188,5 @@ description: AI 分身の初回セットアップ。新しく使い始める人�
 - お願いへの返事：「T0XX やった」「T0XX は無い」「T0XX はこう変えて」
 - 見る場所：`00_タスク管理/タスク管理.xlsx` と `<呼び方>へのお願い.md`
 - 最初の3日は使用量を測る期間。ときどき `/usage` で残りを見てほしい
+- 起動時のまとめ（Claude を開いたときに出る今日の状況）が出ないときは、NG の見張りも動いていない可能性がある。まず hook と同じ順番で、Python 3 が動くかを `! for c in python3 python "py -3"; do [ "$($c -c 'import sys; sys.stdout.write(str(sys.version_info[0]))' 2>/dev/null)" = "3" ] && { echo "動く：$c"; break; }; done` で確かめる。何も出なければ Python 3 を入れる。`動く：` と出たのにまとめが出ないなら、AI に相談する（Windows では未確認）
 - 分からない言葉（スプリント・ベロシティ・約束pt など）が出たら、「言葉の意味を教えて」と聞けば説明する（`/ai-bunshin:status` の最後の「ことばの説明」）

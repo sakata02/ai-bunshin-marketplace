@@ -17,7 +17,7 @@ esac
 ROOT="${AI_BUNSHIN_HOME:?本人のフォルダ（AI_BUNSHIN_HOME）が指定されていません。scripts/auto/run.sh から呼んでください}"
 PLUGIN_ROOT="${0:A:h:h:h}"
 DASH="$PLUGIN_ROOT/scripts/update_dashboard.py"
-WATCH="$PLUGIN_ROOT/scripts/watch_check.py"          # 時間の上限・見張りの点検・「時間の上限で止めた」印（T095）
+WATCH="$PLUGIN_ROOT/scripts/watch_check.py"          # 時間の上限・手数の上限・見張りの点検・「上限で止めた」印（T095・T066）
 LIMITED="$PLUGIN_ROOT/scripts/auto/run_limited.py"   # claude を時間の上限つきで動かす（T095）
 # 開発の置き場所のうち、本人のフォルダの外にあるリポジトリ（自動実行でも編集できるように --add-dir で渡す）
 ADD_DIRS=(${(f)"$(python3 - "$ROOT" <<'PY'
@@ -25,7 +25,7 @@ import json, os, sys
 from pathlib import Path
 root = Path(sys.argv[1])
 try:
-    cfg = json.load(open(root / "設定" / "config.json", encoding="utf-8"))
+    cfg = json.load(open(root / "設定" / "config.json", encoding="utf-8-sig"))
 except Exception:
     sys.exit(0)
 for p in (cfg.get("dev") or {}).get("projects", []):
@@ -36,7 +36,7 @@ PY
 )"})
 ADD_DIR_ARGS=()
 for d in ${(u)ADD_DIRS}; do ADD_DIR_ARGS+=(--add-dir "$d"); done
-AI_NAME=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1], encoding="utf-8")).get("ai_name","AI"))' "$ROOT/設定/config.json" 2>/dev/null || echo AI)
+AI_NAME=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1], encoding="utf-8-sig")).get("ai_name","AI"))' "$ROOT/設定/config.json" 2>/dev/null || echo AI)
 LOG_DIR="$ROOT/scripts/auto/logs"
 LOCK="$ROOT/scripts/auto/.lock"
 TODAY=$(date +%Y%m%d)
@@ -50,7 +50,7 @@ mark_ok() {
   local f="$ROOT/scripts/auto/last_success_$1.txt"
   date '+%Y-%m-%d %H:%M' > "$f.tmp.$$" && mv -f "$f.tmp.$$" "$f"
 }
-# 「時間の上限で止めた」印を消すのは、Claude が実際に成功したときだけ（休日・済み・動きなしの SKIP では消さない。T095）
+# 「上限で止めた」印（時間・手数）を消すのは、Claude が実際に成功したときだけ（休日・済み・動きなしの SKIP では消さない。T095）
 clear_mark() {
   python3 "$WATCH" clear-timeout "$ROOT/scripts/auto" "$1" 2>/dev/null
 }
@@ -113,7 +113,7 @@ LAUNCHING=0      # 1＝起動の直前から PID を控えるまで（この間�
 BG_BEFORE=""     # 起動の直前の $!（まだ背景に出していない・前の run_limited の PID のままのときは、使わない）
 CUR_OUT=""       # 起動中の run_limited の出力の一時ファイル（名前を決めたら、ファイルを作る前に控える）
 on_stop() {
-  local name=$1 num=$2 pid=$LIMITED_PID
+  local name=$1 num=$2 pid=$LIMITED_PID stopped=0
   trap '' TERM HUP INT   # 片づけの最中に重ねて届いても、途中でやめない
   if [ -z "$pid" ] && [ "$LAUNCHING" = 1 ]; then
     pid=$!
@@ -123,9 +123,15 @@ on_stop() {
   if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
     kill -s TERM "$pid" 2>/dev/null   # run_limited は TERM・HUP・INT を同じに扱う（グループを止める → 猶予のあと KILL → 一時ファイルを消す）
     wait "$pid" 2>/dev/null           # 終わるまで待つ（最長でも猶予の2倍ほど）
+    stopped=1
   fi
   [ -n "$CUR_OUT" ] && rm -f "$CUR_OUT"
-  log "シグナル（$name）を受けて止めました。claude を止め、ロックと一時ファイルを片づけました"
+  # ログの文は実際の動きに合わせる：run_limited が動いていたとき（claude を起動したあと）だけ「claude を止め」と書く
+  if [ "$stopped" = 1 ]; then
+    log "シグナル（$name）を受けて止めました。claude を止め、ロックと一時ファイルを片づけました"
+  else
+    log "シグナル（$name）を受けて止めました。起動中の claude はありませんでした。ロックと一時ファイルを片づけました"
+  fi
   exit $((128 + num))
 }
 trap 'rm -f "$LOCK"' EXIT
@@ -196,19 +202,26 @@ if ! GUARD_MSG=$(python3 "$WATCH" canary "$ROOT" 2>> "$LOG"); then
   exit 1
 fi
 
-# claude を時間の上限つきで動かす（T095）。結果は RESULT、終了コードは STATUS。
-# 上限（auto.max_minutes。段階を決めたあとに決める）を超えたら、自分の起動した claude のグループだけを止めて exit 124
+# claude を時間の上限と手数の上限つきで動かす（T095・T066）。結果は RESULT、終了コードは STATUS。
+# 時間の上限（auto.max_minutes。段階を決めたあとに決める）を超えたら、自分の起動した claude のグループだけを止めて exit 124。
+# 手数の上限（auto.max_turns。claude -p --max-turns）は claude 自身が止まる。終了コード 1 で、出力の最後の行が上限の文面（Error: Reached max turns (N)）のときだけ、
+# 手数の上限として扱い、同じく exit 124。文面が少しでも違えばふつうの失敗（安全な側）
 run_claude() {
-  local skill="$1" out start broken
+  local skill="$1" out start broken last_line
   LIMIT_MIN=$(python3 "$WATCH" minutes "$ROOT" "$PHASE" 2>/dev/null)
   case "$LIMIT_MIN" in (''|*[!0-9.]*) LIMIT_MIN=60 ;; esac
+  # 手数の上限：読み取れなかったときは、その段階の既定（計画 100・実行 300・振り返り 100）
+  MAX_TURNS=$(python3 "$WATCH" turns "$ROOT" "$PHASE" 2>/dev/null)
+  case "$MAX_TURNS" in
+    (''|*[!0-9]*|0) case "$PHASE" in (do) MAX_TURNS=300 ;; (*) MAX_TURNS=100 ;; esac ;;
+  esac
   # 一時ファイルの名前は自分で決める（mktemp の最中に届くと、名前を控える前にファイルだけ残るため）。名前を控えてから作る。
   # ロックを持つ実行は1つだけなので、PID で足りる。前に強制終了された実行の残りがあっても、上書きされる
   out="$LOG_DIR/.out.$$"
   CUR_OUT="$out"
   : > "$out" || { log "一時ファイルを作れませんでした"; exit 1; }
   start=$(date '+%Y-%m-%d %H:%M:%S')
-  log "claude を起動（時間の上限 ${LIMIT_MIN}分）"
+  log "claude を起動（時間の上限 ${LIMIT_MIN}分・手数の上限 ${MAX_TURNS}回）"
   # 背景で動かして wait する（前景だと、シグナルを受けても run_limited と claude が残るため）。
   # 受けたときは on_stop が run_limited を止めて終わるので、ここに戻るのは run_limited が自分で終わったときだけ（STATUS はその終了コード）
   BG_BEFORE=$!
@@ -216,6 +229,7 @@ run_claude() {
   python3 "$LIMITED" --minutes "$LIMIT_MIN" --stdout "$out" -- claude -p "$skill" \
     --permission-mode acceptEdits \
     --model opus \
+    --max-turns "$MAX_TURNS" \
     --allowedTools "$TOOLS" \
     --disallowedTools "$DENY" \
     "${ADD_DIR_ARGS[@]}" \
@@ -240,6 +254,15 @@ run_claude() {
     log "時間の上限（${LIMIT_MIN}分）で止めました。続きは会話で"
     python3 "$WATCH" mark-timeout "$ROOT/scripts/auto" "$PHASE" "$LIMIT_MIN" 2>> "$LOG"
     notify "時間の上限（${LIMIT_MIN}分）で${LABEL}を止めました。続きは会話で"
+    exit 124
+  fi
+  # 手数の上限：終了コード 1 かつ、出力の最後の行が上限の文面だけ（途中の行・終了コード 0 の本文は対象にしない）
+  last_line=$(printf '%s\n' "$RESULT" | tail -n 1)
+  if [ $STATUS -eq 1 ] && [[ "$last_line" =~ '^Error: Reached max turns \(([0-9]+)\)$' ]]; then
+    local hit="${match[1]}"
+    log "手数の上限（${hit}回）で${LABEL}を止めました。続きは会話で"
+    python3 "$WATCH" mark-timeout "$ROOT/scripts/auto" "$PHASE" "$hit" turns 2>> "$LOG"
+    notify "手数の上限（${hit}回）で${LABEL}を止めました。続きは会話で"
     exit 124
   fi
 }

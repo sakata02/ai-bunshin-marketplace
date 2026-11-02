@@ -2628,7 +2628,7 @@ def legacy_decision(payload, root_new):
     except DeadlineExceeded:
         raise
     except Exception:  # 前の版も、読めないときは中を止めた
-        return ("見張りの入力を読めませんでした（前の版の判定）", "（入力不明）", root_new) if root_new is not None else None
+        return ("見張りの入力を読めませんでした（前のバージョンの判定）", "（入力不明）", root_new) if root_new is not None else None
     finally:
         _set_flags(L)
 
@@ -2795,4 +2795,14 @@ def main():
 
 
 if __name__ == "__main__":
+    # Windows は標準出力が cp932 のことがあり、絵文字で落ちる。入口で UTF-8 にする（reconfigure が無い環境でも落ちない）
+    for _stream in (sys.stdout, sys.stderr):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+    try:
+        sys.stdin.reconfigure(encoding="utf-8", errors=sys.stdin.errors)   # hook の JSON は UTF-8。Windows の既定（cp932）で読むと日本語が壊れる。errors は今のまま（Mac の C ロケールは surrogateescape）
+    except Exception:
+        pass
     sys.exit(main())

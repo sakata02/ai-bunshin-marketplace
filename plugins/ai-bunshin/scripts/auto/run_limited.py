@@ -82,6 +82,8 @@ def run(cmd, seconds, stdout_path, grace=5.0):
                     break
                 except subprocess.TimeoutExpired:
                     continue
+            if stop is None and state["sig"] is not None:
+                stop = "signal"   # 待ちから戻る瞬間に信号を記録していた（子が先に終わった）。残った孫を止めるため、止める道に入れる
             if stop is not None:
                 _stop_group(p, grace)
                 if stop == "signal":
@@ -112,4 +114,10 @@ def main(argv):
 
 
 if __name__ == "__main__":
+    # Windows は標準出力が cp932 のことがあり、絵文字で落ちる。入口で UTF-8 にする（reconfigure が無い環境でも落ちない）
+    for _stream in (sys.stdout, sys.stderr):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
     sys.exit(main(sys.argv[1:]))

@@ -41,7 +41,7 @@ NEW_STUB_SENTENCES = {
     # T095：長引いたら様子を見る（会話の中で必ず守る短い手順。長い説明はスキルの sprint・dev・daily-do）
     "- **部下を出したら目安の時間を決める**：作る＝1pt 15分・2pt 25分・3pt 40分・5pt 60分、確かめる＝その半分、Opus に上げたら1.5倍（暫定）。指示書の頭と do_log（`- YYYY-MM-DD T0XX 開始 HH:MM／目安 N分／見る時刻 HH:MM`）に書く。部下は部下を呼ばない（指示書の「守ること」に書く）",
     "- **長引いたら様子を見る**（会話の中）：部下を出した応答で、作業のフォルダの更新が15分止まったら終わる背景の Bash を1つだけ出す（自動実行では出さない）。起こされたら git の状態・作業のフォルダの更新時刻・ng_log の最後の行を見て、進みがあれば本人に1行伝えて出し直す。無ければ部下に「今どこ？止まってない？」と聞き、目安の1/4（最短5分）待って進みが無ければ止めて（TaskStop）範囲を切り直す。同じ失敗が2回続いたら3周目に入らない。手順は `/ai-bunshin:sprint` の「部下を出したら」",
-    "- **見張りが壊れて Bash が全部止まったら**：指揮官は Read しか使えない。部下も同じ壊れた見張りの下にいて戻せないので、最初から本人に `! …` の1行を頼む（戻しのコマンドは直す前に用意する）。止めた部下の変更を戻すときも、本人に1行で頼む",
+    "- **見張りが壊れて Bash が全部止まったら**：指揮官は Read しか使えない。部下も同じ壊れた見張りの下にいて戻せないので、最初から本人に `! …` の1行を頼む（入力欄の先頭に `!` を付けると、そのコマンドを本人の手でそのまま実行できる。戻しのコマンドは直す前に用意する）。止めた部下の変更を戻すときも、本人に1行で頼む",
 }
 TAIL_HEADING = "## 詳しい手順のファイル（必要なときに読む）"
 
@@ -111,6 +111,9 @@ T115_WORDING = [
     ('まだ写されていない', 'まだコピーされていない'),
     ('至急で', '急ぎで'),
     ('至急のとき', '急ぎのとき'),
+    # T111：振り分けの回答例を役割名に／`! …` に一言の説明を足した（分割前の commander.md にも同じ直しを当てて突き合わせる）
+    ('「T0XX は開発なので部下C、確認は部下D」', '「T0XX は開発の担当（部下C）、確認は開発の検証担当（部下D）」'),
+    ('本人へのお願い（打つコマンドを `! …` の形で示す） |', '本人へのお願い（打つコマンドを `! …` の形で示す。入力欄の先頭に `!` を付けると、本人の手でそのまま実行できる） |'),
 ]
 
 
@@ -143,7 +146,7 @@ def need_old():
     global SKIPS
     if not OLD:
         SKIPS += 1
-        print(f"  SKIP （git で {OLD_COMMIT} の版が読めない）")
+        print(f"  SKIP（分割前の共通ルール（git の {OLD_COMMIT}）が読めないので、前と比べるこの確認は飛ばします）")
         return False
     return True
 
@@ -414,7 +417,7 @@ def c1_daily_cycle_syncs_through_the_same_function_before_claude():
 @case
 def c2_daily_cycle_run_writes_details_even_when_it_skips():
     if not shutil.which("zsh"):
-        print("       SKIP（zsh なし）")
+        print("       SKIP（zsh が入っていないので、daily_cycle.sh を動かすこの確認は飛ばします）")
         return
     today = datetime.date.today().isoformat()
     root = old_style_owner()
@@ -702,12 +705,12 @@ def g3_folder_table_lists_the_details_copy_after_the_rules_copy():
 
 @case
 def g4_warning_text_matches_what_happened():
-    # 前の本体が残った場合だけ「前の版の共通ルールで動きます」
+    # 前の本体が残った場合だけ「前の共通ルールで動きます」
     root = old_style_owner()
     open(details_dir(root), "w").write("x")
     _, ctx = session(root)
     first = ctx.splitlines()[0]
-    assert "前の版の共通ルールで動きます" in first and "無いまま" not in first, first
+    assert "前の共通ルールで動きます" in first and "無いまま" not in first, first
     # 前の本体が無く、新しい本体を写した場合は事実どおり
     root = make_owner()
     os.makedirs(os.path.join(root, ".claude"))
@@ -737,7 +740,7 @@ def run_cycle(root):
 @case
 def g5_daily_cycle_logs_the_copy_warning_only_when_there_is_one():
     if not shutil.which("zsh"):
-        print("       SKIP（zsh なし）")
+        print("       SKIP（zsh が入っていないので、daily_cycle.sh を動かすこの確認は飛ばします）")
         return
     root = old_style_owner()
     open(details_dir(root), "w").write("x")   # 写せない状態
@@ -750,5 +753,5 @@ def g5_daily_cycle_logs_the_copy_warning_only_when_there_is_one():
     assert "写せませんでした" not in log and "hookSpecificOutput" not in log, log
 
 
-print(f"\n失敗 {fails} 件" + (f"（SKIP {SKIPS} 件）" if SKIPS else ""))
+print(f"\n失敗 {fails} 件" + (f"（飛ばした確認 {SKIPS} 件）" if SKIPS else ""))
 sys.exit(1 if fails else 0)

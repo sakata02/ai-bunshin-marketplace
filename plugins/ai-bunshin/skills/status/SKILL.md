@@ -6,7 +6,7 @@ description: タスク状況を表示し、タスク管理.xlsx とタスクボ�
 # タスク状況の確認
 
 0. **エラーの見分けと言い換え**：スクリプトの出力やエラーが次のどれかなら、英語のエラーや内部の名前をそのまま見せず、本人に分かる言葉で返す（続けて、わかる範囲の状況報告もする）
-   - `openpyxl` が無い（ModuleNotFoundError、または「openpyxl が入っていないため、Excel の更新を飛ばしました」）→ 「Excel（タスク管理.xlsx）を作る部品が入っていないので、Excel の更新だけ飛ばしました。タスクボードとお願いの一覧は更新しています。入れるには `! python3 -m pip install --user openpyxl`（Windows は `! py -3 -m pip install --user openpyxl`）を打ってください（`!` を頭に付けて Claude の入力欄で打つと、その場で実行されます。`!` が効かない画面では、`!` を除いてターミナルで打ちます）」（AI は自分でインストールしない）
+   - `openpyxl` が無い（ModuleNotFoundError、または「openpyxl が入っていないため、Excel の更新を飛ばしました」）→ 「Excel（タスク管理.xlsx）を作る部品が入っていないので、Excel の更新だけ飛ばしました。タスクボードとお願いの一覧は更新しています。入れるには `! python3 -m pip install --user openpyxl`（Windows で `python3` が動かないときは `! python -m pip install --user openpyxl`、それも動かなければ `! py -3 -m pip install --user openpyxl` の順）を打ってください（`!` を頭に付けて Claude の入力欄で打つと、その場で実行されます。`!` が効かない画面では、`!` を除いてターミナルで打ちます）」（AI は自分でインストールしない）
    - Excel が開かれていて保存できない（「タスク管理.xlsx を保存できませんでした。Excel を閉じてから、もう一度」）→ 「タスク管理.xlsx を閉じてから、もう一度 /ai-bunshin:status と言ってください」
    - 本人のフォルダが見つからない（「本人のフォルダ（00_タスク管理/data/tasks.json と 設定/config.json）が見つかりません」）→ 「00_タスク管理 があるフォルダで Claude を開き直してください」
 1. `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/update_dashboard.py"` を実行する（Excel とタスクボードが更新される）
