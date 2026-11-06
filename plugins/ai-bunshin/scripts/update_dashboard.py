@@ -1773,24 +1773,29 @@ def _scan_cycle(lines):
                     do_closed = True
         elif _OPENER_RE.match(code) or re.search(r'\{\s*$', code) and not re.search(r'\$\{\s*$', code):
             if not _SAME_LINE_CLOSE_RE.search(code):
-                stack.append({"kind": "other"})
+                stack.append({"kind": "other", "func": bool(re.search(r'\{\s*$', code)) and not _OPENER_RE.match(code)})
         if not _MENTION_RE.search(code):
             continue
         am = _ASSIGN_LINE_RE.match(code)
         names = [n for n in ("TOOLS", "DENY") if re.search(r'(?<![$\w{])' + n + r'(?!\w)' + ('' if am else r'|\$\{' + n + r'(?!\})'), code)]
         # どの段か（位置で決める）。do の中で elif などがあれば、どの段か決められない
         do_entry = next((e for e in stack if e["kind"] == "do"), None)
+        plan_entry = next((e for e in stack if e["kind"] == "planif"), None)
+        direct = (not stack) or (len(stack) == 1 and stack[0]["kind"] in ("do", "planif") and not stack[0]["broken"])
         if do_entry is not None:
             scope = "all" if do_entry["broken"] else do_entry["mode"]
-        elif any(e["kind"] == "planif" and e["broken"] for e in stack):
-            scope = "all"
+        elif plan_entry is not None:
+            scope = "after"   # 計画のときだけ通る所なので、効くのは続けて実行の分だけ（else・elif・入れ子があれば読めない）
         elif do_closed:
-            scope = "after"
+            scope, direct = "all", False   # 分かれ目のあとで plan の if の外：計画・実行の両方に効くかもしれない。決まった形でないので読めない
         else:
             scope = "base"
-        direct = (not stack) or (len(stack) == 1 and stack[0]["kind"] in ("do", "planif") and not stack[0]["broken"])
+        # 関数の中・{ } の中の代入は、呼ばれたときに値が変わる。どの段も、あとの普通の代入でも読めた扱いに戻さない
+        sticky = any(e.get("func") for e in stack) or bool(re.search(r'\(\)\s*\{|^\s*function\b', code))
+        if sticky:
+            scope, direct = "all", False
         parsed = _parse_assign(raw) if direct else None
-        ops.append({"no": no, "scope": scope, "ok": parsed is not None, "names": names, "parsed": parsed})
+        ops.append({"no": no, "scope": scope, "ok": parsed is not None, "names": names, "parsed": parsed, "sticky": sticky})
     if stack or heredoc_end is not None:
         structure_ok = False
     return ops, seen_do, structure_ok
@@ -1836,6 +1841,12 @@ def _simulate(ops, phase, env):
             target["val"] = out
             target["bad"] = []   # 読める代入で上書きされた（新しい値から読める）
         target["nos"].append(op["no"])
+    for op in ops:   # 関数の中の代入：どの段でも、読めた値に戻さない
+        if op.get("sticky"):
+            for n in op["names"] or ("TOOLS", "DENY"):
+                st[n]["val"] = None
+                if op["no"] not in st[n]["bad"]:
+                    st[n]["bad"].append(op["no"])
     return st
 
 

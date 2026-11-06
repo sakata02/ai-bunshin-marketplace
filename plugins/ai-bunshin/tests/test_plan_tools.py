@@ -262,7 +262,19 @@ ADVERSARIAL = {
     "unclosed_string": (body('TOOLS="a,\nb"'), {"TOOLS": {"plan", "do"}}),
     "colon_default_form": (body(': ${TOOLS:="x"}'), {"TOOLS": {"plan", "do"}}),
     "unreadable_then_append_stays_unreadable": (body('TOOLS=$(x)\nTOOLS="$TOOLS,more"'), {"TOOLS": {"plan", "do"}}),
-    "other_if_after": (body(after='if [ "$PHASE" = "review" ]; then\n  TOOLS="$TOOLS,REV"\nfi'), {"TOOLS": {"cont"}}),
+    # Q1：分かれ目の fi のあとで、続けて実行の if（plan）の外にある代入は、計画・実行の両方に効くかもしれないので読めない
+    "other_if_after": (body(after='if [ "$PHASE" = "review" ]; then\n  TOOLS="$TOOLS,REV"\nfi'), {"TOOLS": {"plan", "do"}}),
+    "plain_assign_after_fi": (body(after='TOOLS="$TOOLS,LATE"'), {"TOOLS": {"plan", "do"}}),
+    "plain_assign_after_fi_deny": (body(after='DENY="$DENY,LATE"'), {"DENY": {"plan", "do"}}),
+    "after_plan_if_then_plain": (body(after='if [ "$PHASE" = "plan" ]; then\n  TOOLS="$TOOLS,P"\nfi\nDENY="$DENY,LATE"'), {"DENY": {"plan", "do"}}),
+    # Q2：続けて実行の if（plan）に else・elif・入れ子の if があれば、続けて実行の分だけ読めない（計画・実行は読めたまま）
+    "plan_if_with_else": (body(after='if [ "$PHASE" = "plan" ]; then\n  TOOLS="$TOOLS,P"\nelse\n  TOOLS="$TOOLS,E"\nfi'), {"TOOLS": {"cont"}}),
+    "plan_if_with_elif": (body(after='if [ "$PHASE" = "plan" ]; then\n  TOOLS="$TOOLS,P"\nelif [ -n "$X" ]; then\n  TOOLS="$TOOLS,E"\nfi'), {"TOOLS": {"cont"}}),
+    "plan_if_with_nested_if": (body(after='if [ "$PHASE" = "plan" ]; then\n  if [ -n "$X" ]; then\n    DENY="$DENY,N"\n  fi\n  TOOLS="$TOOLS,P"\nfi'), {"DENY": {"cont"}}),
+    # Q3：関数の中の代入は、どの段も読めない。あとの普通の代入でも読めた扱いに戻さない
+    "function_assign_then_plain_assign": (body('f() {\n  TOOLS="$TOOLS,F"\n}', do='  TOOLS="z"', plan='  TOOLS="y"'), {"TOOLS": {"plan", "do"}}),
+    "function_one_line": (body('f() { TOOLS="x"; }'), {"TOOLS": {"plan", "do"}}),
+    "function_keyword": (body('function g {\n  DENY="x"\n}', do='  DENY="z"'), {"DENY": {"plan", "do"}}),
 }
 
 
@@ -296,6 +308,25 @@ def open_lines(text):
     os.environ["HOME"] = FAKE_HOME
     u = importlib.import_module("update_dashboard")
     return u.auto_tools_lines(write_cycle(text))
+
+
+@case
+def plan_if_unreadable_forms_keep_other_variable_readable_in_cont():
+    out = open_lines(body(after='if [ "$PHASE" = "plan" ]; then\n  if [ -n "$X" ]; then\n    DENY="$DENY,N"\n  fi\n  TOOLS="$TOOLS,P"\nfi'))
+    cont = phase_lines(out, "cont")
+    assert cont and "（読めませんでした：" not in cont[0] and "a, b, P" in cont[0], f"読める TOOLS まで読めない扱い、または値が違う: {cont}"
+    assert "（読めませんでした：" in cont[1] and "（読めませんでした：" in cont[2], f"入れ子の if の中の DENY が読めませんでしたになっていない: {cont}"
+    for ph in ("plan", "do"):
+        l = phase_lines(out, ph)
+        assert all("（読めませんでした：" not in x for x in l), f"{ph} まで読めない扱いになった: {l}"
+
+
+@case
+def real_cycle_layout_is_still_readable_after_fi():
+    """今の実物の形（分かれ目の fi のあとの、plan の if の中の代入）は、読めたままで「実行と同じ」と出る"""
+    out = open_lines(body(after='if [ "$PHASE" = "plan" ]; then\n  TOOLS="$TOOLS,WebSearch,WebFetch"\n  DENY="${DENY/,x/}"\nfi'))
+    cont = phase_lines(out, "cont")
+    assert cont and "（読めませんでした：" not in "\n".join(cont), cont
 
 
 @case
