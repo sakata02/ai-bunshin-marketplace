@@ -1,0 +1,465 @@
+import { atom, read, update } from 'claude-code'
+import type { EngineInterface, Register } from 'claude-code'
+
+import type { AllRow, Board, Cal, CalEvent, Detail, Row, View } from '../types'
+
+// 共通のパネル。本人のフォルダ（設定/config.json と 00_タスク管理/data/tasks.json がある所）でだけ出る。
+// tasks.json と予定のキャッシュは読むだけ。名前・呼び方は config.json の owner・owner_call から
+const PANE = 'ai-bunshin-panel'
+const TITLE = '今日のやること'
+const ALL_TITLE = '全部のタスク'
+
+const EMPTY: Board = { today: '', mine: [], ai: [], aiNext: [], aiNextMore: 0, all: [], soon: [], openRequests: 0, error: '' }
+// 形を変えたら shape の札も変える（前の版がしまった値を読まないように）
+const board = atom({ plugin: 'ai-bunshin-panel', key: 'board' } as const, EMPTY, { shape: 'board-3' })
+const HOME: View = { mode: 'home', page: 0 }
+const view = atom({ plugin: 'ai-bunshin-panel', key: 'view' } as const, HOME, { shape: 'view-1' })
+const mtime = atom({ plugin: 'ai-bunshin-panel', key: 'mtime' } as const, 0)
+const NONE: Detail = { id: '', title: '', lines: [], steps: [], error: '' }
+const detail = atom({ plugin: 'ai-bunshin-panel', key: 'detail' } as const, NONE, { shape: 'detail-1' })
+const NO_CAL: Cal = { fetched: '', events: [], nowMin: 0, error: '' }
+const cal = atom({ plugin: 'ai-bunshin-panel', key: 'cal' } as const, NO_CAL, { shape: 'cal-1' })
+
+type Task = {
+  id: string
+  title: string
+  assignee?: string
+  status?: string
+  due?: string | null
+  kind?: string
+  [k: string]: any
+}
+
+// 本人のフォルダ（見つかったときだけ入る。session.start のたびに探し直す）
+type Me = { home: string; owner: string; call: string; hasCal: boolean; file: string; calFile: string }
+let me: Me | undefined
+const NO_HOME = '本人のフォルダ（設定/config.json と 00_タスク管理/data/tasks.json がある所）の中ではないので、使えません。'
+
+const MAX_UP = 6
+const at = (dir: string, rel: string) => `${dir === '/' ? '' : dir}/${rel}`
+const parentOf = (dir: string) => {
+  const i = dir.lastIndexOf('/')
+  return i > 0 ? dir.slice(0, i) : '/'
+}
+
+// 作業中のフォルダから上へ最大6段たどり、本人のフォルダを探す。無ければ undefined（何も出さない）。
+// config.json は先頭の BOM を除いて読む。読めない・壊れているときも undefined
+async function findMe($: EngineInterface): Promise<Me | undefined> {
+  let dir = await $.session.cwd().catch(() => '')
+  if (!dir) return undefined
+  for (let i = 0; i <= MAX_UP; i++) {
+    const cfg = at(dir, '設定/config.json')
+    const file = at(dir, '00_タスク管理/data/tasks.json')
+    if ((await $.fs.stat(cfg).catch(() => undefined)) && (await $.fs.stat(file).catch(() => undefined))) {
+      try {
+        const c = JSON.parse((await $.fs.read(cfg)).replace(/^\uFEFF/, ''))
+        const owner = typeof c.owner === 'string' && c.owner.trim() ? c.owner.trim() : '本人'
+        const call = typeof c.owner_call === 'string' && c.owner_call.trim() ? c.owner_call.trim() : `${owner}さん`
+        // 予定は update_dashboard.py が起動時・自動実行のときに書く（config に calendar があるときだけ）
+        return { home: dir, owner, call, hasCal: !!c.calendar, file, calFile: at(dir, '00_タスク管理/data/calendar_cache.json') }
+      } catch {
+        return undefined
+      }
+    }
+    const up = parentOf(dir)
+    if (up === dir) break
+    dir = up
+  }
+  return undefined
+}
+
+// 日本時間の日付（YYYY-MM-DD）
+const dayOf = (ms: number) => new Date(ms + 9 * 3600e3).toISOString().slice(0, 10)
+const md = (d: string) => (d ? `${Number(d.slice(5, 7))}/${Number(d.slice(8, 10))}` : '')
+
+function build(data: any, today: string, OWNER: string): Board {
+  const tasks: Task[] = data.tasks ?? []
+  const open = tasks.filter(t => t.status !== '完了')
+  const row = (t: Task, mark: string): Row => ({ id: t.id, title: t.title, due: md(t.due ?? ''), mark })
+  const byDue = (a: Task, b: Task) => (a.due ?? '').localeCompare(b.due ?? '')
+
+  const mine = open
+    .filter(t => t.assignee === OWNER && t.due && t.due <= today)
+    .sort(byDue)
+    .map(t => row(t, t.due! < today ? '超過' : '今日'))
+
+  const limit = dayOf(Date.parse(today) + 4 * 86400e3)
+  const soon = open
+    .filter(t => t.assignee === OWNER && t.due && t.due > today && t.due <= limit)
+    .sort(byDue)
+    .slice(0, 6)
+    .map(t => row(t, ''))
+
+  const sprint = (data.daily_sprints ?? []).find((s: any) => s.date === today)
+  const planned: string[] = [...(sprint?.planned ?? []), ...(sprint?.added ?? []), ...(sprint?.pulled ?? [])]
+  const byId = new Map(tasks.map(t => [t.id, t]))
+  const ai = planned
+    .map(id => byId.get(id))
+    .filter((t): t is Task => !!t)
+    .map(t => row(t, t.status === '完了' ? '済' : (t.status ?? '')))
+
+  // AI のこれから：今日の計画に入っていない、未完了の AI のタスク（順位の順）
+  const inPlan = new Set(planned)
+  const next = open
+    .filter(t => t.assignee && t.assignee !== OWNER && !inPlan.has(t.id))
+    .sort((a, b) => (a.priority ?? 999) - (b.priority ?? 999))
+  const aiNext = next.slice(0, 6).map(t => row(t, t.status ?? ''))
+
+  // 全部のタスク：未完了を順位の順に、そのあとに完了を新しい順に
+  const allRow = (t: Task): AllRow => ({
+    ...row(t, t.status === '完了' ? '済' : (t.status ?? '')),
+    who: t.assignee ?? '',
+    done: t.status === '完了',
+  })
+  const all = [
+    ...[...open].sort((a, b) => (a.priority ?? 999) - (b.priority ?? 999) || a.id.localeCompare(b.id)),
+    ...tasks.filter(t => t.status === '完了').sort((a, b) => b.id.localeCompare(a.id)),
+  ].map(allRow)
+
+  const openRequests = open.filter(t => t.assignee === OWNER && t.kind !== '自分').length
+  return { today, mine, ai, aiNext, aiNextMore: next.length - aiNext.length, all, soon, openRequests, error: '' }
+}
+
+const fmt = (v: any): string =>
+  Array.isArray(v) ? v.map(fmt).join('、') : v == null ? '' : typeof v === 'object' ? JSON.stringify(v) : String(v)
+
+// 1件分の詳細。お願いなら手順・完了の基準・報告してほしいことも出す
+async function show($: EngineInterface, raw: string): Promise<Detail & { isPlaced: boolean }> {
+  if (!me) return { ...NONE, error: NO_HOME, isPlaced: false }
+  const FILE = me.file
+  let id = (raw.trim().split(/\s+/)[0] ?? '').toUpperCase()
+  if (/^\d+$/.test(id)) id = `T${id.padStart(3, '0')}`
+  let d: Detail
+  try {
+    const data = JSON.parse(await $.fs.read(FILE))
+    const t: Task | undefined = (data.tasks ?? []).find((x: Task) => x.id === id)
+    if (!t) {
+      d = { ...NONE, id, error: `${id} は tasks.json にありません` }
+    } else {
+      const pairs: [string, any][] = [
+        ['状態', t.status],
+        ['担当', t.assignee],
+        ['種類', t.kind ? `${t.type ?? ''}／${t.kind}` : t.type],
+        ['期日', t.due ? md(t.due) : ''],
+        ['期日の理由', t.due_reason],
+        ['なぜ', t.why],
+        ['完了の基準', t.done_when],
+        ['終わったら教えてほしいこと', t.report_back],
+        ['関連', t.related],
+        ['前提', t.depends_on],
+        ['メモ', t.note],
+      ]
+      const lines = pairs.map(([label, v]) => ({ label, text: fmt(v) })).filter(l => l.text !== '')
+      d = { id, title: t.title, lines, steps: Array.isArray(t.steps) ? t.steps.map(fmt) : [], error: '' }
+    }
+  } catch {
+    d = { ...NONE, id, error: 'tasks.json を読めませんでした（少し待ってもう一度）' }
+  }
+  await update($, detail, () => d)
+  const { isPlaced } = await $.ui.open({ id: PANE, title: d.error ? TITLE : `${d.id} の詳細` })
+  return { ...d, isPlaced }
+}
+
+// 詳細を閉じて、いま見ていた一覧（短い画面か全部の一覧）に戻る
+async function back($: EngineInterface) {
+  await update($, detail, () => NONE)
+  await refresh($, true)
+  const v = await read($, view)
+  await $.ui.open({ id: PANE, title: v.mode === 'all' ? ALL_TITLE : TITLE })
+}
+
+// 短い画面に戻す
+async function home($: EngineInterface) {
+  await update($, view, () => HOME)
+  await back($)
+}
+
+// 全部のタスクの一覧に切り替える
+async function showAll($: EngineInterface): Promise<{ isPlaced: boolean; count: number }> {
+  await refresh($, true)
+  await update($, detail, () => NONE)
+  await update($, view, () => ({ mode: 'all', page: 0 }))
+  const { isPlaced } = await $.ui.open({ id: PANE, title: ALL_TITLE })
+  return { isPlaced, count: (await read($, board)).all.length }
+}
+
+// 日本時間の「何分目」（今の予定・終わった予定の色分けに使う）
+const minOf = (ms: number) => Math.floor(((ms + 9 * 3600e3) % 86400e3) / 60000)
+const toMin = (hhmm: string) => (hhmm ? Number(hhmm.slice(0, 2)) * 60 + Number(hhmm.slice(3, 5)) : -1)
+
+async function refreshCal($: EngineInterface, now: number, CAL_FILE: string) {
+  const today = dayOf(now)
+  let next: Cal
+  try {
+    const c = JSON.parse(await $.fs.read(CAL_FILE))
+    const events: CalEvent[] = (c.events ?? [])
+      .filter((e: any) => e.date === today)
+      .map((e: any) => ({ start: e.start ?? '', end: e.end ?? '', title: e.title ?? '', allday: !!e.allday, unknown: e.time_unknown === true }))
+    const fetched = String(c.fetched ?? '')
+    // 今日より前に取った予定しか無いときは、読めていないものとして扱う（「予定なし」と見せない）
+    const stale = fetched.slice(0, 10) < today
+    next = { fetched, events, nowMin: minOf(now), error: stale ? `予定を読めていません（最後の取得 ${md(fetched.slice(0, 10))} ${fetched.slice(11)}）` : '' }
+  } catch {
+    next = { ...NO_CAL, error: '予定を読めませんでした' }
+  }
+  const cur = await read($, cal)
+  // 5分ごとに「今」の位置を進める。中身が変わらなければ描き直さない
+  const same = JSON.stringify({ ...cur, nowMin: 0 }) === JSON.stringify({ ...next, nowMin: 0 })
+  if (same && Math.floor(cur.nowMin / 5) === Math.floor(next.nowMin / 5)) return
+  await update($, cal, () => next)
+}
+
+async function refresh($: EngineInterface, force = false) {
+  // 本人のフォルダが見つかっていなければ、何もしない
+  if (!me) return
+  const { file: FILE, calFile, hasCal, owner } = me
+  const now = await $.clock.now()
+  const today = dayOf(now)
+  if (hasCal) await refreshCal($, now, calFile).catch(() => undefined)
+  const stat = await $.fs.stat(FILE).catch(() => undefined)
+  if (!stat) {
+    await update($, board, () => ({ ...EMPTY, today, error: 'tasks.json が見つかりません' }))
+    return
+  }
+  const last = await read($, mtime)
+  const cur = await read($, board)
+  if (!force && stat.mtimeMs === last && cur.today === today) return
+  try {
+    const data = JSON.parse(await $.fs.read(FILE))
+    await update($, board, () => build(data, today, owner))
+    await update($, mtime, () => stat.mtimeMs)
+  } catch {
+    // 書き込みの途中などで読めなかったときは、前の表示のまま次の確認を待つ。
+    // ただし前の表示がまだ無いときは、「0件・なし」と誤って見せないよう、エラーを入れる
+    if (cur.today === '') await update($, board, () => ({ ...EMPTY, today, error: 'tasks.json を読めませんでした' }))
+  }
+}
+
+export const register: Register = on => {
+  on('session.start', async ($, e, next) => {
+    // 本人のフォルダが見つからなければ、命令・道具・パネル・更新のどれも登録しない
+    me = await findMe($)
+    if (!me) return next(e)
+    await $.command.register({ name: 'yarukoto', description: `今日のやること（${me.call}・AI）を右のパネルに出す` })
+    await $.command.register({ name: 'task', description: '指定のタスク（例：/task T013）を右のパネルに開く' })
+    await $.tool
+      .register({
+        name: 'open_task',
+        description:
+          'あなたの右のパネルに、指定したタスク（tasks.json の ID。例 T013）の詳細を開く。「T013 開いて」と言われたときに使う。id を空にすると一覧に戻る',
+        inputSchema: {
+          type: 'object',
+          properties: { id: { type: 'string', description: 'タスクID（例 T013）。空なら一覧に戻る' } },
+        },
+        isDeferred: false,
+      })
+      .catch(() => undefined)
+    await $.tool
+      .register({
+        name: 'show_all_tasks',
+        description:
+          'あなたの右のパネルを、全部のタスクの一覧（未完了→完了の順、ページ送りあり）に切り替える。「タスク全部見せて」と言われたときに使う。短い画面に戻すのは open_task（id を空にする）',
+        inputSchema: { type: 'object', properties: {} },
+        isDeferred: false,
+      })
+      .catch(() => undefined)
+    await refresh($, true).catch(() => undefined)
+    await update($, detail, () => NONE)
+    await update($, view, () => HOME)
+    void $.ui.open({ id: PANE, title: TITLE })
+    $.clock.every(20000, () => refresh($))
+    return next(e)
+  })
+
+  on('command.run', { command: 'yarukoto' }, async $ => {
+    if (!me) return { text: NO_HOME }
+    await home($)
+    return { text: '今日のやることを右に出しました。' }
+  })
+
+  on('command.run', { command: 'task' }, async ($, e) => {
+    if (!me) return { text: NO_HOME }
+    if (!e.args.trim()) {
+      await home($)
+      return { text: '一覧に戻しました。' }
+    }
+    const d = await show($, e.args)
+    return { text: d.error || `${d.id} を右に開きました。` }
+  })
+
+  on('tool.call', { tool: 'mcp__ai-bunshin-panel__open_task' }, async ($, e) => {
+    if (!me) return { result: NO_HOME }
+    const id = String((e as any).id ?? '').trim()
+    if (!id) {
+      await home($)
+      return { result: '一覧に戻しました。' }
+    }
+    const d = await show($, id)
+    if (d.error) return { result: d.error }
+    return {
+      result: d.isPlaced
+        ? `${d.id}「${d.title}」を右のパネルに開きました。`
+        : `${d.id} を開きましたが、画面が狭くて右のパネルが出ていません。/task ${d.id} と打つと、どの幅でも出ます。`,
+    }
+  })
+
+  on('tool.call', { tool: 'mcp__ai-bunshin-panel__show_all_tasks' }, async $ => {
+    if (!me) return { result: NO_HOME }
+    const { isPlaced, count } = await showAll($)
+    return {
+      result: isPlaced
+        ? `全部のタスク（${count}件）を右のパネルに出しました。ページ送りのボタンで見られます。`
+        : '切り替えましたが、画面が狭くて右のパネルが出ていません。',
+    }
+  })
+
+  // tasks.json を書き換えたあとは、すぐ表示を更新する
+  on('tool.call', async ($, e, next) => {
+    const ran = await next(e)
+    if (e.tool === 'Edit' || e.tool === 'Write' || e.tool === 'Bash') await refresh($).catch(() => undefined)
+    return ran
+  })
+
+  on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e, next) => {
+    if (!me) return next(e)
+    const { call, hasCal } = me
+    const { Box, Text, Button } = $.ui.resolve(e)
+    const d = await read($, detail)
+    if (d.id && !d.error) {
+      return (
+        <Box flexDirection="column">
+          <Text bold wrap="wrap">
+            {d.id} {d.title}
+          </Text>
+          <Text> </Text>
+          {d.lines.map(l => (
+            <Text key={l.label} wrap="wrap">
+              <Text bold>{l.label}：</Text>
+              {l.text}
+            </Text>
+          ))}
+          {d.steps.length > 0 && <Text> </Text>}
+          {d.steps.length > 0 && <Text bold>手順</Text>}
+          {d.steps.map((s, i) => (
+            <Text key={`step${i}`} wrap="wrap">
+              {i + 1}. {s}
+            </Text>
+          ))}
+          <Text> </Text>
+          <Button key="back" label="← 戻る" onPress={() => void back($)} />
+        </Box>
+      )
+    }
+
+    const b = await read($, board)
+    const v = await read($, view)
+
+    if (v.mode === 'all') {
+      // ページ送り：1ページが窓（bodyRows）に収まる行数にする。見出し・ボタン・足元で 5行使う
+      const rowsPerPage = Math.max(5, Math.min(40, e.props.scroll.bodyRows - 5))
+      const pages = Math.max(1, Math.ceil(b.all.length / rowsPerPage))
+      const page = Math.min(Math.max(0, v.page), pages - 1)
+      const shown = b.all.slice(page * rowsPerPage, (page + 1) * rowsPerPage)
+      const openCount = b.all.filter(r => !r.done).length
+      const go = (to: number) => void update($, view, () => ({ mode: 'all', page: Math.min(Math.max(0, to), pages - 1) }))
+      return (
+        <Box flexDirection="column">
+          <Text bold>
+            全部のタスク {b.all.length} 件（未完了 {openCount}）　{page + 1}/{pages} ページ
+          </Text>
+          <Box flexDirection="row">
+            {page > 0 && <Button key="prev" label="← 前" onPress={() => go(page - 1)} />}
+            {page < pages - 1 && <Button key="next" label="次 →" onPress={() => go(page + 1)} />}
+            <Button key="home" label="短い画面へ" onPress={() => void home($)} />
+          </Box>
+          {b.error !== '' && <Text color="red">{b.error}</Text>}
+          {b.all.length === 0 && b.error === '' && <Text dimColor>なし</Text>}
+          {shown.map(r => (
+            <Button key={`all-${r.id}`} plain dimColor={r.done} onPress={() => void show($, r.id)}>
+              <Text wrap="truncate-end" dimColor={r.done}>
+                [{r.mark}] {r.id} {r.title}
+                {r.who ? ` ・${r.who}` : ''}
+                {r.due && !r.done ? `（${r.due}）` : ''}
+              </Text>
+            </Button>
+          ))}
+          <Text dimColor>行を押すと詳細</Text>
+        </Box>
+      )
+    }
+
+    const c = await read($, cal)
+    // 予定 1件：「09:00〜09:30 件名」。終わったものは薄く、今のものは太字
+    const ev = (e: CalEvent, i: number) => {
+      const s = toMin(e.start)
+      const t = toMin(e.end)
+      const past = !e.allday && t >= 0 ? t <= c.nowMin : !e.allday && s >= 0 && s < c.nowMin
+      const nowOn = !e.allday && s >= 0 && s <= c.nowMin && t > c.nowMin
+      const when = e.unknown ? '時刻不明' : e.allday ? '終日' : e.end ? `${e.start}〜${e.end}` : e.start
+      return (
+        <Text key={`cal-${i}`} wrap="truncate-end" dimColor={past} bold={nowOn}>
+          {when} {e.title}
+        </Text>
+      )
+    }
+    // 行を押すと、そのタスクの詳細を開く
+    const line = (sec: string, r: Row, color?: string) => (
+      <Button key={`${sec}-${r.id}`} plain onPress={() => void show($, r.id)}>
+        <Text wrap="truncate-end" color={color}>
+          {r.mark ? `[${r.mark}] ` : ''}
+          {r.id} {r.title}
+          {r.due && r.mark !== '今日' ? `（${r.due}）` : ''}
+        </Text>
+      </Button>
+    )
+
+    return (
+      <Box flexDirection="column">
+        <Text bold>{md(b.today)} の予定</Text>
+        {b.error !== '' && <Text color="red">{b.error}</Text>}
+        {d.error !== '' && <Text color="red">{d.error}</Text>}
+
+        {hasCal && <Text bold> </Text>}
+        {hasCal && <Text bold>■ 今日の予定{c.fetched && !c.error ? `（${c.fetched.slice(11)} 取得）` : ''}</Text>}
+        {hasCal && c.error !== '' && <Text color="red">{c.error}</Text>}
+        {hasCal && c.error === '' && c.events.length === 0 && <Text dimColor>予定なし</Text>}
+        {hasCal && c.events.map(ev)}
+
+        <Text bold> </Text>
+        <Text bold>■ {call}（今日まで）</Text>
+        {b.mine.length === 0 && <Text dimColor>なし</Text>}
+        {b.mine.map(r => line('mine', r, r.mark === '超過' ? 'red' : undefined))}
+
+        <Text bold> </Text>
+        <Text bold>■ AI（今日の計画）</Text>
+        {b.ai.length === 0 && <Text dimColor>計画なし</Text>}
+        {b.ai.map(r =>
+          r.mark === '済' ? (
+            <Button key={`ai-${r.id}`} plain dimColor onPress={() => void show($, r.id)}>
+              <Text dimColor wrap="truncate-end">
+                [済] {r.id} {r.title}
+              </Text>
+            </Button>
+          ) : (
+            line('ai', r)
+          ),
+        )}
+
+        <Text bold> </Text>
+        <Text bold>■ AI（これから）</Text>
+        {b.aiNext.length === 0 && <Text dimColor>なし</Text>}
+        {b.aiNext.map(r => line('aiNext', r))}
+        {b.aiNextMore > 0 && <Text dimColor>ほか {b.aiNextMore} 件</Text>}
+
+        <Text bold> </Text>
+        <Text bold>■ 近いうちに（{call}）</Text>
+        {b.soon.length === 0 && <Text dimColor>なし</Text>}
+        {b.soon.map(r => line('soon', r))}
+
+        <Text bold> </Text>
+        <Button key="open-all" label="全部のタスクを見る" onPress={() => void showAll($)} />
+        <Text dimColor>お願い 残り {b.openRequests} 件 ／ 行を押すと詳細 ／ /task T013 でも開く</Text>
+      </Box>
+    )
+  })
+}
