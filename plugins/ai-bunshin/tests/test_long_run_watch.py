@@ -476,8 +476,8 @@ def l13_grandchild_gets_grace_even_when_child_exits_at_once_on_term():
     """K：子が TERM で先に終わっても、孫の片づけ（1秒）が終わるまで待ってから KILL する。"""
     d, script = _slow_cleanup_script("l13")
     out = os.path.join(d, "l13.out")
-    # 孫が trap を入れる前に時間切れにならないよう、ready を待ってから始める代わりに、上限を十分長く（3秒）とる
-    r = run_limited(["--minutes", "0.05", "--grace", "3", "--stdout", out], [script])
+    # 孫は起動後すぐ（0.1 秒ほど）trap を入れて ready を作る。上限は 6 秒（0.1 分）で、その後に時間切れの TERM を受ける
+    r = run_limited(["--minutes", "0.1", "--grace", "3", "--stdout", out], [script])
     assert r.returncode == 124, (r.returncode, r.stderr[:200])
     assert os.path.exists(os.path.join(d, "ready")), "孫の準備ができる前に止まった（テストの前提が崩れた）"
     assert os.path.exists(os.path.join(d, "seen")), "孫が TERM を受けていない"
@@ -516,6 +516,42 @@ def l14_signal_during_timeout_stop_is_read_as_a_signal():
         assert not [f for f in os.listdir(logs) if f.startswith(".out.")], "一時ファイル（.out.*）が残っている"
         assert wait_dead(child), "子が残っている"
     finally:
+        _killpg_quiet(child)
+
+
+@case
+def l15_parent_killed_during_timeout_stop_leaves_no_temp_file():
+    """M：時間切れの止め途中に親が KILL されても、一時ファイルを残さず、子孫が止まる（J・A と同じ種類の取りこぼし）。"""
+    name = "l15"
+    d = os.path.join(BASE, name)
+    logs = os.path.join(d, "logs")
+    os.makedirs(logs, exist_ok=True)
+    termed = os.path.join(d, "termed")
+    script = os.path.join(d, "run.sh")
+    # TERM を受けたら印を作るが、終わらない（grace の間、止め途中が続く）
+    open(script, "w").write(f"#!/bin/sh\ntrap \"echo t > '{termed}'\" TERM\necho $$ > '{d}/child.pid'\necho partial\nwhile :; do sleep 1; done\n")
+    os.chmod(script, 0o755)
+    out = os.path.join(logs, ".out.abc123")
+    runpid = os.path.join(d, "run.pid")
+    parent = os.path.join(d, "parent.sh")
+    open(parent, "w").write(f"#!/bin/sh\n'{sys.executable}' '{LIMITED}' --minutes 0.03 --grace 3 --stdout '{out}' -- '{script}' &\necho $! > '{runpid}'\nwait\n")
+    os.chmod(parent, 0o755)
+    par = subprocess.Popen([parent], start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    CHILDREN.append(par)
+    rl = pid_from(runpid)
+    child = pid_from(os.path.join(d, "child.pid"))
+    try:
+        t0 = time.time()
+        while not os.path.exists(termed) and time.time() - t0 < 10:   # 時間切れの TERM が届いた＝止め途中
+            time.sleep(0.05)
+        assert os.path.exists(termed), "時間切れの TERM が子に届かない（テストの前提が崩れた）"
+        os.kill(par.pid, signal.SIGKILL)   # 止め途中（grace 3 秒のうち）に親を殺す
+        par.wait(timeout=5)
+        assert wait_dead(rl, 10), "親が死んだのに、run_limited が残っている"
+        assert wait_dead(child, 5), "子が残っている"
+        assert not [f for f in os.listdir(logs) if f.startswith(".out.")], "一時ファイル（.out.*）が残っている"
+    finally:
+        _kill_quiet(rl)
         _killpg_quiet(child)
 
 

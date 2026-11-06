@@ -61,6 +61,13 @@ def _stop_group(p, grace):
 POLL = 0.2   # 待つ間隔（秒）。信号の記録と上限を、このたびに見る
 
 
+def _note_parent_gone(state, ppid0):
+    """親が死んだ（親の PID が起動時と変わった：launchd などが親になった）なら、信号 HUP を受けたことにする。
+    読む人がいないので、HUP を受けたときと同じ道で止める（129・一時ファイルを消す）。先に届いた信号があればそれを残す。"""
+    if state["sig"] is None and os.getppid() != ppid0:
+        state["sig"] = signal.SIGHUP
+
+
 def run(cmd, seconds, stdout_path, grace=5.0):
     """ハンドラは信号の番号を記録するだけ（例外は出さない）。本体は短い間隔で待ちを繰り返し、そのたびに「記録」と「上限」を見る。
     これで、確認と待ちの間に届いた信号を取りこぼさない（届いても、次の見に行くまでの最大 POLL 秒で気づく）。
@@ -84,8 +91,7 @@ def run(cmd, seconds, stdout_path, grace=5.0):
             rc = None
             stop = None   # "signal" か "timeout"
             while True:
-                if state["sig"] is None and os.getppid() != ppid0:
-                    state["sig"] = signal.SIGHUP   # 親が死んだ（launchd の KILL など）：読む人がいないので、HUP を受けたときと同じ道で止める
+                _note_parent_gone(state, ppid0)
                 if state["sig"] is not None:   # 起動する前に届いたものも、ここで見つかる
                     stop = "signal"
                     break
@@ -102,8 +108,9 @@ def run(cmd, seconds, stdout_path, grace=5.0):
                 stop = "signal"   # 待ちから戻る瞬間に信号を記録していた（子が先に終わった）。残った孫を止めるため、止める道に入れる
             if stop is not None:
                 _stop_group(p, grace)
+                _note_parent_gone(state, ppid0)   # 止める途中で親が死んだ場合も拾う
                 if stop == "timeout" and state["sig"] is not None:
-                    stop = "signal"   # 時間切れの止め途中に信号が届いた：記録だけで終わらせず、信号として扱う（128+番号・一時ファイルを消す）
+                    stop = "signal"   # 時間切れの止め途中に信号が届いた（親の死を含む）：記録だけで終わらせず、信号として扱う（128+番号・一時ファイルを消す）
                 if stop == "signal":
                     try:
                         os.unlink(stdout_path)   # 止められた実行の一時ファイルは片付ける
