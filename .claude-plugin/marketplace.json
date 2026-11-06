@@ -9,6 +9,11 @@
       "name": "ai-bunshin",
       "source": "./plugins/ai-bunshin",
       "description": "本人の業務を代行する AI 分身"
+    },
+    {
+      "name": "ai-bunshin-panel",
+      "source": "./plugins/ai-bunshin-panel",
+      "description": "AI分身の右のパネル：今日のやること・予定・お願いを右に出す（任意。ターミナル版・本人のフォルダでだけ出る）"
     }
   ]
 }

@@ -196,6 +196,7 @@ description: AI 分身の初回セットアップ。新しく使い始める人�
 - 「何を頼めばいい？」と聞けば、任せられる仕事を提案する（`/ai-bunshin:consult`）
 - お願いへの返事：「T0XX やった」「T0XX は無い」「T0XX はこう変えて」
 - 見る場所：`00_タスク管理/タスク管理.xlsx` と `<呼び方>へのお願い.md`
+- 右のパネル（任意。ターミナル版の人だけ）：今日のやること・予定・お願いを右に出したい人には、`! claude plugin install ai-bunshin-panel@ai-bunshin-marketplace --scope project` を案内する。入れたら Claude を開き直す（`/yarukoto`・`/task T013` で開ける）
 - 最初の3日は使用量を測る期間。ときどき `/usage` で残りを見てほしい
 - 起動時のまとめ（Claude を開いたときに出る今日の状況）が出ないときは、NG の見張りも動いていない可能性がある。まず hook と同じ順番で、Python 3 が動くかを `! for c in python3 python "py -3"; do [ "$($c -c 'import sys; sys.stdout.write(str(sys.version_info[0]))' 2>/dev/null)" = "3" ] && { echo "動く：$c"; break; }; done` で確かめる。何も出なければ Python 3 を入れる。`動く：` と出たのにまとめが出ないなら、AI に相談する（Windows では未確認）
 - 分からない言葉（スプリント・ベロシティ・約束pt など）が出たら、「言葉の意味を教えて」と聞けば説明する（`/ai-bunshin:status` の最後の「ことばの説明」）
