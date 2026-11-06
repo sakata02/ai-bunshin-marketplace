@@ -515,14 +515,15 @@ def t69_2_starter_settings_json_with_bom_is_recognised_as_setup_pending():
 
 @case
 def t69_3_list_note_fails_in_japanese_and_tasks_json_bytes_stay_same():
-    """検査を通ったあと Excel で落ちる値（note が一覧）でも、tasks.json は書き換えない（移しは最後）。英語の ValueError は出さない。"""
+    """検査を通ったあと Excel で落ちる値（points が { }。note・title などの文字の項目は読むときに文字にするので落ちない：T159）でも、
+    tasks.json は書き換えない（移しは最後）。英語の ValueError は出さない。"""
     try:
         import openpyxl  # noqa: F401
     except ImportError:
         print("      （openpyxl が無いので飛ばす）")
         return
     t = copy.deepcopy(TASKS)
-    t["tasks"][0]["note"] = ["一覧", "になっている"]
+    t["tasks"][0]["points"] = {"一覧": "ではない"}
     home = make_home(tasks=t)   # schema_version が無い＝移しの対象
     before = rd(tasks_file(home))
     for mode in ([], ["--session"], ["--plan-context"]):
@@ -533,7 +534,7 @@ def t69_3_list_note_fails_in_japanese_and_tasks_json_bytes_stay_same():
         assert rd(tasks_file(home)) == before, f"tasks.json が書き換わった {mode}"
         assert not [f for f in os.listdir(os.path.dirname(tasks_file(home))) if ".bak_" in f], "控えが作られた"
     # 直したら移しが行われる（移しは Excel・ボード・お願いを書き終えたあと）
-    t["tasks"][0]["note"] = "文字にした"
+    t["tasks"][0]["points"] = 2
     with open(tasks_file(home), "w", encoding="utf-8") as f:
         json.dump(t, f, ensure_ascii=False)
     r = run_dash(home, ["--today", "2026-11-02"])
@@ -630,7 +631,7 @@ def t69b_excel_failure_is_logged_without_task_text_and_message_names_log():
         print("      （openpyxl が無いので飛ばす）")
         return
     t = copy.deepcopy(TASKS)
-    t["tasks"][0]["note"] = [SECRET]
+    t["tasks"][0]["points"] = {SECRET: 1}   # 文字の項目（note など）は読むときに文字にするので、Excel で落ちる別の値を使う（T159）
     home = make_home(tasks=t)
     r = run_dash(home, ["--today", "2026-11-02", "--now", "2026-11-02 10:00"])
     assert r.returncode == 1, r.stderr

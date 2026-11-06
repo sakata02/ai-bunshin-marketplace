@@ -2269,8 +2269,35 @@ def parse_tasks_bytes(raw):
     return parse_json_text(text, "tasks.json")
 
 
+# 文字として使っているタスクの項目。一覧（[ ]）や { } が入っていても止まらないよう、読むときに文字にする（text_of）。
+# steps・depends_on は、もともと一覧の項目なので入れない。id・status・日付・数の項目は、validate が日本語で知らせる（ここでは触らない）。
+TEXT_FIELDS = ("title", "department", "type", "kind", "assignee", "reviewer", "sprint", "pdca",
+               "note", "why", "done_when", "report_back", "due_reason", "related")
+
+
+def text_of(v):
+    """一覧は中身を文字にして「・」でつなぐ（["T152","T153"] → "T152・T153"。None の中身は飛ばす）。{ } は JSON の文字。None・文字・数はそのまま。"""
+    if isinstance(v, list):
+        return "・".join(str(text_of(x)) for x in v if x is not None)
+    if isinstance(v, dict):
+        return json.dumps(v, ensure_ascii=False, default=str)
+    return v
+
+
+def normalize_text_fields(data):
+    """メモリの上だけで、タスクの文字の項目を文字にする。tasks.json のファイルには書き戻さない。"""
+    for t in data.get("tasks", []):
+        if isinstance(t, dict):
+            for key in TEXT_FIELDS:
+                if key in t:
+                    t[key] = text_of(t[key])
+    return data
+
+
 def load_tasks(path):
-    """tasks.json を読んで辞書にする。読めない・空・壊れている・{ } で始まらないときは BadFile。"""
+    """tasks.json を読んで辞書にする。読めない・空・壊れている・{ } で始まらないときは BadFile。
+    読む入口（run・--task）が共通で通るここで、文字の項目を文字にする。移し（migrate_tasks_json）は parse_tasks_bytes で
+    読み直すので、文字にした値が tasks.json に書き戻されることはない。"""
     try:
         raw = Path(path).read_bytes()
     except OSError as e:
@@ -2278,7 +2305,8 @@ def load_tasks(path):
     data = parse_tasks_bytes(raw)
     if not isinstance(data, dict):
         raise BadFile("tasks.json は { } で始まる形にしてください（今は別の形です）。壊れたファイルは書き換えていません")
-    return data
+    tl = data.get("tasks")
+    return normalize_text_fields(data) if isinstance(tl, list) else data
 
 
 def migrate_tasks_json(path, today):
