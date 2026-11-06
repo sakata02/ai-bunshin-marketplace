@@ -72,7 +72,7 @@ description: AI 分身の初回セットアップ。新しく使い始める人�
     1. 上の 1. と同じ手順で URL をコピーする
     2. 「メモ帳」を開いて URL を貼り付ける（1行だけ。2つ貼らない。改行は付けなくてよい。保存するときの「文字コード」は UTF-8 のまま）→「名前を付けて保存」→ 保存先は自分のユーザーフォルダ、ファイル名は `ai-bunshin-calendar-url.txt`、「ファイルの種類」は「すべてのファイル」（`.txt.txt` になるのを防ぐ）。OneDrive で同期されるフォルダ（ドキュメント・デスクトップ）には置かない
     3. config の `calendar` は Mac と同じ（`keychain` の項目は Windows では使われない）
-    4. 時刻がずれないよう、tzdata（タイムゾーンの辞書）が入っているか確かめる。`scripts/requirements.txt` に入っている。入れるのは本人（AI は入れない）。PowerShell で `py -m pip install tzdata`（`py` が無ければ `python -m pip install tzdata`）。入っているかの確かめ：`py -c "import zoneinfo; zoneinfo.ZoneInfo('Asia/Tokyo')"` がエラーなく終われば入っている。入っていないと、タイムゾーンを読めない予定は「時刻不明」と出る
+    4. 時刻がずれないよう、tzdata（タイムゾーンの辞書）が入っているか確かめる。`scripts/requirements.txt` に入っている。入れるのは本人（AI は入れない）。PowerShell で `python -m pip install tzdata`（`python` が動かなければ `py -3 -m pip install tzdata`）。入っているかの確かめ：`python -c "import zoneinfo; zoneinfo.ZoneInfo('Asia/Tokyo')"`（`python` が動かなければ `py -3 -c "…"`）がエラーなく終われば入っている。入っていないと、タイムゾーンを読めない予定は「時刻不明」と出る
     5. `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/update_dashboard.py"`（無ければ `python` か `py -3`）を実行する。「📅 予定を読めませんでした（Windows のつなぎ方は setup を見てください）」と出たら、ファイルの名前と場所を確かめる
   - 予定を読めなかったときは、起動時のまとめ・朝の計画に「📅 予定を読めませんでした（理由）」と出る（「予定なし」とは別。会議の多さは分からないので、予定のない日として計画を組まない）
 

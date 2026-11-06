@@ -5,7 +5,9 @@
   tasks.json を書き換えない。hook（--hook／--session）は壊れた設定でも止めない
 - 初期ベロシティの既定値が1か所（雛形・コード・計画のスキルが同じ）
 - --now で時刻を外から渡せる。--today と --now を固定すると、同じ入力で同じ出力になる
-- ガントが 120 日で切れたら、切れたことが分かる
+- ガントが 120 日で切れたら、切れたことが分かる。列の数は見出しの日数（120）と同じ
+- config.json と tasks.json が両方壊れていても、hook は tasks.json の壊れを終了コード 2 で伝える（config だけなら 0）
+- setup_settings.py は settings.json の形違い（permissions・deny・additionalDirectories・enabledPlugins）を日本語で案内して止まる
 - pip の案内が hook の順番（python3 → python → py -3）で、status と setup と一致する
 - 祝日の雛形が空なので、setup が祝日を入れる案内を持つ
 本物の自分のフォルダは使わない（すべて一時フォルダ。AI_BUNSHIN_HOME で指定）。
@@ -415,6 +417,58 @@ def b4_bad_config_hook_and_session_do_not_stop_claude():
 
 
 @case
+def b4_bad_config_and_bad_tasks_hook_still_says_exit_2_but_config_only_stays_0():
+    """config.json と tasks.json が両方壊れていても、hook は tasks.json の壊れを終了コード 2 で伝える。
+    config だけ壊れているときは今までどおり 0（hook は止めない）。session は両方壊れていても 0。"""
+    for name, kw in (("壊れた JSON", dict(tasks_raw="{ \"project\": ")), ("空のファイル", dict(tasks_raw="")),
+                     ("配列で始まる", dict(tasks_raw="[]"))):
+        home = make_home(config_raw="{ \"owner\": ", **kw)
+        before = snap_dir(home)
+        r = run_dash(home, ["--hook", "--today", "2026-11-02"], stdin=hook_payload(home))
+        assert r.returncode == 2, f"{name}: 終了コード {r.returncode}（2 のはず）"
+        japanese_no_trace(r, name)
+        assert "tasks.json" in r.stderr and "config.json" in r.stderr, r.stderr
+        assert snap_dir(home) == before
+        r = run_dash(home, ["--session", "--today", "2026-11-02"])
+        assert r.returncode == 0, f"{name} session: 終了コード {r.returncode}（0 のはず）"
+    home = make_home(config_raw="{ \"owner\": ")   # config だけ壊れている：0
+    r = run_dash(home, ["--hook", "--today", "2026-11-02"], stdin=hook_payload(home))
+    assert r.returncode == 0, f"終了コード {r.returncode}（0 のはず）"
+
+
+BAD_SETTINGS = {
+    "permissions が一覧": {"permissions": []},
+    "permissions が文字": {"permissions": "x"},
+    "deny が文字": {"permissions": {"deny": "x"}},
+    "deny が辞書": {"permissions": {"deny": {}}},
+    "additionalDirectories が文字": {"permissions": {"additionalDirectories": "/x"}},
+    "enabledPlugins が一覧": {"enabledPlugins": []},
+}
+
+
+@case
+def b2_setup_settings_wrong_shapes_are_japanese_and_untouched():
+    bad = []
+    for i, (name, body) in enumerate(BAD_SETTINGS.items()):
+        home = os.path.join(BASE, f"setup_shape{i}")
+        os.makedirs(os.path.join(home, ".claude"))
+        p = os.path.join(home, ".claude", "settings.json")
+        raw = json.dumps(body).encode("utf-8")
+        with open(p, "wb") as f:
+            f.write(raw)
+        r = subprocess.run([sys.executable, SETUP_SETTINGS, home], capture_output=True, text=True, encoding="utf-8",
+                           env=dict(os.environ, PYTHONUTF8="1"))
+        try:
+            assert r.returncode == 1, f"終了コード {r.returncode}"
+            japanese_no_trace(r, name)
+            assert "settings.json" in r.stderr and "書き換えていません" in r.stderr, r.stderr
+            assert rd(p) == raw
+        except AssertionError as e:
+            bad.append(f"{name}: {e}")
+    assert not bad, "\n      " + "\n      ".join(bad)
+
+
+@case
 def b3_capacity_null_zero_and_default_ok_do_not_break_real_shaped_data():
     """本物のデータにある形（計画なしの日は capacity が null）は、エラーにしない。0 も落とさない。"""
     for cap in (None, 0, 8, 7.5):
@@ -756,6 +810,13 @@ def read_gantt_header(root):
     return wb["ガント"]["A1"].value or "", wb["ガント"].max_column
 
 
+def gantt_day_columns(root):
+    """ガントの日付の列（2行目の、固定の5列より右で値のあるもの）の数。"""
+    from openpyxl import load_workbook
+    ws = load_workbook(os.path.join(root, "00_タスク管理", "タスク管理.xlsx"))["ガント"]
+    return sum(1 for c in range(6, ws.max_column + 1) if ws.cell(row=2, column=c).value is not None)
+
+
 def gantt_data(due):
     t = copy.deepcopy(TASKS)
     t["tasks"][0]["due"] = due
@@ -775,6 +836,8 @@ def b6_gantt_cut_is_announced_and_constant_exists():
     assert r.returncode == 0, r.stderr
     head, ncol = read_gantt_header(long_home)
     assert "表示していません" in head, head
+    assert f"（{MOD.GANTT_MAX_DAYS}日）まで" in head, head
+    assert gantt_day_columns(long_home) == MOD.GANTT_MAX_DAYS, gantt_day_columns(long_home)   # 見出しの日数と列の数が同じ
     short_home = make_home(tasks=gantt_data("2026-11-10"))
     run_dash(short_home, ["--today", "2026-11-02", "--now", "2026-11-02 10:00"])
     head2, _ = read_gantt_header(short_home)
@@ -785,7 +848,7 @@ def b6_gantt_cut_is_announced_and_constant_exists():
 def b6_gantt_range_helper():
     d = datetime.date
     begin, finish, true_finish = MOD.gantt_range([d(2026, 11, 2)], [d(2027, 9, 30)], d(2026, 11, 2))
-    assert (finish - begin).days == MOD.GANTT_MAX_DAYS and true_finish == d(2027, 9, 30)
+    assert (finish - begin).days + 1 == MOD.GANTT_MAX_DAYS and true_finish == d(2027, 9, 30)   # 切れたとき、列の数は見出しの日数と同じ
     begin, finish, true_finish = MOD.gantt_range([d(2026, 11, 2)], [d(2026, 11, 10)], d(2026, 11, 2))
     assert true_finish == finish
 
@@ -806,6 +869,9 @@ def b6_pip_guidance_order_matches_hook_in_script_status_and_setup():
     setup = open(os.path.join(PLUGIN, "skills", "setup", "SKILL.md"), encoding="utf-8").read()
     row = next(x for x in setup.splitlines() if x.startswith("| openpyxl "))
     assert order_ok(row), row
+    tz = next(x for x in setup.splitlines() if "tzdata" in x and "pip install tzdata" in x)   # Windows の tzdata の案内も同じ順（python → py -3）
+    assert 0 <= tz.find("python -m pip") < tz.find("py -3 -m pip") and "`py -m" not in tz, tz
+    assert 0 <= tz.find("python -c") < tz.find("py -3 -c"), tz
     # hook の順番（run_py.sh）と同じ：python3 → python → py -3
     sh = open(os.path.join(SCRIPTS, "run_py.sh"), encoding="utf-8").read()
     assert sh.find("is_py3 python3") < sh.find("is_py3 python;") < sh.find("is_py3 py -3")

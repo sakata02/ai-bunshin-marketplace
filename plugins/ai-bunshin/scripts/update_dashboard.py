@@ -1257,10 +1257,10 @@ def build_task_list(wb, ctx):
 
 
 def gantt_range(starts, ends, today):
-    """ガントに出す期間 (左端, 右端, 切らなかったときの右端)。右端が GANTT_MAX_DAYS 日を超えるぶんは切る。"""
+    """ガントに出す期間 (左端, 右端, 切らなかったときの右端)。右端が GANTT_MAX_DAYS 日（列の数）を超えるぶんは切る。"""
     begin = min(list(starts) + [today - timedelta(days=GANTT_PAST_DAYS)])
     true_finish = max(list(ends) + [today + timedelta(days=GANTT_AHEAD_DAYS)])
-    return begin, min(true_finish, begin + timedelta(days=GANTT_MAX_DAYS)), true_finish
+    return begin, min(true_finish, begin + timedelta(days=GANTT_MAX_DAYS - 1)), true_finish
 
 
 def build_gantt(wb, ctx):
@@ -2563,6 +2563,12 @@ def _main():
         return show_tasks(args.task)
 
     if CONFIG_ERROR:   # 設定が読めないまま既定値で進めると、別の名前のファイルを作ってしまう。案内を出して止まる（hook は止めない）
+        if args.hook:   # ただし tasks.json も壊れているときは、config が壊れていても伝える（終了コード 2＝Claude に直させる）
+            try:
+                load_tasks(TASKS_JSON)
+            except BadFile as e:
+                print(f"ダッシュボード更新に失敗: {e}（設定/config.json も読めない状態です）", file=sys.stderr)
+                return 2
         return failure_notice(f"ダッシュボード更新に失敗: {CONFIG_ERROR}", args, 1)
 
     try:
