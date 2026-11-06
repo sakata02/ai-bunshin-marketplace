@@ -29,28 +29,12 @@ TODAY = time.strftime("%Y-%m-%d")
 
 names, fails = [], 0
 
-# 坂田さんの実物の .gitignore（2026-11-07 時点）と同じ中身。OLD は今日より前の形（.lock と logs/.backup.* の行が無い）
-REAL_GITIGNORE = """# 坂田さんのフォルダの控え（GitHub 非公開リポジトリ）に入れないもの
-03_インプット/
-00_タスク管理/data/calendar_cache.json
-*.xlsx
-scripts/auto/*.log
-.DS_Store
-__pycache__/
-.claude/rules/ai-bunshin-common.md
-# 作業のたびに変わる記録（2026-10-31 坂田さん OK）
-00_タスク管理/data/tasks.json.bak_*
-scripts/auto/last_success_*.txt
-.*.tmp
-.claude/ai-bunshin-details/
-scripts/auto/last_timeout.txt
-scripts/auto/logs/.out.*
-scripts/auto/logs/*.log
-scripts/auto/.lock
-scripts/auto/logs/.backup.*
-"""
-OLD_GITIGNORE = "".join(ln + "\n" for ln in REAL_GITIGNORE.splitlines()
-                        if ln not in ("scripts/auto/.lock", "scripts/auto/logs/.backup.*"))
+# 配布する .gitignore の雛形（templates/gitignore.txt。setup が本人のフォルダに置く）をそのまま使う＝本人が受け取る既定の組み合わせ（雛形＋daily_cycle.sh）を確かめる。
+# NO_LOCK は雛形から自動実行のロックの行（scripts/auto/.lock）を除いたもの（ロックの行が無い形でも、一時ファイルは入らないことを見る）
+TEMPLATE = os.path.abspath(os.path.join(HERE, "..", "templates", "gitignore.txt"))
+TEMPLATE_GITIGNORE = open(TEMPLATE, encoding="utf-8").read()
+TEMPLATE_GITIGNORE_NO_LOCK = "".join(ln + "\n" for ln in TEMPLATE_GITIGNORE.splitlines() if ln.strip() != "scripts/auto/.lock")
+assert TEMPLATE_GITIGNORE_NO_LOCK != TEMPLATE_GITIGNORE, "雛形に scripts/auto/.lock の行が無い"
 
 
 def case(fn):
@@ -133,7 +117,7 @@ def make(name, own_repo=True, parent_repo=False, cfg=None, gitignore=None):
     c.update(cfg or {})
     json.dump(c, open(os.path.join(home, "設定", "config.json"), "w", encoding="utf-8"), ensure_ascii=False)
     open(os.path.join(home, "00_タスク管理", "data", "tasks.json"), "w").write("{}")
-    open(os.path.join(home, ".gitignore"), "w", encoding="utf-8").write(REAL_GITIGNORE if gitignore is None else gitignore)
+    open(os.path.join(home, ".gitignore"), "w", encoding="utf-8").write(TEMPLATE_GITIGNORE if gitignore is None else gitignore)
     bindir = os.path.join(d, "bin")
     os.makedirs(bindir)
     open(os.path.join(bindir, "claude"), "w").write(FAKE_CLAUDE)
@@ -191,7 +175,7 @@ def t1_review_with_changes_adds_one_commit_with_message():
     lines = backup_lines(c)
     assert lines and f"コミットした（{short}）" in lines[-1], (short, lines)
     assert git(c["home"], "status", "--porcelain").stdout.strip() == "", "コミットしたのに未コミットが残っている"
-    # 実物の .gitignore なら、ロックと logs の一時ファイル・ログは入らない
+    # 配布する雛形の .gitignore なら、ロックと logs の一時ファイル・ログは入らない
     names_in = git(c["home"], "-c", "core.quotepath=off", "show", "--name-only", "--format=", "HEAD").stdout.split()
     assert names_in == ["01_スプリント/S1/daily/" + time.strftime("%Y%m%d") + "_振り返り.md"], names_in
 
@@ -339,8 +323,8 @@ def t10_no_other_git_operations_in_script():
 
 @case
 def t11_old_gitignore_still_keeps_temp_file_out_of_commit():
-    # 今日より前の .gitignore（.lock・.backup.* の行が無い）でも、控えの一時ファイル（.out.backup.*）はコミットに入らない
-    c = make("t11", gitignore=OLD_GITIGNORE)
+    # 雛形から .lock の行を除いた .gitignore でも、控えの一時ファイル（.out.backup.*）はコミットに入らない
+    c = make("t11", gitignore=TEMPLATE_GITIGNORE_NO_LOCK)
     r = run(c)
     assert r.returncode == 0, (r.returncode, r.stderr[-300:])
     names_in = git(c["home"], "-c", "core.quotepath=off", "show", "--name-only", "--format=", "HEAD").stdout.split()
