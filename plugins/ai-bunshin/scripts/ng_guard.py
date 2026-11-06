@@ -1809,11 +1809,30 @@ def hardlink_owner(f, recs):
     return None
 
 
-def _read_config(root):
-    """設定/config.json を読む。読めない・形が違う（dict でない）ときは {}。例外はすべて受ける（指摘5）。"""
+def _parse_config_text(text):
+    """config.json の本文（文字列）から「見張りが使う辞書」を作る唯一の道。先頭の BOM は1つだけ落とす（メモ帳の保存）。
+    JSON として読めない・{ } でないときは {}。見張り（_read_config）も書き換え判定（self_limit_hit）も、必ずこれを通す。"""
     try:
-        cfg = json.loads((Path(root) / "設定" / "config.json").read_text(encoding="utf-8"))
-        return cfg if isinstance(cfg, dict) else {}
+        if text.startswith("\ufeff"):
+            text = text[1:]
+        cfg = json.loads(text)
+    except Exception:
+        return {}
+    return cfg if isinstance(cfg, dict) else {}
+
+
+def _parse_config_bytes(raw):
+    """ファイルのバイト列から辞書を作る。厳密に utf-8 として復号できなければ {}（見張りと同じ見え方）。"""
+    try:
+        return _parse_config_text(raw.decode("utf-8"))
+    except Exception:
+        return {}
+
+
+def _read_config(root):
+    """設定/config.json を読む。読めない・形が違う（dict でない）・utf-8 として不正なときは {}。例外はすべて受ける（指摘5）。"""
+    try:
+        return _parse_config_bytes((Path(root) / "設定" / "config.json").read_bytes())
     except Exception:
         return {}
 
@@ -2307,14 +2326,8 @@ def _text_after(tool, inp, text):
     return text
 
 
-def _limit_keys(text):
-    """config.json の本文から、見張りが実際に使う値（ng_allow の文字列のリスト・maintainer の真偽）。読めない・形が違うときは見張りと同じく {} 扱い。"""
-    try:
-        cfg = json.loads(text)
-    except Exception:
-        cfg = {}
-    if not isinstance(cfg, dict):
-        cfg = {}
+def _limit_keys(cfg):
+    """見張りが実際に使う辞書（_parse_config_text・_parse_config_bytes の結果）から、ng_allow の文字列のリストと maintainer の真偽を取り出す。"""
     ng = cfg.get("ng_allow", [])
     ng = [x for x in ng if isinstance(x, str)] if isinstance(ng, list) else []
     return ng, bool(cfg.get("maintainer"))
@@ -2341,6 +2354,12 @@ def _exception_sections(text):
     return out
 
 
+def _edit_base_text(raw):
+    """Edit・MultiEdit の old_string を当てる古い本文。改行（\\r\\n・\\r）は \\n にそろえる（Edit の道具の見え方と同じ。CRLF のファイルでも複数行の Edit が一致する）。
+    config の見え方（_parse_config_bytes）には使わない。"""
+    return raw.decode("utf-8", errors="replace").replace("\r\n", "\n").replace("\r", "\n")
+
+
 def self_limit_hit(tool, inp, root, path, forms, base):
     """Write・Edit で、既にある config.json の ng_allow・maintainer や CLAUDE.md の「許可する例外」が変わるなら True。
     まだ無いファイルの新規作成（setup）は通す。適用後の姿を確かめられない形（内容なし・見つからない old_string など）は止める。"""
@@ -2360,16 +2379,27 @@ def self_limit_hit(tool, inp, root, path, forms, base):
         return False
     f = cfg_path if kind == "config" else md_path
     try:
-        old = f.read_text(encoding="utf-8", errors="replace")
+        raw = f.read_bytes()
     except FileNotFoundError:
         return False  # まだ無い：新規作成は通す
     except OSError:
         return True
+    if kind == "config":
+        # 古い姿は見張りと同じ道（_parse_config_bytes）、新しい姿は同じ辞書づくり（_parse_config_text）で作る。
+        # 古い本文が utf-8 として不正なら見張りには {} に見える。Write は中身を丸ごと差し替えるので比べられるが、Edit は適用後の姿を確かめられない＝止める
+        try:
+            raw.decode("utf-8")
+        except UnicodeDecodeError:
+            if tool != "Write":
+                return True
+        new = _text_after(tool, inp, _edit_base_text(raw))
+        if new is None:
+            return True
+        return _limit_keys(_parse_config_bytes(raw)) != _limit_keys(_parse_config_text(new))
+    old = _edit_base_text(raw)
     new = _text_after(tool, inp, old)
     if new is None:
         return True
-    if kind == "config":
-        return _limit_keys(old) != _limit_keys(new)
     return _exception_sections(old) != _exception_sections(new)
 
 

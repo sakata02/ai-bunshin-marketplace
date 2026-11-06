@@ -72,7 +72,7 @@ description: AI 分身の初回セットアップ。新しく使い始める人�
     1. 上の 1. と同じ手順で URL をコピーする
     2. 「メモ帳」を開いて URL を貼り付ける（1行だけ。2つ貼らない。改行は付けなくてよい。保存するときの「文字コード」は UTF-8 のまま）→「名前を付けて保存」→ 保存先は自分のユーザーフォルダ、ファイル名は `ai-bunshin-calendar-url.txt`、「ファイルの種類」は「すべてのファイル」（`.txt.txt` になるのを防ぐ）。OneDrive で同期されるフォルダ（ドキュメント・デスクトップ）には置かない
     3. config の `calendar` は Mac と同じ（`keychain` の項目は Windows では使われない）
-    4. 時刻がずれないよう、tzdata（タイムゾーンの辞書）が入っているか確かめる。`scripts/requirements.txt` に入っている。入れるのは本人（AI は入れない）。PowerShell で `py -m pip install tzdata`（`py` が無ければ `python -m pip install tzdata`）。入っているかの確かめ：`py -c "import zoneinfo; zoneinfo.ZoneInfo('Asia/Tokyo')"` がエラーなく終われば入っている。入っていないと、タイムゾーンを読めない予定は「時刻不明」と出る
+    4. 時刻がずれないよう、tzdata（タイムゾーンの辞書）が入っているか確かめる。`scripts/requirements.txt` に入っている。入れるのは本人（AI は入れない）。PowerShell で `python -m pip install tzdata`（`python` が動かなければ `py -3 -m pip install tzdata`）。入っているかの確かめ：`python -c "import zoneinfo; zoneinfo.ZoneInfo('Asia/Tokyo')"`（`python` が動かなければ `py -3 -c "…"`）がエラーなく終われば入っている。入っていないと、タイムゾーンを読めない予定は「時刻不明」と出る
     5. `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/update_dashboard.py"`（無ければ `python` か `py -3`）を実行する。「📅 予定を読めませんでした（Windows のつなぎ方は setup を見てください）」と出たら、ファイルの名前と場所を確かめる
   - 予定を読めなかったときは、起動時のまとめ・朝の計画に「📅 予定を読めませんでした（理由）」と出る（「予定なし」とは別。会議の多さは分からないので、予定のない日として計画を組まない）
 
@@ -121,6 +121,15 @@ description: AI 分身の初回セットアップ。新しく使い始める人�
 1. `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/update_dashboard.py"` → `00_タスク管理/タスク管理.xlsx` ができる
 2. `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/update_dashboard.py" --session` → `.claude/rules/ai-bunshin-common.md` と `.claude/ai-bunshin-details/`（必要なときだけ読む詳しい手順）ができる（次の起動から共通ルールが読み込まれる）
 3. `python3 "${CLAUDE_PLUGIN_ROOT}/tests/test_ng_guard.py"` → 「失敗 0 件」（NG の見張りが効く）
+
+**控え（本人のフォルダをローカルの Git で記録する。Git がある人だけ。無くても AI 分身は動く）**：直しすぎたときに、1ファイルだけ昨日の状態へ戻せるようにするため。外には何も送らない。進め方は `.claude/ai-bunshin-details/backup.md`（まだコピーされていないときは `${CLAUDE_PLUGIN_ROOT}/rules/details/backup.md`）
+1. `git --version` を実行する。**Git が無い**ときは、入れ方の案内だけして先へ進む（インストールは本人。AI は入れない）：Mac は `! xcode-select --install`、Windows は https://git-scm.com/download/win 。入れたら「/ai-bunshin:setup」でこの手順だけやり直せると伝える
+2. Git があるときは、本人のフォルダで `git rev-parse --show-toplevel` を実行して確かめる：
+   - 出力が本人のフォルダと一致する → すでにこのフォルダ自身がリポジトリ。`git init` はしない（下の `.gitignore` だけ確かめる）
+   - 出力が別のフォルダ（親のフォルダ）→ 親のリポジトリの中。`git init` はせず、「親のフォルダのリポジトリの中なので、このフォルダの控えは始めません」と案内する。`.gitignore` も置かない
+   - エラー（リポジトリでない）→ `git init` を実行し、「変更の記録（控え）を始めました。外には何も送りません。間違えて直したら「◯◯を昨日の状態に戻して」と言えば、そのファイルだけ戻します」と伝える
+3. 控えとして使うとき（`git init` した直後、またはすでにこのフォルダ自身がリポジトリのとき）：`git config user.name` と `git config user.email` に値があるか確かめる。**どちらかが空なら**、設定の案内を出す（無いと、毎日の控えのコミットが「名前が分からない」で失敗するため）。本人が自分で打つ：`! git config --global user.name "お名前"`・`! git config --global user.email "メールアドレス"`（AI は本人の名前・メールアドレスを勝手に設定しない。このフォルダだけに設定したいときは `--global` を外す）
+4. `.gitignore`（リポジトリの最上位が本人のフォルダのとき）：まだ無ければ、雛形 `${CLAUDE_PLUGIN_ROOT}/templates/gitignore.txt` を読み、本人のフォルダの `.gitignore` として書く。**すでにある `.gitignore` は上書きしない**：雛形の行（`#` で始まらない行）のうち、無いものを一覧にして、「足すとよい行」として本人に案内するだけ（AI は足さない）
 
 ## 4. 業務の棚卸し（何を任せるか）
 
@@ -187,6 +196,7 @@ description: AI 分身の初回セットアップ。新しく使い始める人�
 - 「何を頼めばいい？」と聞けば、任せられる仕事を提案する（`/ai-bunshin:consult`）
 - お願いへの返事：「T0XX やった」「T0XX は無い」「T0XX はこう変えて」
 - 見る場所：`00_タスク管理/タスク管理.xlsx` と `<呼び方>へのお願い.md`
+- 右のパネル（任意。ターミナル版の人だけ）：今日のやること・予定（カレンダーをつないだ人だけ）・お願いを右に出したい人には、`! claude plugin install ai-bunshin-panel@ai-bunshin-marketplace --scope project` を案内する。入れたら Claude を開き直す（`/yarukoto`・`/task T013`（T013 は例。実際の ID はパネルの一覧に出ます）で開ける）
 - 最初の3日は使用量を測る期間。ときどき `/usage` で残りを見てほしい
 - 起動時のまとめ（Claude を開いたときに出る今日の状況）が出ないときは、NG の見張りも動いていない可能性がある。まず hook と同じ順番で、Python 3 が動くかを `! for c in python3 python "py -3"; do [ "$($c -c 'import sys; sys.stdout.write(str(sys.version_info[0]))' 2>/dev/null)" = "3" ] && { echo "動く：$c"; break; }; done` で確かめる。何も出なければ Python 3 を入れる。`動く：` と出たのにまとめが出ないなら、AI に相談する（Windows では未確認）
 - 分からない言葉（スプリント・ベロシティ・約束pt など）が出たら、「言葉の意味を教えて」と聞けば説明する（`/ai-bunshin:status` の最後の「ことばの説明」）

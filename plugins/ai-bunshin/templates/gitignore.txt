@@ -1,0 +1,33 @@
+# 本人のフォルダの控え（ローカルの Git）に入れないもの。setup が .gitignore として置く
+# 本人が置く元データ（大きい・個人情報が入りうるため）
+03_インプット/
+# 予定のキャッシュ（予定の件名が入る）
+00_タスク管理/data/calendar_cache.json
+# Excel（tasks.json から自動で作り直せる）
+*.xlsx
+# ログ
+scripts/auto/*.log
+scripts/auto/logs/*.log
+scripts/auto/logs/.out.*
+# OS・Python が作るもの
+.DS_Store
+__pycache__/
+# 共通ルールの自動コピー（起動のたびに作り直される）
+.claude/rules/ai-bunshin-common.md
+.claude/ai-bunshin-details/
+# 作業のたびに変わる記録・一時ファイル
+# 自動実行のロック（毎日変わる）
+scripts/auto/.lock
+00_タスク管理/data/tasks.json.bak_*
+scripts/auto/last_success_*.txt
+scripts/auto/last_timeout.txt
+.*.tmp
+# 見張りが記録したコマンドの文面（トークンなどの秘密が入りうる）
+00_タスク管理/data/ng_log.jsonl
+# 秘密の情報が書かれうるファイル（鍵・パスワード・接続設定。控えに入れると履歴に残り続ける）
+.env*
+.mcp.json
+.claude/settings.local.json
+*.pem
+*.key
+*credential*

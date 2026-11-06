@@ -202,6 +202,60 @@ if ! GUARD_MSG=$(python3 "$WATCH" canary "$ROOT" 2>> "$LOG"); then
   exit 1
 fi
 
+# 振り返りの段が終わったら、本人のフォルダの控え（ローカルの Git）をその日1回コミットする（T077a）。
+# 条件：git コマンドがある、かつ本人のフォルダそのものが Git のリポジトリの一番上（親のフォルダのリポジトリなら何もしない）。
+# コミットするのは review の段だけ（plan・do では何もしない）。成功・失敗・時間切れのどれで終わっても呼ぶ。
+# 失敗しても自動実行は止めず、終了コードも変えない（STATUS にも触れない）。push・reset などほかの git 操作はしない。
+# git が固まっても止まらないよう、run_limited（時間の上限つき。claude と同じ道具）で動かす。既定60秒（テスト用に AI_BUNSHIN_BACKUP_SEC で短くできる）。
+# ログには結果の1行だけ（失敗の文面・パスは書かない）
+backup_commit() {
+  [ "$PHASE" = "review" ] || return 0
+  if ! command -v git >/dev/null 2>&1; then
+    log "控え：Git で記録していないので飛ばした"; return 0
+  fi
+  local sec="${AI_BUNSHIN_BACKUP_SEC:-60}" min bout bres bhash
+  case "$sec" in (''|*[!0-9]*|0) sec=60 ;; esac
+  min=$((sec / 60.0))
+  # 一時ファイルの名前は .out. で始める（本人の .gitignore の scripts/auto/logs/.out.* に当たる）。名前を控えてから作る（claude のときと同じ。on_stop が消す）
+  bout="$LOG_DIR/.out.backup.$$"
+  CUR_OUT="$bout"
+  : > "$bout" 2>/dev/null || { CUR_OUT=""; log "控え：失敗した"; return 0; }
+  # claude と同じ型：背景で動かして wait する（前景だと、TERM を受けても run_limited が終わるまで trap が動かない）。
+  # 受けたときは on_stop が run_limited を止めて終わるので、ここに戻るのは run_limited が自分で終わったときだけ
+  BG_BEFORE=$!   # （控えの起動。上の run_claude と同じ控え方。test_long_run_watch の目印が1つに決まるよう、行末に注を付けてある）
+  LAUNCHING=1    # （同上）
+  python3 "$LIMITED" --minutes "$min" --stdout "$bout" -- sh -c '
+    r=$1; m=$2
+    top=$(git -C "$r" rev-parse --show-toplevel 2>/dev/null) || { echo NOGIT; exit 0; }
+    here=$(cd "$r" 2>/dev/null && pwd -P) || { echo NOGIT; exit 0; }
+    [ "$top" = "$here" ] || { echo NOGIT; exit 0; }
+    git -C "$r" add -A >/dev/null 2>&1 || exit 1
+    if git -C "$r" diff --cached --quiet >/dev/null 2>&1; then echo NOTHING; exit 0; fi
+    git -C "$r" commit -q -m "$m" >/dev/null 2>&1 || exit 1
+    git -C "$r" rev-parse --short HEAD 2>/dev/null
+  ' sh "$ROOT" "$(date +%Y-%m-%d) 振り返り" < /dev/null > /dev/null 2>&1 &
+  LIMITED_PID=$!
+  LAUNCHING=0    # （同上）
+  wait "$LIMITED_PID"
+  bres=$?
+  LIMITED_PID=""
+  bhash=$(tail -n 1 "$bout" 2>/dev/null | tr -d '[:space:]')
+  rm -f "$bout"
+  CUR_OUT=""
+  if [ $bres -ne 0 ]; then
+    log "控え：失敗した"
+  elif [ "$bhash" = "NOGIT" ]; then
+    log "控え：Git で記録していないので飛ばした"
+  elif [ "$bhash" = "NOTHING" ]; then
+    log "控え：何も無かった（コミットなし）"
+  elif [ -n "$bhash" ]; then
+    log "控え：コミットした（$bhash）"
+  else
+    log "控え：失敗した"
+  fi
+  return 0
+}
+
 # claude を時間の上限と手数の上限つきで動かす（T095・T066）。結果は RESULT、終了コードは STATUS。
 # 時間の上限（auto.max_minutes。段階を決めたあとに決める）を超えたら、自分の起動した claude のグループだけを止めて exit 124。
 # 手数の上限（auto.max_turns。claude -p --max-turns）は claude 自身が止まる。終了コード 1 で、出力の最後の行が上限の文面（Error: Reached max turns (N)）のときだけ、
@@ -254,6 +308,7 @@ run_claude() {
     log "時間の上限（${LIMIT_MIN}分）で止めました。続きは会話で"
     python3 "$WATCH" mark-timeout "$ROOT/scripts/auto" "$PHASE" "$LIMIT_MIN" 2>> "$LOG"
     notify "時間の上限（${LIMIT_MIN}分）で${LABEL}を止めました。続きは会話で"
+    backup_commit
     exit 124
   fi
   # 手数の上限：終了コード 1 かつ、出力の最後の行が上限の文面だけ（途中の行・終了コード 0 の本文は対象にしない）
@@ -263,6 +318,7 @@ run_claude() {
     log "手数の上限（${hit}回）で${LABEL}を止めました。続きは会話で"
     python3 "$WATCH" mark-timeout "$ROOT/scripts/auto" "$PHASE" "$hit" turns 2>> "$LOG"
     notify "手数の上限（${hit}回）で${LABEL}を止めました。続きは会話で"
+    backup_commit
     exit 124
   fi
 }
@@ -276,6 +332,9 @@ if [ "$PHASE" = "review" ] && [ $STATUS -eq 0 ]; then
     log "警告：振り返りの議事録（$MINUTES）が作られていない。スキルが何もせずに終わった可能性がある（出力：$(echo "$RESULT" | head -c 120 | tr '\n' ' ')）"
   fi
 fi
+
+# 振り返りの段が終わった（成功でも失敗でも）ので、本人のフォルダの控えをコミットする（T077a。review のときだけ動く）
+backup_commit
 
 if [ $STATUS -eq 0 ] && [ -n "$RESULT" ]; then
   mark_ok "$PHASE"

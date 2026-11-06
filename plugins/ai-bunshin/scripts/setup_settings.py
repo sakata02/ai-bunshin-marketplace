@@ -38,6 +38,14 @@ def main():
         if not isinstance(cur, dict):
             print(f"{path} は {{ }} で始まる形にしてください。壊れたファイルは書き換えていません", file=sys.stderr)
             return 1
+    # 形が違うと、英語のトレースバックで落ちる。書き換える前に確かめ、違えば案内して止まる（settings.json は書き換えない）
+    shapes = (("permissions", cur, dict, "{ }"), ("deny", cur.get("permissions"), list, "[ ]"),
+              ("additionalDirectories", cur.get("permissions"), list, "[ ]"), ("enabledPlugins", cur, dict, "{ }"))
+    for key, parent, want, mark in shapes:
+        if isinstance(parent, dict) and key in parent and not isinstance(parent[key], want):
+            where = key if parent is cur else f"permissions の {key}"
+            print(f"{path} の {where} は {mark} の形にしてください（今は別の形です）。壊れたファイルは書き換えていません", file=sys.stderr)
+            return 1
     deny = cur.setdefault("permissions", {}).setdefault("deny", [])
     added = [r for r in tpl["permissions"]["deny"] if r not in deny]
     deny.extend(added)

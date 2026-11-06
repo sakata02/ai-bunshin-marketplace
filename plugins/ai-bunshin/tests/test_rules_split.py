@@ -29,7 +29,9 @@ CYCLE = os.path.join(SCRIPTS, "auto", "daily_cycle.sh")
 BODY_PATH = os.path.join(PLUGIN, "rules", "commander.md")
 DETAILS_SRC = os.path.join(PLUGIN, "rules", "details")
 OLD_COMMIT = "8101a02"   # 分割前の commander.md（beta.4）
-DETAIL_NAMES = ["tasks-json", "retro-try", "kaizen", "daily-sprint", "models", "team-growth", "calendar", "writing-style", "dev"]
+OLD_DETAIL_NAMES = ["tasks-json", "retro-try", "kaizen", "daily-sprint", "models", "team-growth", "calendar", "writing-style", "dev"]   # 分割のときの9つ（古い版の文面と突き合わせる）
+NEW_DETAIL_NAMES = ["backup"]   # 分割のあとに足したもの（T077b。古い版には無い新しい文なので、突き合わせの対象にしない）
+DETAIL_NAMES = OLD_DETAIL_NAMES + NEW_DETAIL_NAMES
 DETAILS_REL = os.path.join(".claude", "ai-bunshin-details")
 # 本体の「本体に残すもの」のうち、古い版に無い短い案内（指示書で認められた新しい文。ほかに新しい文は書かない）
 NEW_STUB_SENTENCES = {
@@ -41,6 +43,12 @@ NEW_STUB_SENTENCES = {
     # T095：長引いたら様子を見る（会話の中で必ず守る短い手順。長い説明はスキルの sprint・dev・daily-do）
     "- **部下を出したら目安の時間を決める**：作る＝1pt 15分・2pt 25分・3pt 40分・5pt 60分、確かめる＝その半分、Opus に上げたら1.5倍（暫定）。指示書の頭と do_log（`- YYYY-MM-DD T0XX 開始 HH:MM／目安 N分／見る時刻 HH:MM`）に書く。部下は部下を呼ばない（指示書の「守ること」に書く）",
     "- **長引いたら様子を見る**（会話の中）：部下を出した応答で、作業のフォルダの更新が15分止まったら終わる背景の Bash を1つだけ出す（自動実行では出さない）。起こされたら git の状態・作業のフォルダの更新時刻・ng_log の最後の行を見て、進みがあれば本人に1行伝えて出し直す。無ければ部下に「今どこ？止まってない？」と聞き、目安の1/4（最短5分）待って進みが無ければ止めて（TaskStop）範囲を切り直す。同じ失敗が2回続いたら3周目に入らない。手順は `/ai-bunshin:sprint` の「部下を出したら」",
+    # T077b：控え（ローカルの Git）。長い手順は details/backup.md
+    "## 控え（本人のフォルダのローカル Git）",
+    "- 本人のフォルダをローカルの Git で記録する（Git がある人だけ。始め方は `/ai-bunshin:setup`）",
+    "- コミットは、夕方の振り返りの最後に1日1回「YYYY-MM-DD 振り返り」（自動実行では `daily_cycle.sh` が行う）と、会話の区切りで「YYYY-MM-DD <何をしたか>」。`git add -A && git commit` まで。push は本人（例外は本人設定）",
+    "- 「戻して」と言われたら、そのファイルだけ `git checkout <コミット> -- <ファイル>` で戻す。`reset --hard` は使わない",
+    "- 本人のフォルダが親のリポジトリの中なら、控えにしない",
     "- **見張りが壊れて Bash が全部止まったら**：指揮官は Read しか使えない。部下も同じ壊れた見張りの下にいて戻せないので、最初から本人に `! …` の1行を頼む（入力欄の先頭に `!` を付けると、そのコマンドを本人の手でそのまま実行できる。戻しのコマンドは直す前に用意する）。止めた部下の変更を戻すときも、本人に1行で頼む",
 }
 TAIL_HEADING = "## 詳しい手順のファイル（必要なときに読む）"
@@ -156,7 +164,7 @@ print("## A. 文面の突き合わせ")
 
 
 @case
-def a1_nine_detail_files_with_the_given_names():
+def a1_detail_files_with_the_given_names():
     assert details_files() == sorted(n + ".md" for n in DETAIL_NAMES), details_files()
 
 
@@ -165,7 +173,7 @@ def a2_every_old_nonblank_line_is_kept_exactly():
     if not need_old():
         return
     kept = set(BODY_LINES)
-    for n in DETAIL_NAMES:
+    for n in OLD_DETAIL_NAMES:
         kept |= set(details_text(n).split("\n"))
     lost = [l for l in OLD_LINES if l.strip() and l not in kept]
     print(f"       差分 {len(lost)} 行（古い版の空行以外 {sum(1 for l in OLD_LINES if l.strip())} 行中）")
@@ -176,7 +184,7 @@ def a2_every_old_nonblank_line_is_kept_exactly():
 def a3_each_details_file_is_a_contiguous_block_of_the_old_text():
     if not need_old():
         return
-    for n in DETAIL_NAMES:
+    for n in OLD_DETAIL_NAMES:
         block = details_text(n).rstrip("\n").split("\n")
         found = any(OLD_LINES[i:i + len(block)] == block for i in range(len(OLD_LINES) - len(block) + 1))
         assert found, f"{n}.md が古い版の連続した範囲と一致しない"
@@ -187,7 +195,7 @@ def a4_details_files_have_no_new_lines():
     if not need_old():
         return
     old = set(OLD_LINES)
-    for n in DETAIL_NAMES:
+    for n in OLD_DETAIL_NAMES:
         new = [l for l in details_text(n).split("\n") if l.strip() and l not in old]
         assert not new, f"{n}.md に新しい行：{new[:2]}"
 
@@ -246,6 +254,19 @@ def a8_tail_table_lists_every_file():
     for n in DETAIL_NAMES:
         assert f".claude/ai-bunshin-details/{n}.md" in tail, f"{n}.md が末尾の表に無い"
     assert "${CLAUDE_PLUGIN_ROOT}" not in tail, "写しの中では展開されない"
+
+
+@case
+def a9_backup_md_keeps_the_two_safety_sentences():
+    """T077b：控え（details/backup.md）の安全に関わる2つの文が消えていない。
+    (1) 「reset --hard は使わない」 (2) 戻すコマンドに <コミット> が付いている（付けないと未コミットの変更が消える）。"""
+    t = details_text("backup")
+    assert "`reset --hard` は使わない" in t, "reset --hard は使わない、の文が無い"
+    cmds = re.findall(r"`git checkout ([^`]*)`", t)
+    assert cmds, "戻すコマンド（git checkout …）が無い"
+    restore = [c for c in cmds if re.search(r"--\s+<ファイル>", c)]
+    assert restore, "ファイルを戻すコマンド（git checkout … -- <ファイル>）が無い"
+    assert any(c.startswith("<コミット> --") for c in restore), f"戻すコマンドに <コミット> が付いていない：{restore}"
 
 
 # ---------- B. 写し（破られ方1） ----------

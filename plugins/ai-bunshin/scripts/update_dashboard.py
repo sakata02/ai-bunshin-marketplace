@@ -1257,10 +1257,10 @@ def build_task_list(wb, ctx):
 
 
 def gantt_range(starts, ends, today):
-    """ガントに出す期間 (左端, 右端, 切らなかったときの右端)。右端が GANTT_MAX_DAYS 日を超えるぶんは切る。"""
+    """ガントに出す期間 (左端, 右端, 切らなかったときの右端)。右端が GANTT_MAX_DAYS 日（列の数）を超えるぶんは切る。"""
     begin = min(list(starts) + [today - timedelta(days=GANTT_PAST_DAYS)])
     true_finish = max(list(ends) + [today + timedelta(days=GANTT_AHEAD_DAYS)])
-    return begin, min(true_finish, begin + timedelta(days=GANTT_MAX_DAYS)), true_finish
+    return begin, min(true_finish, begin + timedelta(days=GANTT_MAX_DAYS - 1)), true_finish
 
 
 def build_gantt(wb, ctx):
@@ -1618,6 +1618,322 @@ def latest_review(today):
     return path, digest
 
 
+# ---- 自動実行（daily_cycle.sh）で使える道具・書けない場所（文字として読むだけ。daily_cycle.sh は実行しない）----
+# 作り方：白リスト。TOOLS・DENY の名前を含む行は、決まった形に完全に一致するときだけ読む。それ以外は「読めない」とし、
+# その変数は「なし」や値を出さず「読めませんでした」と出す（間違った値を出さない）。
+_NAME_RE = r'(?:TOOLS|DENY)'
+_PHASE_DO_RE = re.compile(r'^\s*if \[ "\$PHASE" = "do" \]; then\s*(?:#.*)?$')
+_PHASE_PLAN_RE = re.compile(r'^\s*if \[ "\$PHASE" = "plan" \]; then\s*(?:#.*)?$')
+_ELSE_RE = re.compile(r'^\s*else\s*(?:#.*)?$')
+_OPENER_RE = re.compile(r'^\s*(?:if|case|for|while|until|select)\b')
+_CLOSER_RE = re.compile(r'^\s*(?:fi|esac|done|\})')
+_SAME_LINE_CLOSE_RE = re.compile(r'[;\s&|(](?:fi|esac|done)(?![\w])')
+_HEREDOC_RE = re.compile(r'<<(?!<)-?\s*[\'"]?(\w+)[\'"]?')
+# 変数名そのもの（$TOOLS・${TOOLS} は読むだけなので除く。${TOOLS:=…} など、名前の後ろに何か付く ${…} は書き換えかもしれないので含める）
+_MENTION_RE = re.compile(r'(?<![$\w{])' + _NAME_RE + r'(?!\w)|\$\{' + _NAME_RE + r'(?!\})')
+_ASSIGN_LINE_RE = re.compile(r'^[ \t]*(TOOLS|DENY)=(.*)$')
+_ALLOWED_REFS = ("TOOLS", "DENY", "DASH", "PLUGIN_ROOT")
+_ZSH_MODIFIERS = "aAcehlpqQrstuxgGfFwW&"
+_REMOVE_PATTERN_RE = re.compile(r'[A-Za-z0-9_,.:-]+')
+
+
+def _strip_comment(line):
+    """行の中の # から後ろ（引用符の外で、前が空白のもの）を取る"""
+    q, i = None, 0
+    while i < len(line):
+        c = line[i]
+        if q:
+            if c == "\\" and q == '"':
+                i += 2
+                continue
+            if c == q:
+                q = None
+        elif c in "\"'":
+            q = c
+        elif c == "#" and (i == 0 or line[i - 1].isspace()):
+            return line[:i]
+        i += 1
+    return line
+
+
+def _split_items(value):
+    """カンマで分ける（かっこの中のカンマでは分けない）"""
+    items, depth, buf = [], 0, ""
+    for c in value:
+        if c == "(":
+            depth += 1
+        elif c == ")":
+            depth = max(0, depth - 1)
+        if c == "," and depth == 0:
+            if buf:
+                items.append(buf)
+            buf = ""
+        else:
+            buf += c
+    if buf:
+        items.append(buf)
+    return items
+
+
+def _parse_assign(line):
+    """決まった3つの形だけ読む：X="…"／X="$X,…"／X="${X/パターン/}"。行の頭は空白だけ、行末はコメントだけ可。
+    返り値：(名前, 部品のリスト)。部品は ("text", 文字) か ("ref", 変数名)、取り除く形は ("remove", パターン)。読めなければ None"""
+    m = _ASSIGN_LINE_RE.match(line)
+    if not m:
+        return None
+    name, rest = m.group(1), m.group(2)
+    if not rest.startswith('"'):
+        return None
+    parts, buf, i = [], "", 1
+    while i < len(rest):
+        c = rest[i]
+        if c == "\\":
+            if i + 1 < len(rest) and rest[i + 1] in '"\\':
+                buf += rest[i + 1]
+                i += 2
+                continue
+            return None
+        if c == '"':
+            tail = rest[i + 1:]
+            if tail.strip() and not re.match(r'\s+#', tail):
+                return None
+            if buf:
+                parts.append(("text", buf))
+            break
+        if c == "`":
+            return None
+        if c == "$":
+            rm = re.match(r'\$\{(' + _NAME_RE + r')/([^/}]*)/\}"', rest[i:])
+            if rm and rm.group(1) == name:   # 取り除く形は、行全体がこれだけのとき
+                tail = rest[i + rm.end():]
+                if i != 1 or not _REMOVE_PATTERN_RE.fullmatch(rm.group(2)) or (tail.strip() and not re.match(r'\s+#', tail)):
+                    return None
+                return name, [("remove", rm.group(2))]
+            rb = re.match(r'\$\{(' + "|".join(_ALLOWED_REFS) + r')\}', rest[i:])
+            rn = re.match(r'\$(' + "|".join(_ALLOWED_REFS) + r')(?![A-Za-z0-9_])', rest[i:])
+            if rb:
+                ref, end = rb.group(1), i + rb.end()
+            elif rn:
+                ref, end = rn.group(1), i + rn.end()
+                if rest[end:end + 1] == ":" and rest[end + 1:end + 2] and rest[end + 1] in _ZSH_MODIFIERS:
+                    return None   # $X:t などの修飾
+            else:
+                return None   # 知らない変数・$( ・$1 など
+            if buf:
+                parts.append(("text", buf))
+                buf = ""
+            parts.append(("ref", ref))
+            i = end
+            continue
+        buf += c
+        i += 1
+    else:
+        return None   # 閉じの " が無い
+    return name, parts
+
+
+def _scan_cycle(lines):
+    """daily_cycle.sh の行を読み、TOOLS・DENY に触れる行を、順に [{no, scope, ok, names, parsed}] で返す。
+    scope：base（分かれ目の前）／then（実行の側）／else（計画の側）／after（分かれ目のあと）／all（読めない作りの中で、どの段か決められない）。
+    返り値：(ops, 分かれ目が見つかったか, 構造が壊れていないか)"""
+    ops, stack = [], []
+    seen_do, do_closed, seen_plan, structure_ok = False, False, False, True
+    heredoc_end = None
+    for no, raw in enumerate(lines, 1):
+        if heredoc_end is not None:
+            if raw.strip() == heredoc_end:
+                heredoc_end = None
+            continue
+        code = _strip_comment(raw)
+        if not code.strip():
+            continue
+        hm = _HEREDOC_RE.search(code)
+        if hm:
+            heredoc_end = hm.group(1)
+        top = stack[-1] if stack else None
+        if not stack and not seen_do and _PHASE_DO_RE.match(raw):
+            stack.append({"kind": "do", "mode": "then", "broken": False})
+            seen_do = True
+        elif not stack and do_closed and not seen_plan and _PHASE_PLAN_RE.match(raw):
+            stack.append({"kind": "planif", "mode": "after", "broken": False})
+            seen_plan = True
+        elif top and top["kind"] in ("do", "planif") and _ELSE_RE.match(raw):
+            if top["kind"] == "do" and top["mode"] == "then":
+                top["mode"] = "else"
+            else:
+                top["broken"] = True   # 2回目の else、plan 側の else は読まない
+        elif top and top["kind"] in ("do", "planif") and re.match(r'^\s*elif\b', code):
+            top["broken"] = True
+        elif _CLOSER_RE.match(code):
+            if not stack:
+                structure_ok = False
+            else:
+                done = stack.pop()
+                if done["kind"] == "do":
+                    do_closed = True
+        elif _OPENER_RE.match(code) or re.search(r'\{\s*$', code) and not re.search(r'\$\{\s*$', code):
+            if not _SAME_LINE_CLOSE_RE.search(code):
+                stack.append({"kind": "other", "func": bool(re.search(r'\{\s*$', code)) and not _OPENER_RE.match(code)})
+        if not _MENTION_RE.search(code):
+            continue
+        am = _ASSIGN_LINE_RE.match(code)
+        names = [n for n in ("TOOLS", "DENY") if re.search(r'(?<![$\w{])' + n + r'(?!\w)' + ('' if am else r'|\$\{' + n + r'(?!\})'), code)]
+        # どの段か（位置で決める）。do の中で elif などがあれば、どの段か決められない
+        do_entry = next((e for e in stack if e["kind"] == "do"), None)
+        plan_entry = next((e for e in stack if e["kind"] == "planif"), None)
+        direct = (not stack) or (len(stack) == 1 and stack[0]["kind"] in ("do", "planif") and not stack[0]["broken"])
+        if do_entry is not None:
+            scope = "all" if do_entry["broken"] else do_entry["mode"]
+        elif plan_entry is not None:
+            scope = "after"   # 計画のときだけ通る所なので、効くのは続けて実行の分だけ（else・elif・入れ子があれば読めない）
+        elif do_closed:
+            scope, direct = "all", False   # 分かれ目のあとで plan の if の外：計画・実行の両方に効くかもしれない。決まった形でないので読めない
+        else:
+            scope = "base"
+        # 関数の中・{ } の中の代入は、呼ばれたときに値が変わる。どの段も、あとの普通の代入でも読めた扱いに戻さない
+        sticky = any(e.get("func") for e in stack) or bool(re.search(r'\(\)\s*\{|^\s*function\b', code))
+        if sticky:
+            scope, direct = "all", False
+        parsed = _parse_assign(raw) if direct else None
+        ops.append({"no": no, "scope": scope, "ok": parsed is not None, "names": names, "parsed": parsed, "sticky": sticky})
+    if stack or heredoc_end is not None:
+        structure_ok = False
+    return ops, seen_do, structure_ok
+
+
+_PHASE_SCOPES = {"plan": ("base", "else", "all"), "do": ("base", "then", "all"), "cont": ("base", "else", "after", "all")}
+
+
+def _simulate(ops, phase, env):
+    """1つの段（plan／do／cont）の TOOLS・DENY を、行の順に当てて求める。値が None は読めなかったこと"""
+    st = {k: {"val": "", "nos": [], "bad": []} for k in ("TOOLS", "DENY")}
+    for op in ops:
+        if op["scope"] not in _PHASE_SCOPES[phase]:
+            continue
+        if not op["ok"]:
+            for n in op["names"] or ("TOOLS", "DENY"):
+                st[n]["val"] = None
+                st[n]["bad"].append(op["no"])
+            continue
+        name, parts = op["parsed"]
+        target = st[name]
+        if parts and parts[0][0] == "remove":
+            if target["val"] is not None:
+                target["val"] = target["val"].replace(parts[0][1], "", 1)
+            target["nos"].append(op["no"])
+            continue
+        out, bad = "", []
+        for kind, v in parts:
+            if kind == "text":
+                out += v
+            elif v in ("TOOLS", "DENY"):
+                if st[v]["val"] is None:
+                    bad += st[v]["bad"]
+                    out = None
+                    break
+                out += st[v]["val"]
+            else:
+                out += env[v]
+        if out is None:
+            target["val"] = None
+            target["bad"] += [b for b in bad if b not in target["bad"]]
+        else:
+            target["val"] = out
+            target["bad"] = []   # 読める代入で上書きされた（新しい値から読める）
+        target["nos"].append(op["no"])
+    for op in ops:   # 関数の中の代入：どの段でも、読めた値に戻さない
+        if op.get("sticky"):
+            for n in op["names"] or ("TOOLS", "DENY"):
+                st[n]["val"] = None
+                if op["no"] not in st[n]["bad"]:
+                    st[n]["bad"].append(op["no"])
+    return st
+
+
+def read_auto_tools(cycle_path):
+    """daily_cycle.sh の TOOLS・DENY を文字として読み、計画・実行・（計画から続けて実行に入るとき）の値を返す。
+    返り値：{"phases": {"plan": {"TOOLS": {"val": 値かNone, "nos": [行番号], "bad": [読めなかった行番号]}, "DENY": …}, "do": …, "cont": …（あれば）},
+            "bad": [読めなかった行番号], "notes": [文]}"""
+    env = {"DASH": str(PLUGIN_ROOT / "scripts" / "update_dashboard.py"), "PLUGIN_ROOT": str(PLUGIN_ROOT)}
+    lines = Path(cycle_path).read_text(encoding="utf-8").splitlines()
+    ops, seen_do, structure_ok = _scan_cycle(lines)
+    notes = []
+    if not seen_do:
+        notes.append('計画と実行の分かれ目（if [ "$PHASE" = "do" ]; then）が見つかりませんでした。使う前に1回ためしてください')
+    if not structure_ok:
+        notes.append("daily_cycle.sh の if・case などの組み合わせが読めませんでした。値は使わず、使う前に1回ためしてください")
+        for op in ops:
+            op["ok"], op["scope"] = False, "all"
+    phases = {"plan": _simulate(ops, "plan", env), "do": _simulate(ops, "do", env)}
+    if any(op["scope"] == "after" for op in ops) and seen_do:
+        phases["cont"] = _simulate(ops, "cont", env)
+    return {"phases": phases, "bad": sorted({op["no"] for op in ops if not op["ok"]}), "notes": notes}
+
+
+def _nos(nos):
+    return "・".join(f":{n}" for n in dict.fromkeys(nos)) or "（行なし）"
+
+
+def _unreadable(st):
+    return f"（読めませんでした：daily_cycle.sh{_nos(st['bad'])}）"
+
+
+def auto_tools_lines(cycle_path=None):
+    """--plan-context の最後の節。daily_cycle.sh が読めなくても落ちない"""
+    cycle_path = Path(cycle_path) if cycle_path else PLUGIN_ROOT / "scripts" / "auto" / "daily_cycle.sh"
+    title = "## 自動実行で使える道具・書けない場所（daily_cycle.sh:行番号 から。実行はせず文字として読んだ）"
+    try:
+        res = read_auto_tools(cycle_path)
+    except Exception as e:  # 見つからない・読めない
+        return ["", title, f"- daily_cycle.sh（{cycle_path}）を読めませんでした（{type(e).__name__}）。使う道具と書けない場所は、使う前に1回ためしてください"]
+    out = ["", title]
+    labels = {"plan": "計画", "do": "実行", "cont": "実行（計画から続けて入るとき）"}
+    ph = res["phases"]
+
+    def three(key):
+        tools, deny = ph[key]["TOOLS"], ph[key]["DENY"]
+        if tools["val"] is None:
+            ok_txt, ok_nos = _unreadable(tools), tools["bad"]
+        else:
+            ok_txt, ok_nos = ", ".join(_split_items(tools["val"])) or "なし", tools["nos"]
+        if deny["val"] is None:
+            stop_txt = edit_txt = _unreadable(deny)
+            d_nos = deny["bad"]
+        else:
+            items = _split_items(deny["val"])
+            stop_txt = ", ".join(x for x in items if not x.startswith("Edit(")) or "なし"
+            edit_txt = ", ".join(x for x in items if x.startswith("Edit(")) or "なし"
+            d_nos = deny["nos"]
+        return [f"使える道具（daily_cycle.sh{_nos(ok_nos)}）：{ok_txt}",
+                f"止める道具（daily_cycle.sh{_nos(d_nos)}）：{stop_txt}",
+                f"書けない場所（daily_cycle.sh{_nos(d_nos)}）：{edit_txt}"]
+    for key in ("plan", "do"):
+        a, b, c = three(key)
+        out += [f"- {labels[key]}　{a}", f"  　{b}", f"  　{c}"]
+    if "cont" in ph:
+        same = all(ph["cont"][k]["val"] is not None and ph["cont"][k]["val"] == ph["do"][k]["val"] for k in ("TOOLS", "DENY"))
+        if same:
+            after = [n for k in ("TOOLS", "DENY") for n in ph["cont"][k]["nos"] if n not in ph["plan"][k]["nos"]]
+            out.append(f"- {labels['cont']}　実行と同じ（daily_cycle.sh{_nos(after)} を通っても変わらない）")
+        else:
+            a, b, c = three("cont")
+            out += [f"- {labels['cont']}　{a}", f"  　{b}", f"  　{c}"]
+            for k, name in (("TOOLS", "使える道具"), ("DENY", "止める道具・書けない場所")):
+                x, y = ph["do"][k]["val"], ph["cont"][k]["val"]
+                if x is not None and y is not None and x != y:
+                    sa, sb = set(_split_items(x)), set(_split_items(y))
+                    out.append(f"- 注意：{name}が、実行と、計画から続けて実行に入るときで違う。実行だけにある：{', '.join(sorted(sa - sb)) or 'なし'}／続けてのときだけにある：{', '.join(sorted(sb - sa)) or 'なし'}")
+    for n in res["bad"]:
+        out.append(f"- daily_cycle.sh:{n} の行は読めませんでした。使う前に1回ためしてください")
+    for t in res["notes"]:
+        out.append(f"- {t}")
+    out += [
+        "- 書けない場所の見方：Edit(…) の決まりは、ファイルを書く道具（Write など）に効く。Bash でファイルに書くことには効かないので、Bash で使えるのは上の「使える道具」の Bash(…) だけ。パターンは本人のフォルダから見たもの（`//` で始まるのは絶対パス）。指示書の書き先のパスを、このパターンと照らす",
+        "- 次は定数では分からないので、計画で使う前に1回ためす：自動モードかどうかの判定、NG の見張り（ng_guard）が止めるか（`python3 <プラグイン>/scripts/ng_guard.py --explain \"<コマンド>\"`）",
+    ]
+    return out
+
+
 def plan_context(today, cal, ctx):
     """9時のプランニング（と実行中の追加判断）の材料。1行目が OPEN か SKIP。"""
     data, tasks = ctx["data"], ctx["tasks"]
@@ -1695,6 +2011,7 @@ def plan_context(today, cal, ctx):
         lines.append(f"- {t['id']} [{t.get('kind')}] {t['title']} 期日 {fmt_jp(parse_date(t.get('due')))}"
                      + (f" → 待っているタスク：{'、'.join(waiting)}" if waiting else ""))
     lines += ["", "## 実施中の Try", active_tries_text() or "- なし"]
+    lines += auto_tools_lines()
     return "\n".join(lines)
 
 
@@ -2169,8 +2486,9 @@ def write_excel(ctx):
         build_sprint_history(wb, ctx)
     except (ValueError, TypeError) as e:   # 一覧や { } など、Excel のセルに入らない値（英語の "Cannot convert ..." をそのまま見せない）
         logged = write_error_log(sys.argv[1:])
-        raise BadFile("Excel（タスク管理.xlsx）に書けない値が tasks.json にあります。note・title・department など、文字や数のはずの項目に、"
-                      "一覧（[ ]）や { } が入っていないか確かめてください"
+        raise BadFile("Excel（タスク管理.xlsx）に書けない値が tasks.json にあります。points（ポイント）など、"
+                      "数のはずの項目に、一覧（[ ]）や { } が入っていないか確かめてください"
+                      "（note・title など文字の項目は、一覧や { } でも読むときに文字にします）"
                       f"（内部のエラー：{type(e).__name__}）。tasks.json は書き換えていません。{log_note(logged)}"
                       + ("" if logged else "直らなければ、この文面を AI に見せてください")) from e
     try:
@@ -2269,8 +2587,41 @@ def parse_tasks_bytes(raw):
     return parse_json_text(text, "tasks.json")
 
 
-def load_tasks(path):
-    """tasks.json を読んで辞書にする。読めない・空・壊れている・{ } で始まらないときは BadFile。"""
+# 文字として使っているタスクの項目。一覧（[ ]）や { } が入っていても止まらないよう、読むときに文字にする（text_of）。
+# steps・depends_on は、もともと一覧の項目なので入れない。id・status・日付・数の項目は、validate が日本語で知らせる（ここでは触らない）。
+TEXT_FIELDS = ("title", "department", "type", "kind", "assignee", "reviewer", "sprint", "pdca",
+               "note", "why", "done_when", "report_back", "due_reason", "related")
+
+
+# Excel に書けない制御文字（openpyxl の ILLEGAL_CHARACTERS_RE と同じ範囲。openpyxl が無くても動くよう自分で持つ）。タブ・改行・復帰は残す
+ILLEGAL_XLSX_CHARS_RE = re.compile(r"[\000-\010\013\014\016-\037]")
+
+
+def text_of(v):
+    """一覧は中身を文字にして「・」でつなぐ（["T152","T153"] → "T152・T153"。None の中身は飛ばす）。{ } は JSON の文字。None・数はそのまま。
+    文字になったものからは、Excel に書けない制御文字を取り除く。"""
+    if isinstance(v, list):
+        v = "・".join(str(text_of(x)) for x in v if x is not None)
+    elif isinstance(v, dict):
+        v = json.dumps(v, ensure_ascii=False, default=str)
+    return ILLEGAL_XLSX_CHARS_RE.sub("", v) if isinstance(v, str) else v
+
+
+def normalize_text_fields(data):
+    """メモリの上だけで、タスクの文字の項目を文字にする。tasks.json のファイルには書き戻さない。"""
+    for t in data.get("tasks", []):
+        if isinstance(t, dict):
+            for key in TEXT_FIELDS:
+                if key in t:
+                    t[key] = text_of(t[key])
+    return data
+
+
+def load_tasks(path, normalize=True):
+    """tasks.json を読んで辞書にする。読めない・空・壊れている・{ } で始まらないときは BadFile。
+    文字の項目を文字にするのは、既定（normalize=True）のとき。run（Excel・ボード・お願いの更新）がこれで読む。
+    --task（show_tasks）は normalize=False で呼び、tasks.json の実物（一覧は一覧のまま）を出す。
+    移し（migrate_tasks_json）は parse_tasks_bytes で読み直すので、文字にした値が tasks.json に書き戻されることはない。"""
     try:
         raw = Path(path).read_bytes()
     except OSError as e:
@@ -2278,7 +2629,8 @@ def load_tasks(path):
     data = parse_tasks_bytes(raw)
     if not isinstance(data, dict):
         raise BadFile("tasks.json は { } で始まる形にしてください（今は別の形です）。壊れたファイルは書き換えていません")
-    return data
+    tl = data.get("tasks")
+    return normalize_text_fields(data) if normalize and isinstance(tl, list) else data
 
 
 def migrate_tasks_json(path, today):
@@ -2369,7 +2721,7 @@ def run(today):
 def show_tasks(ids):
     """--task：指定のタスクだけを JSON で標準出力へ。読むだけ（tasks.json の移行の書き戻しも、生成物の更新もしない）。"""
     try:
-        data = load_tasks(TASKS_JSON)
+        data = load_tasks(TASKS_JSON, normalize=False)   # 実物を出す（文字にしない）
         by_id = {t.get("id"): t for t in data.get("tasks", [])}
     except (BadFile, AttributeError, TypeError) as e:
         print(f"tasks.json を読めませんでした: {e}" if not isinstance(e, BadFile) else str(e), file=sys.stderr)
@@ -2528,6 +2880,12 @@ def _main():
         return show_tasks(args.task)
 
     if CONFIG_ERROR:   # 設定が読めないまま既定値で進めると、別の名前のファイルを作ってしまう。案内を出して止まる（hook は止めない）
+        if args.hook:   # ただし tasks.json も壊れているときは、config が壊れていても伝える（終了コード 2＝Claude に直させる）
+            try:
+                load_tasks(TASKS_JSON)
+            except BadFile as e:
+                print(f"ダッシュボード更新に失敗: {e}（設定/config.json も読めない状態です）", file=sys.stderr)
+                return 2
         return failure_notice(f"ダッシュボード更新に失敗: {CONFIG_ERROR}", args, 1)
 
     try:
