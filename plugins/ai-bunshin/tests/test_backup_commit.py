@@ -29,6 +29,29 @@ TODAY = time.strftime("%Y-%m-%d")
 
 names, fails = [], 0
 
+# 坂田さんの実物の .gitignore（2026-11-07 時点）と同じ中身。OLD は今日より前の形（.lock と logs/.backup.* の行が無い）
+REAL_GITIGNORE = """# 坂田さんのフォルダの控え（GitHub 非公開リポジトリ）に入れないもの
+03_インプット/
+00_タスク管理/data/calendar_cache.json
+*.xlsx
+scripts/auto/*.log
+.DS_Store
+__pycache__/
+.claude/rules/ai-bunshin-common.md
+# 作業のたびに変わる記録（2026-10-31 坂田さん OK）
+00_タスク管理/data/tasks.json.bak_*
+scripts/auto/last_success_*.txt
+.*.tmp
+.claude/ai-bunshin-details/
+scripts/auto/last_timeout.txt
+scripts/auto/logs/.out.*
+scripts/auto/logs/*.log
+scripts/auto/.lock
+scripts/auto/logs/.backup.*
+"""
+OLD_GITIGNORE = "".join(ln + "\n" for ln in REAL_GITIGNORE.splitlines()
+                        if ln not in ("scripts/auto/.lock", "scripts/auto/logs/.backup.*"))
+
 
 def case(fn):
     names.append(fn.__name__)
@@ -90,7 +113,7 @@ def commits(cwd):
     return int(r.stdout.strip()) if r.returncode == 0 else 0
 
 
-def make(name, own_repo=True, parent_repo=False, cfg=None):
+def make(name, own_repo=True, parent_repo=False, cfg=None, gitignore=None):
     """一時フォルダに、プラグイン（daily_cycle.sh と道具）・本人のフォルダ・作り物の claude と osascript を作る。
     own_repo：本人のフォルダを Git のリポジトリにして、最初のコミットを1つ作る（ログなどは .gitignore で外す）
     parent_repo：本人のフォルダの1つ上（プラグインと同じ階層の親）をリポジトリにする（本人のフォルダ自身はリポジトリにしない）"""
@@ -110,7 +133,7 @@ def make(name, own_repo=True, parent_repo=False, cfg=None):
     c.update(cfg or {})
     json.dump(c, open(os.path.join(home, "設定", "config.json"), "w", encoding="utf-8"), ensure_ascii=False)
     open(os.path.join(home, "00_タスク管理", "data", "tasks.json"), "w").write("{}")
-    open(os.path.join(home, ".gitignore"), "w").write("scripts/auto/\n")
+    open(os.path.join(home, ".gitignore"), "w", encoding="utf-8").write(REAL_GITIGNORE if gitignore is None else gitignore)
     bindir = os.path.join(d, "bin")
     os.makedirs(bindir)
     open(os.path.join(bindir, "claude"), "w").write(FAKE_CLAUDE)
@@ -168,6 +191,9 @@ def t1_review_with_changes_adds_one_commit_with_message():
     lines = backup_lines(c)
     assert lines and f"コミットした（{short}）" in lines[-1], (short, lines)
     assert git(c["home"], "status", "--porcelain").stdout.strip() == "", "コミットしたのに未コミットが残っている"
+    # 実物の .gitignore なら、ロックと logs の一時ファイル・ログは入らない
+    names_in = git(c["home"], "-c", "core.quotepath=off", "show", "--name-only", "--format=", "HEAD").stdout.split()
+    assert names_in == ["01_スプリント/S1/daily/" + time.strftime("%Y%m%d") + "_振り返り.md"], names_in
 
 
 @case
@@ -309,6 +335,65 @@ def t10_no_other_git_operations_in_script():
     import re
     ops = set(re.findall(r'git -C "\$r" ([a-z-]+)', src))
     assert ops <= {"rev-parse", "add", "diff", "commit"}, ops
+
+
+@case
+def t11_old_gitignore_still_keeps_temp_file_out_of_commit():
+    # 今日より前の .gitignore（.lock・.backup.* の行が無い）でも、控えの一時ファイル（.out.backup.*）はコミットに入らない
+    c = make("t11", gitignore=OLD_GITIGNORE)
+    r = run(c)
+    assert r.returncode == 0, (r.returncode, r.stderr[-300:])
+    names_in = git(c["home"], "-c", "core.quotepath=off", "show", "--name-only", "--format=", "HEAD").stdout.split()
+    assert names_in and not any("backup" in n or "/logs/" in n for n in names_in), names_in
+    # 一時ファイルは終わったあと残らない
+    logs = os.path.join(c["home"], "scripts", "auto", "logs")
+    assert not [f for f in os.listdir(logs) if f.startswith(".")], os.listdir(logs)
+
+
+@case
+def t12_term_while_git_hangs_stops_within_5_seconds_and_cleans_up():
+    import signal
+    c = make("t12")
+    pidfile = os.path.join(c["d"], "fakegit.pid")
+    open(os.path.join(c["bindir"], "git"), "w").write(f'#!/bin/sh\necho $$ > "{pidfile}"\nsleep 120\n')
+    os.chmod(os.path.join(c["bindir"], "git"), 0o755)
+    env = {k: v for k, v in os.environ.items() if k not in ("AI_BUNSHIN_AUTO_RUN", "CLAUDE_PROJECT_DIR")}
+    env.update(git_env())
+    env.update(AI_BUNSHIN_HOME=c["home"], FAKE_CLAUDE="change", STUB_PHASE="review",
+               PATH=c["bindir"] + os.pathsep + env.get("PATH", ""))   # 控えの待ち時間は既定の60秒のまま
+    p = subprocess.Popen(["/bin/zsh", os.path.join(c["plugin"], "scripts", "auto", "daily_cycle.sh"), "review"],
+                         env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    try:
+        logs = os.path.join(c["home"], "scripts", "auto", "logs")
+        end = time.time() + 30
+        while time.time() < end and not os.path.exists(pidfile):   # 作り物の git が動き出す（＝控えの最中）まで待つ
+            time.sleep(0.1)
+        assert os.path.exists(pidfile), "控えの git が動き出さなかった：" + log_of(c)[-300:]
+        assert os.path.exists(os.path.join(c["home"], "scripts", "auto", ".lock")), "テストの前提：ロックがある"
+        assert [f for f in os.listdir(logs) if f.startswith(".out.backup.")], "テストの前提：一時ファイルがある"
+        t0 = time.time()
+        os.kill(p.pid, signal.SIGTERM)   # daily_cycle.sh（このテストが起動したもの）だけに送る
+        try:
+            p.wait(timeout=20)
+        except subprocess.TimeoutExpired:
+            assert False, "TERM を送って20秒たっても終わらない"
+        took = time.time() - t0
+        assert took < 5, f"TERM から {took:.1f} 秒かかった（5秒以内のはず）"
+        assert p.returncode == 128 + 15, p.returncode
+        assert not os.path.exists(os.path.join(c["home"], "scripts", "auto", ".lock")), "ロックが残っている"
+        assert not [f for f in os.listdir(logs) if f.startswith(".out.")], os.listdir(logs)
+        # 固まっていた git（作り物）も止まっている
+        fake_pid = int(open(pidfile).read().strip())
+        time.sleep(0.5)
+        try:
+            os.kill(fake_pid, 0)
+            alive = True
+        except ProcessLookupError:
+            alive = False
+        assert not alive, "固まっていた git が残っている"
+    finally:
+        if p.poll() is None:
+            p.kill()
 
 
 print(f"\n{len(names) - fails}/{len(names)} passed")

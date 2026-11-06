@@ -216,8 +216,14 @@ backup_commit() {
   local sec="${AI_BUNSHIN_BACKUP_SEC:-60}" min bout bres bhash
   case "$sec" in (''|*[!0-9]*|0) sec=60 ;; esac
   min=$((sec / 60.0))
-  bout="$LOG_DIR/.backup.$$"
-  : > "$bout" 2>/dev/null || { log "控え：失敗した"; return 0; }
+  # 一時ファイルの名前は .out. で始める（本人の .gitignore の scripts/auto/logs/.out.* に当たる）。名前を控えてから作る（claude のときと同じ。on_stop が消す）
+  bout="$LOG_DIR/.out.backup.$$"
+  CUR_OUT="$bout"
+  : > "$bout" 2>/dev/null || { CUR_OUT=""; log "控え：失敗した"; return 0; }
+  # claude と同じ型：背景で動かして wait する（前景だと、TERM を受けても run_limited が終わるまで trap が動かない）。
+  # 受けたときは on_stop が run_limited を止めて終わるので、ここに戻るのは run_limited が自分で終わったときだけ
+  BG_BEFORE=$!   # （控えの起動。上の run_claude と同じ控え方。test_long_run_watch の目印が1つに決まるよう、行末に注を付けてある）
+  LAUNCHING=1    # （同上）
   python3 "$LIMITED" --minutes "$min" --stdout "$bout" -- sh -c '
     r=$1; m=$2
     top=$(git -C "$r" rev-parse --show-toplevel 2>/dev/null) || { echo NOGIT; exit 0; }
@@ -227,10 +233,15 @@ backup_commit() {
     if git -C "$r" diff --cached --quiet >/dev/null 2>&1; then echo NOTHING; exit 0; fi
     git -C "$r" commit -q -m "$m" >/dev/null 2>&1 || exit 1
     git -C "$r" rev-parse --short HEAD 2>/dev/null
-  ' sh "$ROOT" "$(date +%Y-%m-%d) 振り返り" < /dev/null > /dev/null 2>&1
+  ' sh "$ROOT" "$(date +%Y-%m-%d) 振り返り" < /dev/null > /dev/null 2>&1 &
+  LIMITED_PID=$!
+  LAUNCHING=0    # （同上）
+  wait "$LIMITED_PID"
   bres=$?
+  LIMITED_PID=""
   bhash=$(tail -n 1 "$bout" 2>/dev/null | tr -d '[:space:]')
   rm -f "$bout"
+  CUR_OUT=""
   if [ $bres -ne 0 ]; then
     log "控え：失敗した"
   elif [ "$bhash" = "NOGIT" ]; then
