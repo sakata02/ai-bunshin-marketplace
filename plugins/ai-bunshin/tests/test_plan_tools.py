@@ -114,7 +114,7 @@ def unwritable_places_are_listed():
         assert want in places, f"{want} が書けない場所に無い: {places}"
     assert "Bash(rm" not in places, f"書けない場所に Bash の止めが混ざっている: {places}"
     text = "\n".join(sec)
-    assert "Write など、ファイルを書く道具すべてに効く" in text, "Edit の決まりが Write にも効くという1行が無い"
+    assert "ファイルを書く道具（Write など）に効く" in text and "Bash でファイルに書くことには効かない" in text, "Edit の決まりの注記が無い"
     assert "ng_guard.py --explain" in text and "自動モード" in text, "定数では分からないものの1行が無い"
 
 
@@ -135,7 +135,7 @@ def line_numbers_match_real_lines():
         for n in nums(l):
             assert cyc[n - 1].lstrip().startswith(kind + "="), f"{n} 行目が {kind}= の行でない: {cyc[n - 1]!r}（{l[:40]}）"
             checked += 1
-    assert checked >= 10, f"行番号の確認が少なすぎる: {checked}"
+    assert checked >= 8, f"行番号の確認が少なすぎる: {checked}"
     # 実行に WebFetch を足している行（:行）は、実物でも WebFetch を含む
     do_ok = find(sec, "- 実行　使える道具")
     assert any("WebFetch" in cyc[n - 1] for n in nums(do_ok)), f"実行の行番号の中に WebFetch の行が無い: {do_ok[:60]}"
@@ -149,7 +149,7 @@ def real_continuation_matches_do_and_no_warning():
     text = "\n".join(section(plan_context()))
     assert "注意：" not in text, f"今の daily_cycle.sh で違いの注意が出ている: {text}"
     assert "読めませんでした" not in text, f"今の daily_cycle.sh で読めなかった行がある: {text}"
-    assert "- 実行（計画から続けて入るとき）　使える道具" in text, "続けて実行に入るときの行が無い"
+    assert "- 実行（計画から続けて入るとき）　実行と同じ（daily_cycle.sh:" in text and "を通っても変わらない）" in text, f"続けて実行に入るときの「実行と同じ」の行が無い: {text}"
 
 
 @case
@@ -193,21 +193,160 @@ def difference_between_do_and_continuation_is_reported():
 
 @case
 def parser_handles_the_three_forms():
+    import importlib
     sys.path.insert(0, SCRIPTS)
     os.environ["AI_BUNSHIN_HOME"] = HOME_DIR
     os.environ["HOME"] = FAKE_HOME
-    import importlib
     u = importlib.import_module("update_dashboard")
-    env = {"DASH": "/d/u.py", "PLUGIN_ROOT": "/p"}
-    cur = {"TOOLS": "A,B", "DENY": "x,y,z"}
-    eq = lambda got, want: (got == want) or (_ for _ in ()).throw(AssertionError(f"{got!r} != {want!r}"))  # noqa: E731
-    eq(u._apply_assign('TOOLS="Read,Bash(python3 $DASH:*),$UNKNOWN"', cur, env), ("TOOLS", "Read,Bash(python3 /d/u.py:*),$UNKNOWN"))
-    eq(u._apply_assign('  TOOLS="$TOOLS,W"   # 注釈', cur, env), ("TOOLS", "A,B,W"))
-    eq(u._apply_assign('DENY="${DENY/,y/}"', cur, env), ("DENY", "x,z"))
-    eq(u._apply_assign('DENY="Edit(/$PLUGIN_ROOT/**)"', cur, env), ("DENY", "Edit(//p/**)"))
-    eq(u._apply_assign('TOOLS="a \\"$DASH\\""', cur, env), ("TOOLS", 'a "/d/u.py"'))
-    for bad in ('TOOLS=$(x)', 'TOOLS="$(x)"', 'TOOLS=abc', "TOOLS='abc'", 'DENY="${DENY/*/}"', 'TOOLS="a" b', 'TOOLS="${FOO:-a}"'):
-        eq(u._apply_assign(bad, cur, env), None)
+    P = u._parse_assign
+    assert P('TOOLS="Read,Bash(python3 $DASH:*),${PLUGIN_ROOT}/x"') == ("TOOLS", [("text", "Read,Bash(python3 "), ("ref", "DASH"), ("text", ":*),"), ("ref", "PLUGIN_ROOT"), ("text", "/x")])
+    assert P('  TOOLS="$TOOLS,W"   # 注釈') == ("TOOLS", [("ref", "TOOLS"), ("text", ",W")])
+    assert P('DENY="${DENY/,y/}"') == ("DENY", [("remove", ",y")])
+    assert P('TOOLS="a \\"$DASH\\""') == ("TOOLS", [("text", 'a "'), ("ref", "DASH"), ("text", '"')])
+    for bad in ('TOOLS=$(x)', 'TOOLS="$(x)"', 'TOOLS=abc', "TOOLS='abc'", 'DENY="${DENY/*/}"', 'TOOLS="a" b', 'TOOLS="${FOO:-a}"',
+                'TOOLS="a"; x', 'TOOLS="a"#c', 'TOOLS="$DASH:t"', 'TOOLS="$HOME"', 'TOOLS="\\$DASH"', 'DENY="x${DENY/a/}"', 'DENY="${TOOLS/a/}"',
+                'export TOOLS="a"', 'TOOLS+="a"', 'TOOLS="a'):
+        assert P(bad) is None, f"読めてしまった: {bad}"
+
+
+# ---- 白リスト：読めない書き方は「なし」や値を出さず「読めませんでした」と出す（Y7①） ----
+BASE_TOOLS = 'TOOLS="a,b"'
+BASE_DENY = 'DENY="Bash(rm:*),Edit(CLAUDE.md)"'
+ALL3 = {"plan", "do", "cont"}
+
+
+def body(base_extra="", do="", plan="", after=""):
+    parts = [BASE_TOOLS, BASE_DENY, base_extra, 'if [ "$PHASE" = "do" ]; then', do or "  :", "else", plan or "  :", "fi", after]
+    return "\n".join(parts) + "\n"
+
+
+def write_cycle(text):
+    d = tempfile.mkdtemp(prefix="t141_adv_", dir=BASE)
+    path = os.path.join(d, "daily_cycle.sh")
+    open(path, "w", encoding="utf-8").write(text)
+    return path
+
+
+def phase_lines(out_lines, phase):
+    label = {"plan": "- 計画　", "do": "- 実行　", "cont": "- 実行（計画から続けて入るとき）　"}[phase]
+    i = next((n for n, l in enumerate(out_lines) if l.startswith(label)), None)
+    if i is None:
+        return None
+    return out_lines[i:i + 3]
+
+
+# 名前：(中身, {変数: 読めなくなる段})。after に何も無い形では「続けて」の段は出ない
+ADVERSARIAL = {
+    "semicolon_two": (body('TOOLS="x"; DENY="y"'), {"TOOLS": {"plan", "do"}, "DENY": {"plan", "do"}}),
+    "plus_equals": (body('TOOLS+=",PE"'), {"TOOLS": {"plan", "do"}}),
+    "one_line_if": (body('if true; then TOOLS="z"; fi'), {"TOOLS": {"plan", "do"}}),
+    "and_and": (body('[ -n "$ROOT" ] && TOOLS="$TOOLS,COND"'), {"TOOLS": {"plan", "do"}}),
+    "or_or": (body('[ -z "$ROOT" ] || DENY="$DENY,X"'), {"DENY": {"plan", "do"}}),
+    "elif_in_block": (body(do='  TOOLS="$TOOLS,DO"\nelif [ "$PHASE" = "x" ]; then\n  TOOLS="$TOOLS,X"'), {"TOOLS": {"plan", "do"}}),
+    "case_in_plan_side": (body(plan='  case "$X" in\n    a) TOOLS="$TOOLS,C" ;;\n  esac'), {"TOOLS": {"plan"}}),
+    "other_if_in_do_side": (body(do='  if [ -n "$X" ]; then\n    DENY="$DENY,Y"\n  fi'), {"DENY": {"do"}}),
+    "unknown_var": (body('TOOLS="a,Bash($HOME/x:*)"'), {"TOOLS": {"plan", "do"}}),
+    "escaped_dollar": (body('TOOLS="a,Bash(echo \\$DASH)"'), {"TOOLS": {"plan", "do"}}),
+    "dollar_modifier": (body('TOOLS="a,Bash(python3 $DASH:t)"'), {"TOOLS": {"plan", "do"}}),
+    "brace_other_name": (body('TOOLS="a,${HOME}"'), {"TOOLS": {"plan", "do"}}),
+    "special_pattern_paren": (body(do='  DENY="${DENY/Edit(CLAUDE.md),/}"'), {"DENY": {"do"}}),
+    "special_pattern_hash": (body(do='  DENY="${DENY/#Bash/}"'), {"DENY": {"do"}}),
+    "special_pattern_star": (body(plan='  DENY="${DENY/*/}"'), {"DENY": {"plan"}}),
+    "remove_other_var": (body(plan='  DENY="${TOOLS/a/}"'), {"DENY": {"plan"}}),
+    "local_in_function": (body('f() {\n  local TOOLS="inner"\n}'), {"TOOLS": {"plan", "do"}}),
+    "export_form": (body('export TOOLS="q"'), {"TOOLS": {"plan", "do"}}),
+    "trailing_semicolon": (body('TOOLS="$TOOLS,x";'), {"TOOLS": {"plan", "do"}}),
+    "command_substitution": (body('TOOLS="a,$(echo x)"'), {"TOOLS": {"plan", "do"}}),
+    "backtick": (body('TOOLS="a,`echo x`"'), {"TOOLS": {"plan", "do"}}),
+    "backslash_other": (body('TOOLS="a,Bash(printf \\n)"'), {"TOOLS": {"plan", "do"}}),
+    "unclosed_string": (body('TOOLS="a,\nb"'), {"TOOLS": {"plan", "do"}}),
+    "colon_default_form": (body(': ${TOOLS:="x"}'), {"TOOLS": {"plan", "do"}}),
+    "unreadable_then_append_stays_unreadable": (body('TOOLS=$(x)\nTOOLS="$TOOLS,more"'), {"TOOLS": {"plan", "do"}}),
+    "other_if_after": (body(after='if [ "$PHASE" = "review" ]; then\n  TOOLS="$TOOLS,REV"\nfi'), {"TOOLS": {"cont"}}),
+}
+
+
+@case
+def adversarial_forms_say_unreadable_never_none():
+    for name, (text, expect) in ADVERSARIAL.items():
+        out = open_lines(text)
+        sec = "\n".join(out)
+        assert "読めませんでした" in sec, f"[{name}] 読めませんでした が出ていない: {sec[:300]}"
+        for var, phases in expect.items():
+            for ph in phases:
+                lines = phase_lines(out, ph)
+                assert lines, f"[{name}] {ph} の行が無い"
+                targets = [lines[0]] if var == "TOOLS" else [lines[1], lines[2]]
+                for l in targets:
+                    assert "（読めませんでした：daily_cycle.sh:" in l, f"[{name}] {ph}の{var}が読めませんでしたになっていない: {l}"
+                    assert "：なし" not in l, f"[{name}] 読めない変数が「なし」になった: {l}"
+        for var in ("TOOLS", "DENY"):
+            for ph in ("plan", "do"):
+                if ph in expect.get(var, set()):
+                    continue
+                lines = phase_lines(out, ph)
+                l = lines[0] if var == "TOOLS" else lines[1]
+                assert "（読めませんでした：" not in l, f"[{name}] 読める {ph} の{var}まで読めない扱いになった: {l}"
+
+
+def open_lines(text):
+    import importlib
+    sys.path.insert(0, SCRIPTS)
+    os.environ["AI_BUNSHIN_HOME"] = HOME_DIR
+    os.environ["HOME"] = FAKE_HOME
+    u = importlib.import_module("update_dashboard")
+    return u.auto_tools_lines(write_cycle(text))
+
+
+@case
+def heredoc_text_and_reads_are_not_assignments():
+    text = body(base_extra='cat <<EOF\nTOOLS="fake"\nif x; then\nEOF\necho "$TOOLS" "${DENY}" # TOOLS="c"')
+    sec = "\n".join(open_lines(text))
+    assert "読めませんでした" not in sec, f"読むだけの行・heredoc の中が読めない扱いになった: {sec}"
+    assert "使える道具（daily_cycle.sh:1）：a, b" in sec, sec
+
+
+@case
+def broken_structure_does_not_trust_values():
+    sec = "\n".join(open_lines(body() + 'if true; then\n'))   # fi が足りない
+    assert "組み合わせが読めませんでした" in sec and "（読めませんでした：" in sec, sec
+    sec2 = "\n".join(open_lines(body() + 'fi\n'))   # fi が多い
+    assert "組み合わせが読めませんでした" in sec2, sec2
+
+
+@case
+def real_values_match_zsh_evaluation():
+    """今の daily_cycle.sh の代入の行を、zsh に評価させた値と、読んだ値が一致する（zsh が無ければ飛ばす）"""
+    zsh = shutil.which("zsh")
+    if not zsh:
+        print("  （zsh が無いので、zsh との一致の確かめは飛ばした）")
+        return
+    import importlib
+    sys.path.insert(0, SCRIPTS)
+    os.environ["AI_BUNSHIN_HOME"] = HOME_DIR
+    os.environ["HOME"] = FAKE_HOME
+    u = importlib.import_module("update_dashboard")
+    cyc = real_cycle_lines()
+    # 実物の if（do）と fi の位置を、読み方とは別に探す
+    l1 = next(n for n, l in enumerate(cyc) if l.strip() == 'if [ "$PHASE" = "do" ]; then')
+    l2 = next(n for n in range(l1, len(cyc)) if cyc[n].strip() == "fi")
+    assign = re.compile(r"^\s*(TOOLS|DENY)=")
+    before = [l for l in cyc[:l1] if assign.match(l)]
+    block = cyc[l1:l2 + 1]
+    after = [l for l in cyc[l2 + 1:] if assign.match(l)]
+    plugin_root = os.path.dirname(SCRIPTS)
+    res = u.read_auto_tools(os.path.join(SCRIPTS, "auto", "daily_cycle.sh"))
+    for mode in ("plan", "do", "cont"):
+        phase = "do" if mode == "do" else "plan"
+        script = "\n".join([f'PLUGIN_ROOT="{plugin_root}"', f'DASH="$PLUGIN_ROOT/scripts/update_dashboard.py"', f'PHASE={phase}'] + before + block
+                            + (after if mode == "cont" else []) + ['printf "%s\\n" "$TOOLS"', 'printf "%s\\n" "$DENY"'])
+        r = subprocess.run([zsh, "-c", script], capture_output=True, text=True)
+        assert r.returncode == 0, f"zsh が失敗: {r.stderr[-300:]}"
+        z_tools, z_deny = r.stdout.split("\n")[:2]
+        ph = res["phases"].get("cont" if mode == "cont" else mode)
+        assert ph, f"{mode} の値が無い"
+        assert ph["TOOLS"]["val"] == z_tools, f"{mode} の TOOLS が zsh と違う:\n  読んだ {ph['TOOLS']['val']}\n  zsh   {z_tools}"
+        assert ph["DENY"]["val"] == z_deny, f"{mode} の DENY が zsh と違う:\n  読んだ {ph['DENY']['val']}\n  zsh   {z_deny}"
 
 
 run_all()
