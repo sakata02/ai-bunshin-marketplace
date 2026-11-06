@@ -256,6 +256,19 @@ def a8_tail_table_lists_every_file():
     assert "${CLAUDE_PLUGIN_ROOT}" not in tail, "写しの中では展開されない"
 
 
+@case
+def a9_backup_md_keeps_the_two_safety_sentences():
+    """T077b：控え（details/backup.md）の安全に関わる2つの文が消えていない。
+    (1) 「reset --hard は使わない」 (2) 戻すコマンドに <コミット> が付いている（付けないと未コミットの変更が消える）。"""
+    t = details_text("backup")
+    assert "`reset --hard` は使わない" in t, "reset --hard は使わない、の文が無い"
+    cmds = re.findall(r"`git checkout ([^`]*)`", t)
+    assert cmds, "戻すコマンド（git checkout …）が無い"
+    restore = [c for c in cmds if re.search(r"--\s+<ファイル>", c)]
+    assert restore, "ファイルを戻すコマンド（git checkout … -- <ファイル>）が無い"
+    assert any(c.startswith("<コミット> --") for c in restore), f"戻すコマンドに <コミット> が付いていない：{restore}"
+
+
 # ---------- B. 写し（破られ方1） ----------
 print("## B. 本人のフォルダへの写し")
 TASKS = {"project": {"name": "テストAI", "daily_capacity_default": 8.0, "holidays": []}, "daily_sprints": [], "sprints": [],
