@@ -88,6 +88,23 @@ def run_dash(root, args):
     return subprocess.run([sys.executable, DASH, *args], capture_output=True, text=True, encoding="utf-8", cwd=root, env=env)
 
 
+def have_openpyxl():
+    try:
+        import openpyxl  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
+def assert_excel_or_note(root, text):
+    """openpyxl がある → Excel ができていること。無い → Excel を作れない案内が出ていること（ある環境で案内だけ出ても通らないように分ける）。"""
+    xlsx = os.path.join(root, "00_タスク管理", "タスク管理.xlsx")
+    if have_openpyxl():
+        assert os.path.exists(xlsx), f"Excel ができていない: {text[-300:]}"
+    else:
+        assert "openpyxl" in text and "Excel" in text, f"openpyxl が無いのに案内が出ていない: {text[-300:]}"
+
+
 def read_outputs(root):
     d = os.path.join(root, "00_タスク管理")
     board = open(os.path.join(d, "タスクボード.md"), encoding="utf-8").read()
@@ -138,7 +155,7 @@ def related_list_note_dict_title_list_do_not_stop_excel_board_and_requests():
     assert r.returncode == 0 and "Traceback" not in text and "unhashable" not in text, text[-400:]
     board, reqs = read_outputs(home)
     assert "T001" in board and "T152" in reqs and "T153" in reqs and "T154" in reqs, reqs[:300]
-    assert os.path.exists(os.path.join(home, "00_タスク管理", "タスク管理.xlsx")) or "openpyxl" in text, text[-300:]
+    assert_excel_or_note(home, text)
 
 
 @case
@@ -210,7 +227,7 @@ def control_characters_in_text_fields_are_removed_so_excel_is_made_and_tasks_jso
     before = rd(tasks_file(home))
     r = run_dash(home, ["--today", "2026-11-06"])
     assert r.returncode == 0 and "Traceback" not in r.stdout + r.stderr, (r.stdout + r.stderr)[-400:]
-    assert os.path.exists(os.path.join(home, "00_タスク管理", "タスク管理.xlsx")) or "openpyxl" in r.stdout + r.stderr
+    assert_excel_or_note(home, r.stdout + r.stderr)
     assert rd(tasks_file(home)) == before, "tasks.json が書き換わった"
 
 

@@ -2169,8 +2169,8 @@ def write_excel(ctx):
         build_sprint_history(wb, ctx)
     except (ValueError, TypeError) as e:   # 一覧や { } など、Excel のセルに入らない値（英語の "Cannot convert ..." をそのまま見せない）
         logged = write_error_log(sys.argv[1:])
-        raise BadFile("Excel（タスク管理.xlsx）に書けない値が tasks.json にあります。points（ポイント）・progress・priority・日次スプリントの項目など、"
-                      "数や決まった形のはずの項目に、一覧（[ ]）や { } が入っていないか確かめてください"
+        raise BadFile("Excel（タスク管理.xlsx）に書けない値が tasks.json にあります。points（ポイント）など、"
+                      "数のはずの項目に、一覧（[ ]）や { } が入っていないか確かめてください"
                       "（note・title など文字の項目は、一覧や { } でも読むときに文字にします）"
                       f"（内部のエラー：{type(e).__name__}）。tasks.json は書き換えていません。{log_note(logged)}"
                       + ("" if logged else "直らなければ、この文面を AI に見せてください")) from e
@@ -2302,8 +2302,9 @@ def normalize_text_fields(data):
 
 def load_tasks(path, normalize=True):
     """tasks.json を読んで辞書にする。読めない・空・壊れている・{ } で始まらないときは BadFile。
-    読む入口（run・--task）が共通で通るここで、文字の項目を文字にする（normalize=False なら実物のまま。--task が使う）。移し（migrate_tasks_json）は parse_tasks_bytes で
-    読み直すので、文字にした値が tasks.json に書き戻されることはない。"""
+    文字の項目を文字にするのは、既定（normalize=True）のとき。run（Excel・ボード・お願いの更新）がこれで読む。
+    --task（show_tasks）は normalize=False で呼び、tasks.json の実物（一覧は一覧のまま）を出す。
+    移し（migrate_tasks_json）は parse_tasks_bytes で読み直すので、文字にした値が tasks.json に書き戻されることはない。"""
     try:
         raw = Path(path).read_bytes()
     except OSError as e:
