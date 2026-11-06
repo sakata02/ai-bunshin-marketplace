@@ -497,12 +497,15 @@ for nm,txt in [("深い入れ子","["*200000+"]"*200000),("壊れた JSON","{not
 import importlib.util
 _spR9=importlib.util.spec_from_file_location("ng_guard_inproc",G); DLP=importlib.util.module_from_spec(_spR9); _spR9.loader.exec_module(DLP)
 def inproc_decide(c,base,home):
-    """同じプロセスの中で decide を本番と同じ締め切り（既定）で呼ぶ。(止めるか, 時間切れの受け皿を通ったか)。環境は呼ぶ前に戻す。"""
+    """同じプロセスの中で decide を本番と同じ締め切り（既定）で呼ぶ。(止めるか, 時間切れの受け皿を通った・または CPU 時間が 2 秒以上か)。環境は呼ぶ前に戻す。"""
+    import time
     saved_env,saved_cwd=dict(os.environ),os.getcwd()
     try:
         os.environ["HOME"]=home; os.environ["CLAUDE_PROJECT_DIR"]=base; os.chdir(base); DLP._SEEN["root"]="unset"
+        c0=time.process_time()
         d,label,_w,_r,_t,fell=DLP.decide(json.dumps({"tool_name":"Bash","tool_input":{"command":c},"cwd":base}))
-        return d,fell
+        cpu=time.process_time()-c0   # CPU 時間：負荷で壁時計が延びても変わらない。ふだんは最大 0.9 秒ほど（F3-exec）なので、見張りが本当に重くなったとき（2 秒以上）だけ拾う
+        return d,fell or cpu>=2.0
     finally:
         os.environ.clear(); os.environ.update(saved_env); os.chdir(saved_cwd)
 for vid,where,c in [("R9-in","in","python3 x; "*5000),("R9-out","out","python3 x; "*5000),("R9-find","in","find . -name a -print; "*2400),
@@ -858,7 +861,7 @@ for bom in (False,True):
                      ("Write",{"file_path":R+"/設定/config.json","content":"{}"})]:
         if run(tool,inp)!="STOP": fail+=1; print("G ng_allow で外れた",tag,tool,list(inp.values())[0][-50:])
     if run("Bash",{"command":"rm x"})!="pass": fail+=1; print("G ng_allow（.*）が効かない",tag)
-# 自分の制限の書き換えを止める判定（_limit_keys）：BOM 付きの config でも、ng_allow・maintainer が変わる Write・Edit は止める
+# 自分の制限の書き換えを止める判定（self_limit_hit）：BOM 付きの config でも、ng_allow・maintainer が変わる Write・Edit は止める
 def bomw(**kw):
     d={"name":"x","ng_allow":["^rm x$"],"maintainer":False}; d.update(kw); return BOM.decode("utf-8")+json.dumps(d,ensure_ascii=False)
 for nm,tool,inp,want in [
@@ -873,5 +876,38 @@ for nm,tool,inp,want in [
     setcfg_bom({"name":"x","ng_allow":["^rm x$"],"maintainer":False},True)
     r=run(tool,inp)
     if r!=want: fail+=1; print("G 自分の制限の書き換え",nm,"got",r,"want",want)
+# ---- T121②の直し：見張りと書き換え判定が、config を同じ道（_parse_config_text・_parse_config_bytes）で読む ----
+print("## T121② 見張りと書き換え判定の見え方が同じ")
+import inspect
+for fn in (DLP._read_config,DLP.self_limit_hit):
+    if "_parse_config_" not in inspect.getsource(fn): fail+=1; print("G2 共通の関数を通していない",fn.__name__)
+GOODJ='{"name":"x","ng_allow":[".*"]}'
+def bomcount(n,j=GOODJ): return (BOM*n)+j.encode("utf-8")
+# ①BOM 2つで ng_allow=[".*"] の config（見張りには {} に見える）に、同じ内容を BOM 1つ／0 で Write → STOP（新しい姿では ng_allow が効くので変更）
+for nm,newtxt in [("BOM 1つ",BOM.decode("utf-8")+GOODJ),("BOM 0",GOODJ)]:
+    open(CFGP,"wb").write(bomcount(2))
+    r=run("Write",{"file_path":CFGP,"content":newtxt})
+    if r!="STOP": fail+=1; print("G2① BOM 2つの config に同じ内容を Write（"+nm+"）",r)
+# ②utf-8 として不正なバイトの config（見張りには {} に見える）に、正しい utf-8 で同じ内容を Write → STOP
+BADJ=b'{"name":"\xff","ng_allow":[".*"]}'
+open(CFGP,"wb").write(BADJ)
+if DLP._read_config(R)!={}: fail+=1; print("G2② 不正なバイトの config が {} に見えない")
+if run("Write",{"file_path":CFGP,"content":'{"name":"\u00ff","ng_allow":[".*"]}'})!="STOP": fail+=1; print("G2② 不正なバイトの config に正しい utf-8 で同じ内容を Write")
+if run("Edit",{"file_path":CFGP,"old_string":'"ng_allow"',"new_string":'"ng_allow"'})!="STOP": fail+=1; print("G2② 不正なバイトの config への Edit は適用後を確かめられないので止める")
+# ③BOM 0〜3・不正なバイトの表：見張りの見え方（_read_config）と、書き換え判定（Write して STOP か）が、いつも一致する
+OLDS=[("BOM 0",bomcount(0)),("BOM 1",bomcount(1)),("BOM 2",bomcount(2)),("BOM 3",bomcount(3)),("不正なバイト",BADJ),
+      ("BOM 1＋不正なバイト",BOM+BADJ),("ng_allow なし BOM 2",bomcount(2,'{"name":"x"}')),("壊れた JSON",b"{x")]
+NEWS=[("BOM 0",GOODJ),("BOM 1",BOM.decode("utf-8")+GOODJ),("BOM 2",BOM.decode("utf-8")*2+GOODJ),("ng_allow なし",'{"name":"x"}')]
+for onm,raw in OLDS:
+    for nnm,newtxt in NEWS:
+        open(CFGP,"wb").write(raw)
+        seen=DLP._limit_keys(DLP._read_config(R))        # 見張りが今の config から読む値
+        after=DLP._limit_keys(DLP._parse_config_text(newtxt))   # 書き換えたあとに見張りが読む値（BOM は1つだけ落ちる）
+        want="STOP" if seen!=after else "pass"
+        got=run("Write",{"file_path":CFGP,"content":newtxt})
+        if got!=want: fail+=1; print("G2③ 見え方がずれた 古い=",onm,"新しい=",nnm,"got",got,"want",want)
+        # 書いたあとの本物の見え方も、新しい本文から作った辞書と同じ（BOM を1つだけ落とす）
+        open(CFGP,"wb").write(newtxt.encode("utf-8"))
+        if DLP._limit_keys(DLP._read_config(R))!=after: fail+=1; print("G2③ 書いたあとの見え方がずれた",nnm)
 json.dump({},open(os.path.join(R,"設定","config.json"),"w"))
 print(f"失敗 {fail} 件"); sys.exit(1 if fail else 0)
