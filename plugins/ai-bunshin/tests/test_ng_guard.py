@@ -511,7 +511,8 @@ def inproc_decide(c,base,home):
 for vid,where,c in [("R9-in","in","python3 x; "*5000),("R9-out","out","python3 x; "*5000),("R9-find","in","find . -name a -print; "*2400),
                     ("R9-py-rename","in","python3 -c \"os.rename('a','b')\"; "*1700)]:
     (got,reason),dt=run_v("Bash",{"command":c},where,timeit=True)
-    if got!="pass" or dt>=4.0: vfail+=1; print("V2",vid,"got",got,"秒",round(dt,2),"長さ",len(c))   # 失敗の基準は本番の締め切り（5秒）の手前。負荷で1秒を超えても落ちない
+    if got!="pass": vfail+=1; print("V2",vid,"got",got,"秒",round(dt,2),"長さ",len(c))
+    if dt>=1.0: print("（参考：壁時計",vid,round(dt,2),"秒。負荷で延びる。失敗にしない。遅さは下の in-process の CPU 時間・fell・判定で見る）")
     d_,fell_=inproc_decide(c,{"in":VR,"out":VO}[where],VH)   # 同じコマンドを本番と同じ締め切りで判定：判定は前と同じ pass、時間切れの受け皿を通っていない
     if d_ or fell_: vfail+=1; print("V2",vid,"in-process deny",d_,"fell",fell_)
 # --explain "<コマンド>"：判定（deny／pass）と理由の語を出す（記録は書かない）
@@ -649,7 +650,8 @@ open(XR+"/設定/config.json","w").write("{}")
 for vid,where,c,want in [("F3-cd","in","cd a; "*1500,"pass"),("F3-cd-tail","in","cd a; "*1500+f"cd {XR} && {RM} -rf 03_インプット","deny"),
                          ("F3-py","in","python3 -c \""+"x=Path('a');"*3000+"\"","pass"),("F3-exec","in","find . "+"-exec grep a {} + "*3000,"pass")]:
     (got,reason),dt=run_x("Bash",{"command":c},where,timeit=True)
-    if got!=want or dt>=4.0: xfail+=1; print("FIX",vid,"got",got,"want",want,"秒",round(dt,2))   # 失敗の基準は本番の締め切り（5秒）の手前
+    if got!=want: xfail+=1; print("FIX",vid,"got",got,"want",want,"秒",round(dt,2))
+    if dt>=1.0: print("（参考：壁時計",vid,round(dt,2),"秒。負荷で延びる。失敗にしない）")
     d_,fell_=inproc_decide(c,{"in":XR,"out":XO}[where],XH)   # 同じ判定を本番と同じ締め切りで：判定は前と同じ、時間切れの受け皿を通っていない
     if d_!=(want=="deny") or fell_: xfail+=1; print("FIX",vid,"in-process deny",d_,"want",want,"fell",fell_)
 (got,reason)=run_x("Bash",{"command":"cd a; "*600+"touch x"},"in")  # 今いる場所が 1024 文字を超えた：読み切れない
@@ -909,5 +911,17 @@ for onm,raw in OLDS:
         # 書いたあとの本物の見え方も、新しい本文から作った辞書と同じ（BOM を1つだけ落とす）
         open(CFGP,"wb").write(newtxt.encode("utf-8"))
         if DLP._limit_keys(DLP._read_config(R))!=after: fail+=1; print("G2③ 書いたあとの見え方がずれた",nnm)
+# ---- T121②の直し2：CRLF の config.json・CLAUDE.md への複数行の Edit（改行をそろえて old_string を当てる。止めすぎない） ----
+print("## T121② CRLF の複数行 Edit")
+def crlf(t): return t.replace("\n","\r\n").encode("utf-8")
+open(CFGP,"wb").write(crlf(CFG0T)); open(CLP,"wb").write(crlf(CL0))
+for nm,tool,inp,want in [
+ ("CRLF の CLAUDE.md：例外に触れない複数行の Edit は通す","Edit",{"file_path":CLP,"old_string":"- 呼び方：山田さん\n\n## 許可する例外","new_string":"- 呼び方：山田さん\n- 好み：簡潔\n\n## 許可する例外"},"pass"),
+ ("CRLF の config.json：ng_allow・maintainer に触れない複数行の Edit は通す","Edit",{"file_path":CFGP,"old_string":'"owner": "山田",\n  "name": "x"',"new_string":'"owner": "山田",\n  "name": "y"'},"pass"),
+ ("CRLF の config.json：ng_allow を足す複数行の Edit は止める","Edit",{"file_path":CFGP,"old_string":'"ng_allow": [\n    "^rm x$"\n  ]',"new_string":'"ng_allow": [\n    "^rm x$",\n    "."\n  ]'},"STOP"),
+ ("CRLF の CLAUDE.md：例外を足す複数行の Edit は止める","Edit",{"file_path":CLP,"old_string":"## 許可する例外（NG のうち、本人が許可したもの）\n\n- （まだなし）","new_string":"## 許可する例外（NG のうち、本人が許可したもの）\n\n- 2026-11-07：rm"},"STOP")]:
+    r=run(tool,inp)
+    if r!=want: fail+=1; print("G3 CRLF",nm,"got",r,"want",want)
+setcl(); setcfg()
 json.dump({},open(os.path.join(R,"設定","config.json"),"w"))
 print(f"失敗 {fail} 件"); sys.exit(1 if fail else 0)

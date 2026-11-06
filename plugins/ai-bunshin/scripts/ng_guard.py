@@ -2354,6 +2354,12 @@ def _exception_sections(text):
     return out
 
 
+def _edit_base_text(raw):
+    """Edit・MultiEdit の old_string を当てる古い本文。改行（\\r\\n・\\r）は \\n にそろえる（Edit の道具の見え方と同じ。CRLF のファイルでも複数行の Edit が一致する）。
+    config の見え方（_parse_config_bytes）には使わない。"""
+    return raw.decode("utf-8", errors="replace").replace("\r\n", "\n").replace("\r", "\n")
+
+
 def self_limit_hit(tool, inp, root, path, forms, base):
     """Write・Edit で、既にある config.json の ng_allow・maintainer や CLAUDE.md の「許可する例外」が変わるなら True。
     まだ無いファイルの新規作成（setup）は通す。適用後の姿を確かめられない形（内容なし・見つからない old_string など）は止める。"""
@@ -2386,11 +2392,11 @@ def self_limit_hit(tool, inp, root, path, forms, base):
         except UnicodeDecodeError:
             if tool != "Write":
                 return True
-        new = _text_after(tool, inp, raw.decode("utf-8", errors="replace"))
+        new = _text_after(tool, inp, _edit_base_text(raw))
         if new is None:
             return True
         return _limit_keys(_parse_config_bytes(raw)) != _limit_keys(_parse_config_text(new))
-    old = raw.decode("utf-8", errors="replace")
+    old = _edit_base_text(raw)
     new = _text_after(tool, inp, old)
     if new is None:
         return True
