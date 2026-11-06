@@ -122,6 +122,14 @@ description: AI 分身の初回セットアップ。新しく使い始める人�
 2. `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/update_dashboard.py" --session` → `.claude/rules/ai-bunshin-common.md` と `.claude/ai-bunshin-details/`（必要なときだけ読む詳しい手順）ができる（次の起動から共通ルールが読み込まれる）
 3. `python3 "${CLAUDE_PLUGIN_ROOT}/tests/test_ng_guard.py"` → 「失敗 0 件」（NG の見張りが効く）
 
+**控え（本人のフォルダをローカルの Git で記録する。Git がある人だけ。無くても AI 分身は動く）**：直しすぎたときに、1ファイルだけ昨日の状態へ戻せるようにするため。外には何も送らない。進め方は `.claude/ai-bunshin-details/backup.md`（まだコピーされていないときは `${CLAUDE_PLUGIN_ROOT}/rules/details/backup.md`）
+1. `git --version` を実行する。**Git が無い**ときは、入れ方の案内だけして先へ進む（インストールは本人。AI は入れない）：Mac は `! xcode-select --install`、Windows は https://git-scm.com/download/win 。入れたら「/ai-bunshin:setup」でこの手順だけやり直せると伝える
+2. Git があるときは、本人のフォルダで `git rev-parse --show-toplevel` を実行して確かめる：
+   - 出力が本人のフォルダと一致する → すでにこのフォルダ自身がリポジトリ。`git init` はしない（下の `.gitignore` だけ確かめる）
+   - 出力が別のフォルダ（親のフォルダ）→ 親のリポジトリの中。`git init` はせず、「親のフォルダのリポジトリの中なので、このフォルダの控えは始めません」と案内する。`.gitignore` も置かない
+   - エラー（リポジトリでない）→ `git init` を実行し、「変更の記録（控え）を始めました。外には何も送りません。間違えて直したら「◯◯を昨日の状態に戻して」と言えば、そのファイルだけ戻します」と伝える
+3. `.gitignore`（リポジトリの最上位が本人のフォルダのとき）：まだ無ければ、雛形 `${CLAUDE_PLUGIN_ROOT}/templates/gitignore.txt` を読み、本人のフォルダの `.gitignore` として書く。**すでにある `.gitignore` は上書きしない**：雛形の行（`#` で始まらない行）のうち、無いものを一覧にして、「足すとよい行」として本人に案内するだけ（AI は足さない）
+
 ## 4. 業務の棚卸し（何を任せるか）
 
 1. 「1週間の仕事を、思いつくだけ箇条書きで教えてください（細かくなくて大丈夫です）」と聞く
