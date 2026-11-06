@@ -493,11 +493,24 @@ for nm,txt in [("深い入れ子","["*200000+"]"*200000),("壊れた JSON","{not
                                   ("R8-out",O8,"mv a b","pass",""),("R8-in-rm",R8,f"{RM} x","deny","削除")]:
         got,reason=run_v("Bash",{"command":c},where,home=H8)
         if got!=want or (want=="deny" and word not in reason): vfail+=1; print("V2",vid,nm,"got",got,"want",want,reason[:60])
-# R9：長いコマンドでも遅くならない（55KB で 1 秒未満）
+# R9：長いコマンドでも遅くならない（55KB で、本番の締め切り 5 秒の手前の 4 秒未満。時間切れの受け皿を通らない）
+import importlib.util
+_spR9=importlib.util.spec_from_file_location("ng_guard_inproc",G); DLP=importlib.util.module_from_spec(_spR9); _spR9.loader.exec_module(DLP)
+def inproc_decide(c,base,home):
+    """同じプロセスの中で decide を本番と同じ締め切り（既定）で呼ぶ。(止めるか, 時間切れの受け皿を通ったか)。環境は呼ぶ前に戻す。"""
+    saved_env,saved_cwd=dict(os.environ),os.getcwd()
+    try:
+        os.environ["HOME"]=home; os.environ["CLAUDE_PROJECT_DIR"]=base; os.chdir(base); DLP._SEEN["root"]="unset"
+        d,label,_w,_r,_t,fell=DLP.decide(json.dumps({"tool_name":"Bash","tool_input":{"command":c},"cwd":base}))
+        return d,fell
+    finally:
+        os.environ.clear(); os.environ.update(saved_env); os.chdir(saved_cwd)
 for vid,where,c in [("R9-in","in","python3 x; "*5000),("R9-out","out","python3 x; "*5000),("R9-find","in","find . -name a -print; "*2400),
                     ("R9-py-rename","in","python3 -c \"os.rename('a','b')\"; "*1700)]:
     (got,reason),dt=run_v("Bash",{"command":c},where,timeit=True)
-    if got!="pass" or dt>=1.0: vfail+=1; print("V2",vid,"got",got,"秒",round(dt,2),"長さ",len(c))
+    if got!="pass" or dt>=4.0: vfail+=1; print("V2",vid,"got",got,"秒",round(dt,2),"長さ",len(c))   # 失敗の基準は本番の締め切り（5秒）の手前。負荷で1秒を超えても落ちない
+    d_,fell_=inproc_decide(c,{"in":VR,"out":VO}[where],VH)   # 同じコマンドを本番と同じ締め切りで判定：判定は前と同じ pass、時間切れの受け皿を通っていない
+    if d_ or fell_: vfail+=1; print("V2",vid,"in-process deny",d_,"fell",fell_)
 # --explain "<コマンド>"：判定（deny／pass）と理由の語を出す（記録は書かない）
 def explain(c,where="in"):
     base={"in":VR,"out":VO}[where]; env={k:v for k,v in os.environ.items() if k!="CLAUDE_PROJECT_DIR"}; env["HOME"]=VH
@@ -633,7 +646,9 @@ open(XR+"/設定/config.json","w").write("{}")
 for vid,where,c,want in [("F3-cd","in","cd a; "*1500,"pass"),("F3-cd-tail","in","cd a; "*1500+f"cd {XR} && {RM} -rf 03_インプット","deny"),
                          ("F3-py","in","python3 -c \""+"x=Path('a');"*3000+"\"","pass"),("F3-exec","in","find . "+"-exec grep a {} + "*3000,"pass")]:
     (got,reason),dt=run_x("Bash",{"command":c},where,timeit=True)
-    if got!=want or dt>=1.0: xfail+=1; print("FIX",vid,"got",got,"want",want,"秒",round(dt,2))
+    if got!=want or dt>=4.0: xfail+=1; print("FIX",vid,"got",got,"want",want,"秒",round(dt,2))   # 失敗の基準は本番の締め切り（5秒）の手前
+    d_,fell_=inproc_decide(c,{"in":XR,"out":XO}[where],XH)   # 同じ判定を本番と同じ締め切りで：判定は前と同じ、時間切れの受け皿を通っていない
+    if d_!=(want=="deny") or fell_: xfail+=1; print("FIX",vid,"in-process deny",d_,"want",want,"fell",fell_)
 (got,reason)=run_x("Bash",{"command":"cd a; "*600+"touch x"},"in")  # 今いる場所が 1024 文字を超えた：読み切れない
 if got!="deny" or "cd の行き先を読み切れない" not in reason: xfail+=1; print("FIX F3-long-cwd",got,reason[:60])
 # 締め切り：テストは関数の引数（decide の deadline=）で短くする。本番は環境変数などで変えられない（T058 の直し6）
@@ -643,7 +658,12 @@ for vid,where,c,want in [("F3-dl-in","in","ls","deny"),("F3-dl-out","out","ls","
                          ("F3-dl-out-tilde","out","ls ~/workspace/AI山田/02_成果物","deny")]:
     base={"in":XR,"out":XO}[where]
     os.environ["HOME"]=XH; os.environ["CLAUDE_PROJECT_DIR"]=base; os.chdir(base); DL._SEEN["root"]="unset"
-    d,label,_w,_r,_t,fell=DL.decide(json.dumps({"tool_name":"Bash","tool_input":{"command":c},"cwd":base}),deadline=1e-6)
+    _orig_judge=DL.judge
+    def _slow_judge(payload):   # 判定が必ず締め切りを超える関数に差し替える（1µs の締め切りと判定の競争にしない。ng_guard.py 本体は変えない）
+        import time; time.sleep(5)
+    DL.judge=_slow_judge
+    try: d,label,_w,_r,_t,fell=DL.decide(json.dumps({"tool_name":"Bash","tool_input":{"command":c},"cwd":base}),deadline=0.3)
+    finally: DL.judge=_orig_judge
     got="deny" if d else "pass"
     if got!=want or not fell or (want=="deny" and "時間内" not in (label or "")): xfail+=1; print("FIX",vid,"got",got,"want",want,fell,label)
 os.environ.clear(); os.environ.update(_saved_env); os.chdir(_saved_cwd)
@@ -809,5 +829,49 @@ for c in t61_pass:
     if run("Bash",{"command":c})!="pass": fail+=1; print("T061 FALSEPOS",repr(c).replace(PS,"<PS>")[:150])
 for c in t61_stop:
     if run("Bash",{"command":c})!="STOP": fail+=1; print("T061 MISS",repr(c).replace(PS,"<PS>")[:150])
+# ---- T121②：BOM 付き（メモ帳で保存）の config.json でも、ng_allow・maintainer が効く。外れない保護は外れない ----
+print("## T121② BOM 付きの config.json")
+BOM=b"\xef\xbb\xbf"
+def setcfg_bom(d,bom=True):
+    open(os.path.join(R,"設定","config.json"),"wb").write((BOM if bom else b"")+json.dumps(d,ensure_ascii=False).encode("utf-8"))
+def explain_r(c):
+    env={k:v for k,v in os.environ.items() if k!="CLAUDE_PROJECT_DIR"}; env["HOME"]=TEST_HOME
+    p=subprocess.run(["python3",G,"--explain",c],capture_output=True,text=True,cwd=R,env=env)
+    return p.stdout
+SRCR=os.path.join(SRC,"plugins","x","rules","r.md")
+for bom in (False,True):
+    tag="BOM" if bom else "BOM なし"
+    setcfg_bom({"ng_allow":["^rm zz$"],"maintainer":False},bom)
+    if run("Bash",{"command":"rm zz"})!="pass": fail+=1; print("G ng_allow が効かない",tag)
+    if "判定：pass" not in explain_r("rm zz"): fail+=1; print("G --explain が pass でない",tag)
+    if run("Bash",{"command":"rm yy"})!="STOP": fail+=1; print("G ng_allow 以外のコマンドが止まらない",tag)
+    if "判定：deny" not in explain_r("rm yy"): fail+=1; print("G --explain が deny でない",tag)
+    # maintainer：プラグインの元（SRC）への書き込みを通す・コピー（CACHE）は通さない
+    setcfg_bom({"maintainer":True},bom)
+    if run("Edit",{"file_path":SRCR})!="pass": fail+=1; print("G maintainer が効かない",tag)
+    if run("Write",{"file_path":CACHE})!="STOP": fail+=1; print("G maintainer でもコピーは止める",tag)
+    setcfg_bom({"maintainer":False},bom)
+    if run("Edit",{"file_path":SRCR})!="STOP": fail+=1; print("G maintainer でないのに元を書けた",tag)
+    # ng_allow（.*）でも外れない保護：プラグインのコピー・元、config.json 自身の書き換え
+    setcfg_bom({"ng_allow":[".*"],"maintainer":False},bom)
+    for tool,inp in [("Write",{"file_path":CACHE}),("Bash",{"command":"echo x > "+CACHE}),("Edit",{"file_path":SRCR}),
+                     ("Write",{"file_path":R+"/設定/config.json","content":"{}"})]:
+        if run(tool,inp)!="STOP": fail+=1; print("G ng_allow で外れた",tag,tool,list(inp.values())[0][-50:])
+    if run("Bash",{"command":"rm x"})!="pass": fail+=1; print("G ng_allow（.*）が効かない",tag)
+# 自分の制限の書き換えを止める判定（_limit_keys）：BOM 付きの config でも、ng_allow・maintainer が変わる Write・Edit は止める
+def bomw(**kw):
+    d={"name":"x","ng_allow":["^rm x$"],"maintainer":False}; d.update(kw); return BOM.decode("utf-8")+json.dumps(d,ensure_ascii=False)
+for nm,tool,inp,want in [
+ ("BOM 付きの Write で ng_allow に足す","Write",{"file_path":CFGP,"content":bomw(ng_allow=["^rm x$","."])},"STOP"),
+ ("BOM 付きの Write で maintainer を true","Write",{"file_path":CFGP,"content":bomw(maintainer=True)},"STOP"),
+ ("BOM なしの Write で maintainer を true","Write",{"file_path":CFGP,"content":bomw(maintainer=True)[1:]},"STOP"),
+ ("Edit で ng_allow に足す","Edit",{"file_path":CFGP,"old_string":'"^rm x$"',"new_string":'"^rm x$", "."'},"STOP"),
+ ("Edit で maintainer を true","Edit",{"file_path":CFGP,"old_string":'"maintainer": false',"new_string":'"maintainer": true'},"STOP"),
+ ("同じ内容の Write（BOM 付き）は通す","Write",{"file_path":CFGP,"content":bomw()},"pass"),
+ ("同じ内容の Write（BOM なし）も通す","Write",{"file_path":CFGP,"content":bomw()[1:]},"pass"),
+ ("ほかのキーだけ変える Write は通す","Write",{"file_path":CFGP,"content":bomw(name="y")},"pass")]:
+    setcfg_bom({"name":"x","ng_allow":["^rm x$"],"maintainer":False},True)
+    r=run(tool,inp)
+    if r!=want: fail+=1; print("G 自分の制限の書き換え",nm,"got",r,"want",want)
 json.dump({},open(os.path.join(R,"設定","config.json"),"w"))
 print(f"失敗 {fail} 件"); sys.exit(1 if fail else 0)

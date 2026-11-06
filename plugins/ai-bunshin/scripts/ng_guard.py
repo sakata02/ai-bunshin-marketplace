@@ -1812,7 +1812,7 @@ def hardlink_owner(f, recs):
 def _read_config(root):
     """設定/config.json を読む。読めない・形が違う（dict でない）ときは {}。例外はすべて受ける（指摘5）。"""
     try:
-        cfg = json.loads((Path(root) / "設定" / "config.json").read_text(encoding="utf-8"))
+        cfg = json.loads((Path(root) / "設定" / "config.json").read_text(encoding="utf-8-sig"))   # BOM 付き（メモ帳）でも読む
         return cfg if isinstance(cfg, dict) else {}
     except Exception:
         return {}
@@ -2310,7 +2310,7 @@ def _text_after(tool, inp, text):
 def _limit_keys(text):
     """config.json の本文から、見張りが実際に使う値（ng_allow の文字列のリスト・maintainer の真偽）。読めない・形が違うときは見張りと同じく {} 扱い。"""
     try:
-        cfg = json.loads(text)
+        cfg = json.loads(text[1:] if text.startswith("\ufeff") else text)   # 先頭の BOM は1つだけ落とす（_read_config の utf-8-sig と同じ見え方。Write の content・古い本文の両方）
     except Exception:
         cfg = {}
     if not isinstance(cfg, dict):
