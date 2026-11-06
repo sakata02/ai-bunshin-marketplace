@@ -2169,8 +2169,9 @@ def write_excel(ctx):
         build_sprint_history(wb, ctx)
     except (ValueError, TypeError) as e:   # 一覧や { } など、Excel のセルに入らない値（英語の "Cannot convert ..." をそのまま見せない）
         logged = write_error_log(sys.argv[1:])
-        raise BadFile("Excel（タスク管理.xlsx）に書けない値が tasks.json にあります。note・title・department など、文字や数のはずの項目に、"
-                      "一覧（[ ]）や { } が入っていないか確かめてください"
+        raise BadFile("Excel（タスク管理.xlsx）に書けない値が tasks.json にあります。points（ポイント）・progress・priority・日次スプリントの項目など、"
+                      "数や決まった形のはずの項目に、一覧（[ ]）や { } が入っていないか確かめてください"
+                      "（note・title など文字の項目は、一覧や { } でも読むときに文字にします）"
                       f"（内部のエラー：{type(e).__name__}）。tasks.json は書き換えていません。{log_note(logged)}"
                       + ("" if logged else "直らなければ、この文面を AI に見せてください")) from e
     try:
@@ -2275,13 +2276,18 @@ TEXT_FIELDS = ("title", "department", "type", "kind", "assignee", "reviewer", "s
                "note", "why", "done_when", "report_back", "due_reason", "related")
 
 
+# Excel に書けない制御文字（openpyxl の ILLEGAL_CHARACTERS_RE と同じ範囲。openpyxl が無くても動くよう自分で持つ）。タブ・改行・復帰は残す
+ILLEGAL_XLSX_CHARS_RE = re.compile(r"[\000-\010\013\014\016-\037]")
+
+
 def text_of(v):
-    """一覧は中身を文字にして「・」でつなぐ（["T152","T153"] → "T152・T153"。None の中身は飛ばす）。{ } は JSON の文字。None・文字・数はそのまま。"""
+    """一覧は中身を文字にして「・」でつなぐ（["T152","T153"] → "T152・T153"。None の中身は飛ばす）。{ } は JSON の文字。None・数はそのまま。
+    文字になったものからは、Excel に書けない制御文字を取り除く。"""
     if isinstance(v, list):
-        return "・".join(str(text_of(x)) for x in v if x is not None)
-    if isinstance(v, dict):
-        return json.dumps(v, ensure_ascii=False, default=str)
-    return v
+        v = "・".join(str(text_of(x)) for x in v if x is not None)
+    elif isinstance(v, dict):
+        v = json.dumps(v, ensure_ascii=False, default=str)
+    return ILLEGAL_XLSX_CHARS_RE.sub("", v) if isinstance(v, str) else v
 
 
 def normalize_text_fields(data):
@@ -2294,9 +2300,9 @@ def normalize_text_fields(data):
     return data
 
 
-def load_tasks(path):
+def load_tasks(path, normalize=True):
     """tasks.json を読んで辞書にする。読めない・空・壊れている・{ } で始まらないときは BadFile。
-    読む入口（run・--task）が共通で通るここで、文字の項目を文字にする。移し（migrate_tasks_json）は parse_tasks_bytes で
+    読む入口（run・--task）が共通で通るここで、文字の項目を文字にする（normalize=False なら実物のまま。--task が使う）。移し（migrate_tasks_json）は parse_tasks_bytes で
     読み直すので、文字にした値が tasks.json に書き戻されることはない。"""
     try:
         raw = Path(path).read_bytes()
@@ -2306,7 +2312,7 @@ def load_tasks(path):
     if not isinstance(data, dict):
         raise BadFile("tasks.json は { } で始まる形にしてください（今は別の形です）。壊れたファイルは書き換えていません")
     tl = data.get("tasks")
-    return normalize_text_fields(data) if isinstance(tl, list) else data
+    return normalize_text_fields(data) if normalize and isinstance(tl, list) else data
 
 
 def migrate_tasks_json(path, today):
@@ -2397,7 +2403,7 @@ def run(today):
 def show_tasks(ids):
     """--task：指定のタスクだけを JSON で標準出力へ。読むだけ（tasks.json の移行の書き戻しも、生成物の更新もしない）。"""
     try:
-        data = load_tasks(TASKS_JSON)
+        data = load_tasks(TASKS_JSON, normalize=False)   # 実物を出す（文字にしない）
         by_id = {t.get("id"): t for t in data.get("tasks", [])}
     except (BadFile, AttributeError, TypeError) as e:
         print(f"tasks.json を読めませんでした: {e}" if not isinstance(e, BadFile) else str(e), file=sys.stderr)

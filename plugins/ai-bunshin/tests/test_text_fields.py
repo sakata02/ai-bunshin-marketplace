@@ -186,12 +186,32 @@ def migration_keeps_original_lists_and_dicts_in_tasks_json():
 
 
 @case
-def task_option_shows_text_for_list_related():
+def task_option_shows_the_original_list_not_the_text():
+    """--task は tasks.json の実物を出す（読むときに文字にした値ではなく、一覧は一覧のまま）。"""
     home = make_home(tasks_data(True))
-    r = run_dash(home, ["--today", "2026-11-06", "--task", "T152"])
+    r = run_dash(home, ["--today", "2026-11-06", "--task", "T152", "T154"])
     assert r.returncode == 0, r.stderr[-300:]
-    found = json.loads(r.stdout)
-    assert found[0]["related"] == "T001・T002", found
+    found = {t["id"]: t for t in json.loads(r.stdout)}
+    assert found["T152"]["related"] == ["T001", "T002"], found["T152"]
+    assert found["T152"]["due_reason"] == ["理由1", "理由2"] and found["T152"]["done_when"] == {"基準": "できた"}, found["T152"]
+    assert found["T154"]["related"] == {"元": "T001"}, found["T154"]
+
+
+@case
+def control_characters_in_text_fields_are_removed_so_excel_is_made_and_tasks_json_stays_same():
+    """note に \u0001 などがあると openpyxl の IllegalCharacterError で Excel が止まる。文字の項目は読むときに取り除く（タブ・改行は残す）。"""
+    assert MOD.text_of("a\u0001b\u000bc\u001fd\te\nf\rg") == "abcd\te\nf\rg"
+    assert MOD.text_of(["x\u0002", "y"]) == "x・y"
+    assert "\u0003" not in MOD.text_of({"k": "v\u0003"})   # { } の中の制御文字は json.dumps が \\u0003 の文字にするので、生の制御文字は残らない
+    data = tasks_data(True)
+    data["tasks"][0]["note"] = "メモ\u0001あり\n二行目"
+    data["tasks"][1]["title"] = ["一覧\u0007の", "題名"]
+    home = make_home(data)
+    before = rd(tasks_file(home))
+    r = run_dash(home, ["--today", "2026-11-06"])
+    assert r.returncode == 0 and "Traceback" not in r.stdout + r.stderr, (r.stdout + r.stderr)[-400:]
+    assert os.path.exists(os.path.join(home, "00_タスク管理", "タスク管理.xlsx")) or "openpyxl" in r.stdout + r.stderr
+    assert rd(tasks_file(home)) == before, "tasks.json が書き換わった"
 
 
 if __name__ == "__main__":
