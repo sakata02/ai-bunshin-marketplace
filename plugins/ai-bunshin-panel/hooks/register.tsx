@@ -36,10 +36,27 @@ let me: Me | undefined
 const NO_HOME = '本人のフォルダ（設定/config.json と 00_タスク管理/data/tasks.json がある所）の中ではないので、使えません。'
 
 const MAX_UP = 6
-const at = (dir: string, rel: string) => `${dir === '/' ? '' : dir}/${rel}`
+// Windows の形のパス（C:\… ・ C:/… ・ \\server\share\…）かどうか。そうでなければ POSIX として今までどおり扱う
+const isWin = (p: string) => /^[A-Za-z]:/.test(p) || p.startsWith('\\\\')
+const lastSep = (p: string) => Math.max(p.lastIndexOf('/'), p.lastIndexOf('\\'))
+// つなぐ区切りは、dir が使っているほう（\ があって / が無ければ \）。dir 末尾の区切りは削る
+const at = (dir: string, rel: string) => {
+  const sep = dir.includes('\\') && !dir.includes('/') ? '\\' : '/'
+  return `${dir.replace(/[\\/]+$/, '')}${sep}${rel.replace(/\//g, sep)}`
+}
+// 1つ上のフォルダ。いちばん上（/、C:\、UNC の \\server\share）では dir と同じものを返す（呼ぶ側が止まる）
 const parentOf = (dir: string) => {
-  const i = dir.lastIndexOf('/')
-  return i > 0 ? dir.slice(0, i) : '/'
+  if (!isWin(dir)) {
+    const i = dir.lastIndexOf('/')
+    return i > 0 ? dir.slice(0, i) : '/'
+  }
+  const d = dir.replace(/[\\/]+$/, '')
+  const unc = /^\\\\[^\\/]+(?:[\\/][^\\/]+)?$/.test(d) // \\server か \\server\share（これより上は無い）
+  if (unc || /^[A-Za-z]:$/.test(d)) return dir
+  const i = lastSep(d)
+  if (i < 0) return dir
+  const up = d.slice(0, i)
+  return /^[A-Za-z]:$/.test(up) ? up + d[i] : up
 }
 
 // 作業中のフォルダから上へ最大6段たどり、本人のフォルダを探す。無ければ undefined（何も出さない）。

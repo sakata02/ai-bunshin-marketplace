@@ -44,6 +44,7 @@ type Src = {
   cfg?: unknown
   cwd?: string
   startFile?: boolean
+  home?: string // 本人のフォルダ（既定は HOME）。Windows の形（C:\\…）も渡せる
 }
 const CFG = { owner: '山田', owner_call: '山田さん', calendar: { type: 'ics' } }
 async function setup($: any, on: any, s: Src) {
@@ -52,6 +53,11 @@ async function setup($: any, on: any, s: Src) {
   if (!('cfg' in s)) s.cfg = CFG
   const titles: string[] = []
   const descs: string[] = []
+  const home = s.home ?? HOME
+  // fs.stat が答えるパスは、home と同じ区切りで組む（Windows の形なら \\）
+  const sep = home.includes('\\') && !home.includes('/') ? '\\' : '/'
+  const join = (rel: string) => home + sep + rel.replace(/\//g, sep)
+  const statPaths: string[] = []
   const n = { command: 0, tool: 0, open: 0, every: 0, writes: 0, tasksReads: 0, calReads: 0 }
   const want = s.hasFile
   on('command.register', (_: any, e: any) => {
@@ -69,9 +75,11 @@ async function setup($: any, on: any, s: Src) {
     return { value: { isPlaced: true } }
   })
   on('fs.stat', (_: any, e: any) => {
-    const p = String(e.path)
-    if (p === `${HOME}/設定/config.json`) return s.cfg === undefined ? { deny: 'none' } : { value: { mtimeMs: 1 } }
-    if (p === `${HOME}/00_タスク管理/data/tasks.json`) return s.hasFile ? { value: { mtimeMs: s.mtime } } : { deny: 'none' }
+    // テストの土台は、/ で始まらないパス（C:\… など）の前に今のフォルダをつなげて渡す。その前の部分を除く
+    const p = String(e.path).replace(/^.*?\/(?=[A-Za-z]:[\\/]|\\\\)/, '')
+    statPaths.push(p)
+    if (p === join('設定/config.json')) return s.cfg === undefined ? { deny: 'none' } : { value: { mtimeMs: 1 } }
+    if (p === join('00_タスク管理/data/tasks.json')) return s.hasFile ? { value: { mtimeMs: s.mtime } } : { deny: 'none' }
     return { deny: 'none' }
   })
   on('fs.read', (_: any, e: any) => {
@@ -95,13 +103,13 @@ async function setup($: any, on: any, s: Src) {
     return { value: undefined }
   })
   on('tool.call', () => ({ result: {} }))
-  on('session.cwd', () => ({ value: s.cwd ?? HOME }))
+  on('session.cwd', () => ({ value: s.cwd ?? home }))
   on('session.start', (_: any, e: any) => ({ cwd: e.cwd }))
   // 起動のときは tasks.json がある（本人のフォルダとして見つかる）。そのあと消す・壊す試しができる
   s.hasFile = s.startFile ?? true
-  await $.session.start({ cwd: s.cwd ?? HOME, surface: 'terminal', isInteractive: true })
+  await $.session.start({ cwd: s.cwd ?? home, surface: 'terminal', isInteractive: true })
   s.hasFile = want
-  return { titles, n, s, descs }
+  return { titles, n, s, descs, statPaths }
 }
 
 test('全部のタスクに切り替え、ページを送り、短い画面に戻る。tasks.json は書かない', async ($, on) => {
@@ -399,4 +407,74 @@ test('config に calendar があるとき：予定の節が出て、キャッシ
   expect(await ui.find({ type: 'Text', text: /ふつうの会議/ })).toBeTruthy()
   await ui.unmount()
   expect(n.calReads).toBeGreaterThan(0)
+})
+
+// Windows の形のパス（区切りは \）。$.session.cwd() が実際にどの区切りで返るかは確かめられないので、
+// \ でも / でも動くことをテストで押さえる
+const WHOME = 'C:\\work\\home'
+
+test('Windows のパス：05_開発\\x から上へたどって本人のフォルダを見つける', async ($, on) => {
+  const { n, statPaths } = await setup($, on, { data: mineData('山田'), home: WHOME, cwd: `${WHOME}\\05_開発\\x` })
+  expect(n.command).toBe(2)
+  expect(n.every).toBe(1)
+  expect(statPaths).toContain(`${WHOME}\\05_開発\\x\\設定\\config.json`)
+  expect(statPaths).toContain(`${WHOME}\\設定\\config.json`)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /■ 山田さん（今日まで）/ })).toBeTruthy()
+  await ui.unmount()
+})
+
+test('Windows のパス：/ 区切りの C:/work/home でも見つける', async ($, on) => {
+  const { n } = await setup($, on, { data: open(1), home: 'C:/work/home', cwd: 'C:/work/home/05_開発/x' })
+  expect(n.command).toBe(2)
+})
+
+test('Windows のパス：別のドライブ（D:\\other）では見つけない', async ($, on) => {
+  const { n, statPaths } = await setup($, on, { data: open(1), home: WHOME, cwd: 'D:\\other' })
+  expect(n.command).toBe(0)
+  expect(n.open).toBe(0)
+  // D: の中だけを調べて、C: のほうは見に行かない
+  expect(statPaths.length).toBeGreaterThan(0)
+  expect(statPaths.every(p => p.startsWith('D:\\'))).toBe(true)
+})
+
+test('Windows のパス：ドライブの根（C:\\）で止まる（上へ回り続けない）', async ($, on) => {
+  const { n, statPaths } = await setup($, on, { data: open(1), home: 'C:\\work\\home', cwd: 'C:\\' })
+  expect(n.command).toBe(0)
+  // C:\ の config.json を1回調べて終わり（根より上は無い）
+  expect(statPaths).toEqual(['C:\\設定\\config.json'])
+})
+
+test('Windows のパス：UNC（\\\\server\\share）は share より上へ行かない', async ($, on) => {
+  const { n, statPaths } = await setup($, on, { data: open(1), home: 'C:\\work\\home', cwd: '\\\\server\\share\\a\\b' })
+  expect(n.command).toBe(0)
+  expect(statPaths).toEqual([
+    '\\\\server\\share\\a\\b\\設定\\config.json',
+    '\\\\server\\share\\a\\設定\\config.json',
+    '\\\\server\\share\\設定\\config.json',
+  ])
+})
+
+// 調べるパス（fs.stat）は、どれも 設定/config.json か 00_タスク管理/data/tasks.json で終わる（区切りはどちらでも）
+const TARGET = /(設定[\\/]config\.json|00_タスク管理[\\/]data[\\/]tasks\.json)$/
+
+test('調べるパス（POSIX）：stat は config.json と tasks.json 以外を調べない', async ($, on) => {
+  const { statPaths } = await setup($, on, { data: open(1), cwd: `${HOME}/05_開発/x` })
+  expect(statPaths.length).toBeGreaterThan(2)
+  for (const p of statPaths) expect(p).toMatch(TARGET)
+  expect(statPaths.some(p => /設定\/config\.json$/.test(p))).toBe(true)
+  expect(statPaths.some(p => /tasks\.json$/.test(p))).toBe(true)
+  expect(statPaths.some(p => p.includes('\\'))).toBe(false)
+  // 見つからなかった場合も（フォルダの外）、調べるのは同じ2つだけ
+  await $.tool.call({ tool: 'Bash' })
+  for (const p of statPaths) expect(p).toMatch(TARGET)
+})
+
+test('調べるパス（Windows）：stat は config.json と tasks.json 以外を調べず、区切りは \\ にそろう', async ($, on) => {
+  const { statPaths } = await setup($, on, { data: open(1), home: WHOME, cwd: `${WHOME}\\05_開発\\x` })
+  expect(statPaths.length).toBeGreaterThan(2)
+  for (const p of statPaths) expect(p).toMatch(TARGET)
+  expect(statPaths.some(p => /設定\\config\.json$/.test(p))).toBe(true)
+  expect(statPaths.some(p => /tasks\.json$/.test(p))).toBe(true)
+  expect(statPaths.some(p => p.includes('/'))).toBe(false)
 })
