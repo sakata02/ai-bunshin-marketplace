@@ -412,6 +412,113 @@ def l11_child_finishing_normally_without_a_signal_is_unchanged():
     assert r.returncode == 3 and open(out).read().strip() == "hi", (r.returncode, r.stderr)
 
 
+def _kill_quiet(pid, sig=signal.SIGKILL):
+    try:
+        os.kill(pid, sig)
+    except OSError:
+        pass
+
+
+def _killpg_quiet(pgid, sig=signal.SIGKILL):
+    try:
+        os.killpg(pgid, sig)
+    except OSError:
+        pass
+
+
+@case
+def l12_parent_killed_with_9_stops_child_and_grandchild_and_cleans_up():
+    """A：親（daily_cycle.sh 役）が KILL されても trap は効かない。run_limited が親の死に気づいて、自分の claude 役と孫を止める。"""
+    name = "l12"
+    d = os.path.join(BASE, name)
+    logs = os.path.join(d, "logs")
+    os.makedirs(logs, exist_ok=True)
+    script, pidf = grandchild_script(name)
+    out = os.path.join(logs, ".out.abc123")
+    runpid = os.path.join(d, "run.pid")
+    # 親役：run_limited を背景で起動して、その PID を書き、wait する（上限は5分。親が死ななければ5分残る）
+    parent = os.path.join(d, "parent.sh")
+    open(parent, "w").write(f"#!/bin/sh\n'{sys.executable}' '{LIMITED}' --minutes 5 --grace 1 --stdout '{out}' -- '{script}' &\necho $! > '{runpid}'\nwait\n")
+    os.chmod(parent, 0o755)
+    par = subprocess.Popen([parent], start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    CHILDREN.append(par)
+    rl = pid_from(runpid)
+    gp = pid_from(pidf)
+    child = pid_from(os.path.join(d, "child.pid"))
+    try:
+        os.kill(par.pid, signal.SIGKILL)   # trap が効かない殺し方
+        par.wait(timeout=5)
+        assert wait_dead(gp, 8), "親が死んだのに、孫が残っている"
+        assert wait_dead(child, 8), "親が死んだのに、claude 役が残っている"
+        assert wait_dead(rl, 8), "親が死んだのに、run_limited が残っている"
+        assert not [f for f in os.listdir(logs) if f.startswith(".out.")], "一時ファイル（.out.*）が残っている"
+    finally:
+        _kill_quiet(rl)
+        _killpg_quiet(child)
+        _kill_quiet(gp)
+
+
+def _slow_cleanup_script(name):
+    """子は TERM で即終了。孫は TERM を受けると seen を作り、1秒かけて片づけて cleaned を作る（K の再現の形）。"""
+    d = os.path.join(BASE, name)
+    os.makedirs(d, exist_ok=True)
+    grand = os.path.join(d, "grand.sh")
+    open(grand, "w").write(f"#!/bin/sh\ntrap \"touch '{d}/seen'; sleep 1; touch '{d}/cleaned'; exit 0\" TERM\ntouch '{d}/ready'\nsleep 120 &\nwait\n")
+    os.chmod(grand, 0o755)
+    script = os.path.join(d, "run.sh")
+    open(script, "w").write(f"#!/bin/sh\n'{grand}' &\necho $! > '{d}/grand.pid'\necho $$ > '{d}/child.pid'\nwait\n")
+    os.chmod(script, 0o755)
+    return d, script
+
+
+@case
+def l13_grandchild_gets_grace_even_when_child_exits_at_once_on_term():
+    """K：子が TERM で先に終わっても、孫の片づけ（1秒）が終わるまで待ってから KILL する。"""
+    d, script = _slow_cleanup_script("l13")
+    out = os.path.join(d, "l13.out")
+    # 孫が trap を入れる前に時間切れにならないよう、ready を待ってから始める代わりに、上限を十分長く（3秒）とる
+    r = run_limited(["--minutes", "0.05", "--grace", "3", "--stdout", out], [script])
+    assert r.returncode == 124, (r.returncode, r.stderr[:200])
+    assert os.path.exists(os.path.join(d, "ready")), "孫の準備ができる前に止まった（テストの前提が崩れた）"
+    assert os.path.exists(os.path.join(d, "seen")), "孫が TERM を受けていない"
+    assert os.path.exists(os.path.join(d, "cleaned")), "孫の片づけが終わる前に KILL された（猶予が 0 秒）"
+    assert wait_dead(pid_from(os.path.join(d, "grand.pid"))), "孫が残っている"
+
+
+@case
+def l14_signal_during_timeout_stop_is_read_as_a_signal():
+    """J：時間切れの止め途中に信号が来たら、128+番号で戻り、一時ファイルも残らない（124 にしない）。"""
+    name = "l14"
+    d = os.path.join(BASE, name)
+    logs = os.path.join(d, "logs")
+    os.makedirs(logs, exist_ok=True)
+    termed = os.path.join(d, "termed")
+    script = os.path.join(d, "run.sh")
+    # TERM を受けたら印を作るが、終わらない（KILL まで止め途中が続く）
+    open(script, "w").write(f"#!/bin/sh\ntrap \"echo t > '{termed}'\" TERM\necho $$ > '{d}/child.pid'\necho partial\nwhile :; do sleep 1; done\n")
+    os.chmod(script, 0o755)
+    out = os.path.join(logs, ".out.abc123")
+    p = subprocess.Popen([sys.executable, LIMITED, "--minutes", "0.03", "--grace", "3", "--stdout", out, "--", script],
+                         start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    CHILDREN.append(p)
+    child = pid_from(os.path.join(d, "child.pid"))
+    try:
+        t0 = time.time()
+        while not os.path.exists(termed) and time.time() - t0 < 10:   # 時間切れの TERM が届いた＝止め途中
+            time.sleep(0.05)
+        assert os.path.exists(termed), "時間切れの TERM が子に届かない（テストの前提が崩れた）"
+        os.kill(p.pid, signal.SIGINT)
+        try:
+            rc = p.wait(timeout=15)
+        except subprocess.TimeoutExpired:
+            raise AssertionError("止め途中に信号を受けて、終わらない")
+        assert rc == 128 + signal.SIGINT, rc
+        assert not [f for f in os.listdir(logs) if f.startswith(".out.")], "一時ファイル（.out.*）が残っている"
+        assert wait_dead(child), "子が残っている"
+    finally:
+        _killpg_quiet(child)
+
+
 # ---------- 2. 時間の上限の設定 ----------
 print("## 2. 時間の上限の設定（auto.max_minutes）")
 

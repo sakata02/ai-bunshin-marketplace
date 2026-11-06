@@ -4,10 +4,11 @@
   run_limited.py --minutes N --stdout FILE [--grace 秒] -- コマンド 引数…
 
 - コマンドは新しいセッション（プロセスグループ）で起動する。上限を超えたら、そのグループだけに TERM を送り、
-  grace 秒（既定 5）待って、まだ残っていれば KILL。孫のプロセスも同じグループなので一緒に止まる。
+  グループが空になるまで最大 grace 秒（既定 5）待って、まだ残っていれば KILL。孫のプロセスも同じグループなので一緒に止まる。
   止める対象は自分が起動したグループだけ（名前で探して止める pkill -f などは使わない）
 - コマンドの標準出力は FILE に書く（標準エラーは呼び出し元のものをそのまま引き継ぐ）。標準入力は引き継ぐ
-- TERM・HUP・INT を受けたときも同じ：起動したグループを止め（TERM → grace 秒後に KILL）、FILE を消して、128+シグナル番号で終わる
+- TERM・HUP・INT を受けたときも同じ：起動したグループを止め（TERM → グループが空になるまで最大 grace 秒待つ → 残っていれば KILL）、FILE を消して、128+シグナル番号で終わる
+- 親が死んだとき（親の PID が変わったのを待つ間に見つけたとき）は HUP を受けたのと同じ（129）
 - 終了コード：上限で止めたら 124。ふつうに終わったらコマンドの終了コード（シグナルで終わったら 128+番号）
 """
 import argparse
@@ -30,15 +31,27 @@ def _killpg(pgid, sig):
 STOP_SIGNALS = (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)
 
 
+def _group_empty(pgid):
+    """グループにプロセスが残っていないか（signal 0 は送らず、あるかどうかだけ見る）。"""
+    try:
+        os.killpg(pgid, 0)
+    except (ProcessLookupError, PermissionError):   # PermissionError：残りがゾンビだけのとき macOS で出る
+        return True
+    return False
+
+
 def _stop_group(p, grace):
-    """自分が起動したグループだけを止める：TERM → grace 秒待つ → KILL。"""
+    """自分が起動したグループだけを止める：TERM → グループが空になるまで（最大 grace 秒）待つ → 残っていれば KILL。
+    子が先に終わっても、孫が TERM の片づけをする間は待つ（子の終了だけを見て KILL しない）。"""
     pgid = p.pid   # start_new_session=True なので、グループ ID は子の PID
     _killpg(pgid, signal.SIGTERM)
-    try:
-        p.wait(timeout=grace)
-    except subprocess.TimeoutExpired:
-        pass
-    _killpg(pgid, signal.SIGKILL)   # 親が先に終わっていても、残った孫を止める（グループが空なら何も起きない）
+    end = time.monotonic() + grace
+    while time.monotonic() < end:
+        p.poll()   # 子が終わっていれば回収する（ゾンビのままだとグループが空にならない）
+        if _group_empty(pgid):
+            break
+        time.sleep(0.1)
+    _killpg(pgid, signal.SIGKILL)   # 残った子・孫を止める（グループが空なら何も起きない）
     try:
         p.wait(timeout=grace)
     except subprocess.TimeoutExpired:
@@ -53,6 +66,7 @@ def run(cmd, seconds, stdout_path, grace=5.0):
     これで、確認と待ちの間に届いた信号を取りこぼさない（届いても、次の見に行くまでの最大 POLL 秒で気づく）。
     最初に届いた信号の番号を終了コードに使い、止める処理の途中に届いたものは無視する。"""
     state = {"sig": None}
+    ppid0 = os.getppid()   # 親が死ぬと、これが変わる（launchd などが親になる）
 
     def on_signal(signum, frame):
         if state["sig"] is None:
@@ -70,6 +84,8 @@ def run(cmd, seconds, stdout_path, grace=5.0):
             rc = None
             stop = None   # "signal" か "timeout"
             while True:
+                if state["sig"] is None and os.getppid() != ppid0:
+                    state["sig"] = signal.SIGHUP   # 親が死んだ（launchd の KILL など）：読む人がいないので、HUP を受けたときと同じ道で止める
                 if state["sig"] is not None:   # 起動する前に届いたものも、ここで見つかる
                     stop = "signal"
                     break
@@ -86,6 +102,8 @@ def run(cmd, seconds, stdout_path, grace=5.0):
                 stop = "signal"   # 待ちから戻る瞬間に信号を記録していた（子が先に終わった）。残った孫を止めるため、止める道に入れる
             if stop is not None:
                 _stop_group(p, grace)
+                if stop == "timeout" and state["sig"] is not None:
+                    stop = "signal"   # 時間切れの止め途中に信号が届いた：記録だけで終わらせず、信号として扱う（128+番号・一時ファイルを消す）
                 if stop == "signal":
                     try:
                         os.unlink(stdout_path)   # 止められた実行の一時ファイルは片付ける
