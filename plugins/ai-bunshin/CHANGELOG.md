@@ -5,17 +5,17 @@
 **更新のあと**：
 - **`install.sh` の再実行は要りません**。`install.sh` と、本人のフォルダの `scripts/auto/run.sh` は変えていません。`run.sh` はプラグインの中の `daily_cycle.sh` を呼び、`daily_cycle.sh` が同じプラグインの中の `run_limited.py` を呼ぶので、プラグインを更新するだけで、今回の直しは次の自動実行から効きます
 - **右のパネルを入れたい人だけ**：ターミナルで `claude plugin install ai-bunshin-panel@ai-bunshin-marketplace --scope project` を実行し、Claude を開き直す。入れない人は何も変わらない（デスクトップアプリの Code タブで動くかは確かめていないので、案内はターミナル版だけ）
-- **控え（ローカル Git）**：本人のフォルダを Git で記録している人にだけ効く。夕方の自動の振り返りのあとに、1日1回コミットする。記録していない人は何も変わらない（コミットも `git init` もしない）。記録している人は、`git config user.name` と `git config user.email` に値があるか確かめる。**無いとコミットが「名前が分からない」で失敗する**（自動実行は止まらず、ログに「控え：失敗した」と1行出る）。設定は `git config --global user.name "お名前"`・`git config --global user.email "メールアドレス"`
+- **控え（ローカル Git）**：本人のフォルダを Git で記録している人にだけ効く。夕方の自動の振り返りのあとに、1日1回コミットする。記録していない人は何も変わらない（コミットも `git init` もしない）。記録している人は、`git config user.name` と `git config user.email` に値があるか確かめる。**無いとコミットが「名前が分からない」で失敗する**（自動実行は止まらず、ログに「控え：失敗した」と1行出る）。設定は `git config --global user.name "お名前"`・`git config --global user.email "メールアドレス"`。すでに Git で記録している人は、`.gitignore` が自動では更新されません。プラグインの `templates/gitignore.txt` と比べ、足りない行（特に `00_タスク管理/data/ng_log.jsonl`・`scripts/auto/.lock`・`scripts/auto/logs/.out.*`・`.mcp.json`・`.claude/settings.local.json`・`.env*`）を、次の夕方より前に足してください。すでにコミットされているものは、`.gitignore` に足すだけでは外れません。`git rm --cached <ファイル>` で記録から外してください（ファイルは消えません）。`/ai-bunshin:setup` をやり直すと、足すとよい行を案内します
 
 - 文字の項目に一覧や { } が入っても、Excel の更新が止まらない（T159）：`tasks.json` の文字の項目（`related`・`note`・`title` など）に、文字ではなく一覧や { } が入っていても、`update_dashboard.py` が止まらない。読むときに文字にそろえ、`tasks.json` そのものは書き換えない。`--task` は、本人が書いた実物の形のまま出す。Excel に書けない制御文字は除く。**検査（validate）で止める方式にはしなかった**：止めて知らせると、直すまで Excel の更新がまた止まる。なぜ：一覧が入った項目のせいで、Excel の更新が半日止まったため。テスト：`tests/test_text_fields.py`（`tests/test_dashboard_robust.py` にも追加）
 - 自動実行と見張りの小さな直し（T121）：
   - `run_limited.py`：親が先に死んだら子を止める。時間切れの止めている途中に届いた信号や、親の死も拾う。孫のプロセスには片づけの猶予を与え、親が死んだときも一時ファイルを残さない
   - `ng_guard.py`：BOM 付き・文字化けした `config.json` でも、見張りと書き換えの判定が同じ関数で同じように読む。CRLF の複数行 Edit を止めすぎない。テストの時間の基準は壁時計でなく CPU 時間で見る（負荷の高い日に誤って落ちない）
-  - hook：`config.json` と `tasks.json` が両方壊れたときも、終了コード2で止める（黙って通さない）
+  - hook：`config.json` と `tasks.json` が両方壊れたときも、終了コード2で Claude に知らせ、直させる（黙って通さない）
   - `setup_settings.py`：`settings.json` が想定外の形のとき、日本語で案内して止まる
   - ガントの列の数を、見出しの日数に合わせた。setup の tzdata の案内の順（`python` を先、動かなければ `py -3`）を直した
   - 範囲外にしたもの：Windows の相対パスの表示、`run_limited.py` の `finally` のあとの隙間（次回以降）
-  - なぜ：D 検証で見つかった、手元の環境では起きにくい穴を先にふさぐため。テスト：`tests/test_long_run_watch.py`・`tests/test_ng_guard.py`・`tests/test_dashboard_robust.py`
+  - なぜ：レビューで見つかった、手元の環境では起きにくい穴を先にふさぐため。テスト：`tests/test_long_run_watch.py`・`tests/test_ng_guard.py`・`tests/test_dashboard_robust.py`
 - 朝の計画の材料に「自動実行で使える道具・書けない場所」を足した（T141）：`update_dashboard.py --plan-context` の出力に節を足した。`daily_cycle.sh` は**実行せず**、決まった書き方の行だけを読む（白リスト）。分かれ目のあとの代入や関数の中の代入、読めない変数は、「なし」と出さずに「読めませんでした：行」と出す。なぜ：計画が、自動実行では使えない道具や書けない場所を前提にして、あとで止まるのを防ぐため。テスト：`tests/test_plan_tools.py`
 - ローカル Git の控えを共通の決まりに（T077）：夕方の自動の振り返りのあと、`daily_cycle.sh` が本人のフォルダを1日1回コミットする（メッセージは「YYYY-MM-DD 振り返り」。本人のフォルダそのものがリポジトリのときだけ。親のフォルダのリポジトリなら何もしない。時間の上限つきで動かし、失敗しても自動実行は止めない）。会話の振り返りの最後にもコミットする。戻すときは1ファイルだけ（`git checkout <コミット> -- <ファイル>`。`reset --hard` は使わない）。push は本人が行う。`/ai-bunshin:setup` が、Git があれば `git init` と `.gitignore` の雛形（`templates/gitignore.txt`。すでにある `.gitignore` は上書きしない）を置き、git の名前とメールがあるかを確かめる。詳しい手順は `rules/details/backup.md`（10個目の詳細ファイル）。なぜ：直しすぎたときに、1ファイルだけ戻せるようにするため。外には何も送らない。テスト：`tests/test_backup_commit.py`・`tests/test_rules_split.py`
 - 右のパネルを共通のプラグイン `ai-bunshin-panel`（1.0.0-beta.6）に（T076）：Claude の右に、今日のやること・予定・お願いを出す（`/yarukoto` で今日の一覧、`/task <ID>` でそのタスクの詳細）。本人のフォルダ（`設定/config.json` と `tasks.json` がある所）の中でだけ出て、ほかのフォルダでは出ない。名前は `config.json` から読む。予定はカレンダーをつないだ人だけに出し、時刻が分からない予定は「時刻不明」と出す。Windows のパスでも上のフォルダへたどる。配布元の `marketplace.json` に載せ、README に入れ方を足した。ターミナル版で案内（デスクトップアプリの Code タブは未確認）。なぜ：それまで一人の環境にしか無かったパネルを、使いたい人が入れられるようにするため。テスト：`plugins/ai-bunshin-panel/register.test.tsx`（`claude plugin test`）
