@@ -1618,6 +1618,167 @@ def latest_review(today):
     return path, digest
 
 
+# ---- 自動実行（daily_cycle.sh）で使える道具・書けない場所（文字として読むだけ。daily_cycle.sh は実行しない） ----
+_ASSIGN_RE = re.compile(r'^\s*(?:export\s+|local\s+)?(TOOLS|DENY)\+?=')
+_PHASE_IF_RE = re.compile(r'^\s*if \[ "\$PHASE" = "do" \]; then\b')
+
+
+def _read_quoted(text):
+    """`"…"` の中身を返す（\\" などのエスケープを外す）。終わりの " の後ろが空か # の注釈でなければ None"""
+    if not text.startswith('"'):
+        return None
+    out, i = [], 1
+    while i < len(text):
+        c = text[i]
+        if c == "\\" and i + 1 < len(text):
+            out.append(text[i + 1])
+            i += 2
+            continue
+        if c == '"':
+            rest = text[i + 1:].strip()
+            return "".join(out) if (not rest or rest.startswith("#")) else None
+        out.append(c)
+        i += 1
+    return None
+
+
+def _apply_assign(line, cur, env):
+    """TOOLS・DENY の代入1行を、決まった3つの形だけ解く。X="…"（$X・$DASH・$PLUGIN_ROOT を含んでよい）／X="$X,…"／X="${X/パターン/}"。
+    返り値：(名前, 新しい値)。読めなければ None"""
+    m = re.match(r'^\s*(?:export\s+|local\s+)?(TOOLS|DENY)=(.*)$', line.rstrip("\n"))
+    if not m:
+        return None
+    name, rhs = m.group(1), m.group(2)
+    body = _read_quoted(rhs)
+    if body is None or "$(" in body or "`" in body:
+        return None
+    mt = re.fullmatch(r'\$\{' + name + r'/([^/]+)/\}', body)
+    if mt:  # 取り除く形（最初の1か所）
+        pat = mt.group(1)
+        if any(ch in pat for ch in "*?[]\\"):
+            return None
+        return name, cur[name].replace(pat, "", 1)
+    if "${" in body and not re.fullmatch(r'(?:[^$]|\$[A-Za-z_]\w*|\$\{(?:TOOLS|DENY|DASH|PLUGIN_ROOT)\})*', body):
+        return None
+    vals = {"TOOLS": cur["TOOLS"], "DENY": cur["DENY"], **env}
+    body = re.sub(r'\$\{(\w+)\}|\$(\w+)', lambda x: vals.get(x.group(1) or x.group(2), x.group(0)), body)
+    return name, body
+
+
+def _split_items(value):
+    """カンマで分ける（かっこの中のカンマでは分けない）"""
+    items, depth, buf = [], 0, ""
+    for c in value:
+        if c == "(":
+            depth += 1
+        elif c == ")":
+            depth = max(0, depth - 1)
+        if c == "," and depth == 0:
+            if buf:
+                items.append(buf)
+            buf = ""
+        else:
+            buf += c
+    if buf:
+        items.append(buf)
+    return items
+
+
+def _copy_vals(d):
+    return {k: (v[0], list(v[1])) for k, v in d.items()}
+
+
+def read_auto_tools(cycle_path):
+    """daily_cycle.sh の TOOLS・DENY を文字として読み、計画・実行・（計画から続けて実行に入るとき）の値を返す。
+    返り値：{"phases": {"plan": {"TOOLS": (値, [行番号]), "DENY": …}, "do": …, "cont": …（あれば）}, "bad": [行番号], "notes": [文]}"""
+    env = {"DASH": str(PLUGIN_ROOT / "scripts" / "update_dashboard.py"), "PLUGIN_ROOT": str(PLUGIN_ROOT)}
+    lines = Path(cycle_path).read_text(encoding="utf-8").splitlines()
+    state = {k: ("", []) for k in ("TOOLS", "DENY")}   # 分かれ目の前の値
+    branch = {"do": None, "plan": None}
+    bad, notes = [], []
+    mode, depth, seen_block, cont = "base", 0, False, None   # base → then/else（if の中）→ after（fi のあと）
+    for no, raw in enumerate(lines, 1):
+        if raw.lstrip().startswith("#"):
+            continue
+        if mode == "base" and _PHASE_IF_RE.match(raw):
+            mode, depth, seen_block = "then", 1, True
+            branch = {"do": _copy_vals(state), "plan": _copy_vals(state)}
+            continue
+        if mode in ("then", "else"):
+            if re.match(r'^\s*if\b', raw):
+                depth += 1
+            elif re.match(r'^\s*fi\b', raw):
+                depth -= 1
+                if depth == 0:
+                    mode = "after"
+                    cont = _copy_vals(branch["plan"])
+                    continue
+            elif depth == 1 and re.match(r'^\s*else\b', raw):
+                mode = "else"
+                continue
+        if not _ASSIGN_RE.match(raw):
+            continue
+        if mode in ("then", "else"):
+            target = branch["do" if mode == "then" else "plan"]
+        elif mode == "after":
+            target = cont
+        else:
+            target = state
+        cur = {k: v[0] for k, v in target.items()}
+        r = _apply_assign(raw, cur, env)
+        if r is None:
+            bad.append(no)
+            continue
+        target[r[0]] = (r[1], target[r[0]][1] + [no])
+    if not seen_block:
+        notes.append('計画と実行の分かれ目（if [ "$PHASE" = "do" ]）が見つかりませんでした。使う前に1回ためしてください')
+        branch = {"do": state, "plan": _copy_vals(state)}
+    phases = {"plan": branch["plan"], "do": branch["do"]}
+    if cont is not None and any(cont[k][1] != branch["plan"][k][1] for k in cont):
+        phases["cont"] = cont
+    return {"phases": phases, "bad": bad, "notes": notes}
+
+
+def _nos(nos):
+    return "・".join(f":{n}" for n in dict.fromkeys(nos)) or "（行なし）"
+
+
+def auto_tools_lines(cycle_path=None):
+    """--plan-context の最後の節。daily_cycle.sh が読めなくても落ちない"""
+    cycle_path = Path(cycle_path) if cycle_path else PLUGIN_ROOT / "scripts" / "auto" / "daily_cycle.sh"
+    title = "## 自動実行で使える道具・書けない場所（daily_cycle.sh:行番号 から。実行はせず文字として読んだ）"
+    try:
+        res = read_auto_tools(cycle_path)
+    except Exception as e:  # 見つからない・読めない
+        return ["", title, f"- daily_cycle.sh（{cycle_path}）を読めませんでした（{type(e).__name__}）。使う道具と書けない場所は、使う前に1回ためしてください"]
+    out = ["", title]
+    labels = {"plan": "計画", "do": "実行", "cont": "実行（計画から続けて入るとき）"}
+    shown = {}
+    for key, ph in res["phases"].items():
+        tools, deny = ph["TOOLS"], ph["DENY"]
+        edits = [x for x in _split_items(deny[0]) if x.startswith("Edit(")]
+        stops = [x for x in _split_items(deny[0]) if not x.startswith("Edit(")]
+        shown[key] = (tools[0], deny[0])
+        out.append(f"- {labels[key]}　使える道具（daily_cycle.sh{_nos(tools[1])}）：{', '.join(_split_items(tools[0])) or '（読めませんでした）'}")
+        out.append(f"  　止める道具（daily_cycle.sh{_nos(deny[1])}）：{', '.join(stops) or 'なし'}")
+        out.append(f"  　書けない場所（daily_cycle.sh{_nos(deny[1])}）：{', '.join(edits) or 'なし'}")
+    if "cont" in res["phases"]:
+        for k, name in ((0, "使える道具"), (1, "止める道具・書けない場所")):
+            a, b = set(_split_items(shown["do"][k])), set(_split_items(shown["cont"][k]))
+            if a != b:
+                out.append(f"- 注意：{name}が、実行と、計画から続けて実行に入るときで違う。実行だけにある：{', '.join(sorted(a - b)) or 'なし'}／続けてのときだけにある：{', '.join(sorted(b - a)) or 'なし'}")
+    for n in res["bad"]:
+        out.append(f"- daily_cycle.sh:{n} の行は読めませんでした。使う前に1回ためしてください")
+    for t in res["notes"]:
+        out.append(f"- {t}")
+    out += [
+        "- 書けない場所の見方：Edit(…) の決まりは Write など、ファイルを書く道具すべてに効く（Claude Code の決まり）。パターンは本人のフォルダから見たもの（`//` で始まるのは絶対パス）。指示書の書き先のパスを、このパターンと照らす",
+        "- 次は定数では分からないので、計画で使う前に1回ためす：自動モードかどうかの判定、NG の見張り（ng_guard）が止めるか（`python3 <プラグイン>/scripts/ng_guard.py --explain \"<コマンド>\"`）",
+    ]
+    return out
+
+
+
 def plan_context(today, cal, ctx):
     """9時のプランニング（と実行中の追加判断）の材料。1行目が OPEN か SKIP。"""
     data, tasks = ctx["data"], ctx["tasks"]
@@ -1695,6 +1856,7 @@ def plan_context(today, cal, ctx):
         lines.append(f"- {t['id']} [{t.get('kind')}] {t['title']} 期日 {fmt_jp(parse_date(t.get('due')))}"
                      + (f" → 待っているタスク：{'、'.join(waiting)}" if waiting else ""))
     lines += ["", "## 実施中の Try", active_tries_text() or "- なし"]
+    lines += auto_tools_lines()
     return "\n".join(lines)
 
 
