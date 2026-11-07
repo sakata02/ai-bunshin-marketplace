@@ -112,6 +112,8 @@ def expected(fx):
         (pl, "dir", "S02 プラグイン（元）"),
         (h / "scripts/auto/run.sh", "file", "S04 run.sh"),
         (h / "scripts/auto/daily_cycle.sh", "file", "S04 daily_cycle.sh"),
+        (h / "scripts/hooks", "dir", "S04・X6 hook のフォルダ"),
+        (h / "scripts/mods", "dir", "S04・X6 mod のフォルダ"),
         (repo / ".git/hooks", "dir", "X12 hooks"),
         (repo / ".git/config", "file", "X12 config"),
     ]
@@ -208,6 +210,24 @@ def test_stay_writable_guard():
     pf.write_text(json.dumps(spec, ensure_ascii=False), encoding="utf-8")
     rc, out, err = run(fx, extra=["--paths-file", str(pf)])
     check(rc == 1, "must_stay_writable が無い一覧は作らない")
+
+
+def test_hooks_and_mods_protected_even_if_missing():
+    """X6：hook と mod のフォルダは、無くても守る（囲いの中で作られたあとに hook・mod として動くのを防ぐ）"""
+    fx = mkfixture()
+    for d in ("hooks", "mods"):
+        check(not (fx["home"] / "scripts" / d).exists(), "テスト自体：scripts/%s は無い状態から" % d)
+    s = ok_json(fx)
+    for d in ("hooks", "mods"):
+        p = fx["home"] / "scripts" / d
+        check(nfc(str(p)) in deny_write(s), "X6 無い scripts/%s も denyWrite にある" % d)
+        check(rule(nfc(str(p)), "dir") in deny_edit(s), "X6 無い scripts/%s も Edit の deny にある" % d)
+    # あっても同じ（実在する形）
+    (fx["home"] / "scripts/hooks").mkdir(); (fx["home"] / "scripts/mods/sakata-tasks").mkdir(parents=True)
+    s2 = ok_json(fx)
+    check(s2 == s, "フォルダがあっても無くても同じ出力")
+    # logs・tasks.json とは重ならない
+    check(not any(x.rstrip("/").endswith("/scripts/auto/logs") for x in deny_write(s2)), "hooks・mods を入れても logs は書ける")
 
 
 # --- 5. 作らないもの（S08・S10・X9）---
@@ -411,7 +431,7 @@ def test_no_writes():
 def test_paths_json_shape():
     spec = json.loads(PATHS_JSON.read_text(encoding="utf-8"))
     ids = {e["id"] for e in spec["entries"]}
-    want = {"A-settings", "A-claude-md", "A-ai-bunshin-dir", "B-input", "C-claude", "D-plugin-cache", "D-plugin-source", "S04-run-sh", "S04-daily-cycle"}
+    want = {"A-settings", "A-claude-md", "A-ai-bunshin-dir", "B-input", "C-claude", "D-plugin-cache", "D-plugin-source", "S04-run-sh", "S04-daily-cycle", "S04-hooks", "S04-mods"}
     check(ids == want, "一覧の id が決定どおり：差 %s" % (ids ^ want))
     check(spec["add_dir_git"] == [".git/hooks", ".git/config"], "X12 add_dir_git")
     stay = {(m["base"], m["path"]) for m in spec["must_stay_writable"]}

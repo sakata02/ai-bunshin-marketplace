@@ -10,7 +10,9 @@
     {"id": "D-plugin-cache",   "base": "user_home",   "path": ".claude/plugins",        "kind": "dir",  "why": "S02 プラグイン（Claude Code が読み込むコピー）"},
     {"id": "D-plugin-source",  "base": "plugin_root", "path": ".",                      "kind": "dir",  "why": "S02 プラグイン（元）。T097 X6・X12"},
     {"id": "S04-run-sh",       "base": "home",        "path": "scripts/auto/run.sh",    "kind": "file", "why": "S04 launchd が囲いの外で動かす入口"},
-    {"id": "S04-daily-cycle",  "base": "home",        "path": "scripts/auto/daily_cycle.sh", "kind": "file", "why": "S04 launchd が囲いの外で動かす（旧い入口）"}
+    {"id": "S04-daily-cycle",  "base": "home",        "path": "scripts/auto/daily_cycle.sh", "kind": "file", "why": "S04 launchd が囲いの外で動かす（旧い入口）"},
+    {"id": "S04-hooks",        "base": "home",        "path": "scripts/hooks",          "kind": "dir",  "why": "S04 hook が囲いの外で動かす（T097 X6）。無いフォルダも入れる（あとで作られても守る）"},
+    {"id": "S04-mods",         "base": "home",        "path": "scripts/mods",           "kind": "dir",  "why": "S04 Claude Code が読み込む mod（囲いの外。T097 X6）。無いフォルダも入れる"}
   ],
   "add_dir_git": [".git/hooks", ".git/config"],
   "add_dir_git_why": "T097 X12 config の dev.projects で --add-dir に足すリポジトリごと",
