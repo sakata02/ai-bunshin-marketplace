@@ -4,8 +4,10 @@
 
 **更新のあと**：
 - **今使っている人は `.gitignore` に `00_タスク管理/コックピット.html` を1行足す**（予定の件名が HTML に入るため。`calendar_cache.json` と同じ扱い。雛形の `.gitignore` は新しく使い始める人にだけ効く）
+- **右のパネル（ai-bunshin-panel）を入れている人**：ai-bunshin と ai-bunshin-panel の両方を更新し、そのあと古い ai-bunshin-panel を外す（外し方は下の T197 の項目）。片方だけだと、パネルが2つ出る場合があります（出方は確かめていません）
+- **開いている会話は、開き直すまで前のまま**です（更新のあとは Claude を開き直してください）
 
-- **デスクトップでも「コックピット見せて」でタスク表**（T196）：スキル `cockpit`（`/ai-bunshin:cockpit`）を足した。ターミナルでは右のパネルに出し（道具 `open_task`）、使えない所（デスクトップアプリなど）では `scripts/cockpit_html.py` が `00_タスク管理/コックピット.html` を1つ作って、既定のブラウザで開く（開くかは【未確認】）。外の読み込みも JavaScript も無い1ファイルで、tasks.json・forecast.json・config.json・calendar_cache.json・改善ログを読むだけ。内蔵のブラウザで `file://` を開けるかは試すだけで、開けなければパスを伝える（開けるかは【未確認】）。アーティファクトは使わない。自動実行（`claude -p`）の中では使わない。パネル（`register.tsx`）と `update_dashboard.py` は変えていない
+- **デスクトップでも「コックピット見せて」でタスク表**（T196）：スキル `cockpit`（`/ai-bunshin:cockpit`）を足した。ターミナルでは右のパネルに出し（道具 `open_task`）、使えない所（デスクトップアプリなど）では `scripts/cockpit_html.py` が `00_タスク管理/コックピット.html` を1つ作り、スキルの手順で既定のブラウザで開く（開くかは【未確認】）。外の読み込みも JavaScript も無い1ファイルで、tasks.json・forecast.json・config.json・calendar_cache.json・改善ログを読むだけ。内蔵のブラウザで `file://` を開けるかは試すだけで、開けなければパスを伝える（開けるかは【未確認】）。アーティファクトは使わない。自動実行（`claude -p`）の中では使わない。T196 では、パネル（`register.tsx`）と `update_dashboard.py` は変えていない
 - **パネル（`register.tsx`）を変えたら、`cockpit_html.py` とそのテスト（`tests/test_cockpit_html.py`）も見る**（テストは、パネルのテスト `register.test.tsx` の値を写している）
 - **右のパネルを入れている人へ**（T197）：パネルを本体（ai-bunshin）に入れた。更新するときは ai-bunshin と ai-bunshin-panel の両方を更新する（片方だけだと、パネルが2つ出る場合があります。出方は確かめていません）。古い ai-bunshin-panel は更新すると空になるので外してよい。外し方：ターミナルは `/plugin` で、デスクトップはプラグインの設定画面でオフ（画面の道順は【未確認】）
 - 自動実行（`daily_cycle.sh` の `claude -p`）で読める・書ける場所を絞った（T193。安全の確かめ T099 の H1）：許可の一覧から、場所の指定なしの `Read`・`Write`・`Edit`・`Glob`・`Grep` を外した。書ける場所は `--permission-mode acceptEdits` が決める＝本人のフォルダと `--add-dir`（`config.json` の `dev.projects`）の中だけで、外は自動実行では断られる（`.zshrc`・`.gitconfig`・`.claude/` などの保護された場所も。自動記憶は、書く道具（Edit・Write）の deny と、囲いの守る先（Bash の中の Python）の両方で止めた。読むのは残す＝下）。読める場所も同じ範囲と、プラグインの中（読むだけ。`sandbox_settings.py --print-read-rules` が作る `Read(//…/**)`。リンク経由で呼ばれたときは両方の名前）。長い出力の退避（tool-results）は、規則を足さなくても読める。3つの段（計画・実行・振り返り）とも同じ
@@ -13,8 +15,9 @@
   - `--add-dir` が広すぎる先（`/`・ホーム・ホームの祖先・本人のフォルダの祖先）は外し、ログに1行（パスなし）。本人が `config.json` に書いたホームの中の先（`~/.ssh` など）は外さない（`config.json` は AI が書けない＝本人の意思）
   - Claude Code の自動記憶（`~/.claude/projects/*/memory/`）は、自動実行では**Edit・Write の道具で書くのだけ止める**（読むのは残す。本人の `MEMORY.md` は自動実行でも読まれる）。`run_claude` の `claude -p` の起動の `--disallowedTools` にだけ `Edit(//<ホーム>/.claude/projects/*/memory/**)`（`sandbox_settings.py --print-memory-deny` が作る。NFC・NFD・実体の形。`CLAUDE_CONFIG_DIR` があればそちらも。Write にも効く）を足す。囲いの点検の `claude` の止める道具にも同じものが入る（点検は本番の `DENY` を全部含む決まりで、`Write`・`Edit` を丸ごと止めているので許可は広がらない）。環境変数 `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` は読み込みも止めるので使わない。実行の段の囲いの中の Python（`Bash(python3:*)`）からも書けない（E8：囲いの既定でも書けないことを確かめ、念のため守る先にも `~/.claude/projects` を足した。Claude Code 2.1.319・1台の Mac で、点検が通らなかったため本番と同じ引数を手で組んで確認）。点検で守る先に書けてしまった日に残る、名前が `.ai-bunshin-canary-` で始まる空のファイルは、`~/.claude/projects` にも残りうる（`/resume` などの一覧に出るかは【未確認】）。止めないと、自動実行で読んだ資料や予定の中の指示が記憶に書き込まれて、次の対話に読み込まれる（E7 で、自動実行の AI に「記憶に保存して」と頼むと書けることを確認）
   - 朝の計画の材料（`--plan-context`）の道具の節に、ファイルを読む・書く・直すの範囲の1行を足した（上の一覧に `Read` などが無くなったことで「使えない」と読まれないように）
-  - 変えていないもの：囲いの点検の `claude` の許可、`Bash(python3:*)` の囲い（T119）の仕組み（守る先は T201 で `~/.claude/projects` を足した）、README の注意書き、見張り（`ng_guard`）、`settings.json`（外れない守りへの追加はしない）。
+  - 変えていないもの：囲いの点検の `claude` の許可、`Bash(python3:*)` の囲い（T119）の仕組み（守る先は T201 で `~/.claude/projects` を足した）、見張り（`ng_guard`）、`settings.json`（外れない守りへの追加はしない）。
   - テスト：新しく `tests/test_auto_paths.py`（最終の許可に素の `Read` などが無い・`--add-dir` の絞り込み・読み取りの規則・計画の材料の1行）
+- README の「外部に送ることはありません」の注意書きに例外を足した（T200）：Mac の自動実行では、朝の計画に続く「実行」の段だけ、AI が確認なしで Web を読む（`WebFetch`・`WebSearch`）。計画の段と夕方の振り返りでは止めている
 
 ## 1.0.0-beta.7 — 2026-11-07（使い方の型（シンプル／フル）・合格のあとの再確認・右のパネルにガント・カテゴリ・試し中の Try・自動実行の囲い）
 
