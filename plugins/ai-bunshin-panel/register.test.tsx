@@ -1598,3 +1598,106 @@ test('Try（T3）：open_task の説明に、Y で始まる Try の ID も渡せ
   expect(t?.description).toContain('Y20261106-2')
   expect(t?.description).toContain('Y で始まる')
 })
+
+// ---------- T191：短い画面の区切りの中を、案件のカテゴリ（◇ A案件 など）で分ける ----------
+const gx = (id: string, title: string, over: Record<string, unknown> = {}) => ({
+  id,
+  title,
+  assignee: '山田',
+  status: 'ToDo',
+  priority: Number(id.slice(1)),
+  ...over,
+})
+const GROUPED = {
+  tasks: [
+    // 今日まで：承認待ち T005（C）が一番上。あとは期日の順（同じ期日は入れた順）→ 未分類・A・B・A
+    gx('T001', '期限切れ・分類なし', { due: '2026-11-01' }),
+    gx('T002', '期限切れ・A', { due: '2026-11-01', category: 'A案件' }),
+    gx('T003', '今日・B', { due: '2026-11-02', category: 'B案件' }),
+    gx('T004', '今日・A', { due: '2026-11-02', category: 'A案件' }),
+    gx('T005', 'ルール変更の承認（1件）', { due: '2026-11-02', category: 'C案件' }),
+    // 今日の計画（計画の並びのまま）：B（済）・A・B
+    gx('T011', '計画 1', { assignee: 'dev-a', category: 'B案件', status: '完了' }),
+    gx('T012', '計画 2', { assignee: 'dev-a', category: 'A案件' }),
+    gx('T013', '計画 3', { assignee: 'dev-a', category: 'B案件' }),
+    // これから（順位の順。6 件で切る）：分類なし・A・A・B・A・B ／ 切れる 2 件は C
+    gx('T021', '次 1', { assignee: 'dev-a' }),
+    gx('T022', '次 2', { assignee: 'dev-a', category: 'A案件' }),
+    gx('T023', '次 3', { assignee: 'dev-a', category: 'A案件' }),
+    gx('T024', '次 4', { assignee: 'dev-a', category: 'B案件' }),
+    gx('T025', '次 5', { assignee: 'dev-a', category: 'A案件' }),
+    gx('T026', '次 6', { assignee: 'dev-a', category: 'B案件' }),
+    gx('T027', '次 7', { assignee: 'dev-a', category: 'C案件' }),
+    gx('T028', '次 8', { assignee: 'dev-a', category: 'C案件' }),
+    // 近いうちに（期日の順）：A・B・A
+    gx('T031', '近 1', { due: '2026-11-03', category: 'A案件' }),
+    gx('T032', '近 2', { due: '2026-11-04', category: 'B案件' }),
+    gx('T033', '近 3', { due: '2026-11-05', category: 'A案件' }),
+  ],
+  daily_sprints: [{ date: '2026-11-02', planned: ['T011', 'T012', 'T013'] }],
+}
+// 区切りの中を、小見出し（◇ …）・空行（_）・行（ID）の並びにして返す。区切りの終わりの空き（次の見出しの前）は除く
+const shape = (ts: string[], name: string) => {
+  const i = ts.findIndex(t => t.startsWith(`■ ${name}`))
+  const rest = ts.slice(i + 1)
+  const j = rest.findIndex(t => t.startsWith('■ ') || t.startsWith('お願い 残り'))
+  const body = (j < 0 ? rest : rest.slice(0, j)).map(t => (t === ' ' ? '_' : t.startsWith(' ◇ ') ? t : (/^(?:\[[^\]]*\] )?(T\d+) /.exec(t)?.[1] ?? t)))
+  while (body.at(-1) === '_') body.pop()
+  return body
+}
+
+test('T191 短い画面：4 つの区切りの中を ◇ カテゴリで分ける。カテゴリは区切りで最初に出てくる順・未分類は最後・間に空行 1 行・一番上の行は一番上のまま', async ($, on) => {
+  await setup($, on, { data: GROUPED, cal: CAL_OK })
+  const ui = await mountAll($, 60, 60)
+  const ts = await texts(ui)
+  // 区切りの見出しと順は今のまま（分けるのは中だけ）
+  expect(heads(ts)).toEqual(['■ 今日の予定（09:00 取得）', '■ 山田さん（今日まで）', '■ AI（今日の計画）', '■ AI（これから）', '■ 近いうちに（山田さん）'])
+  // 今日まで：承認（C）が一番上 → C が最初のカテゴリ。ほかは A・B の順。未分類（T001 は期日が一番早いが）は最後
+  expect(shape(ts, '山田さん（今日まで）')).toEqual([' ◇ C案件', 'T005', '_', ' ◇ A案件', 'T002', 'T004', '_', ' ◇ B案件', 'T003', '_', ' ◇ 未分類', 'T001'])
+  // 今日の計画：B → A（計画の並びで最初に出た順）。B の中は T011・T013 のまま
+  expect(shape(ts, 'AI（今日の計画）')).toEqual([' ◇ B案件', 'T011', 'T013', '_', ' ◇ A案件', 'T012'])
+  // これから：先に 6 件で切ってから分ける（T027・T028 は出ない）。未分類（T021 が先頭）は最後
+  expect(shape(ts, 'AI（これから）')).toEqual([' ◇ A案件', 'T022', 'T023', 'T025', '_', ' ◇ B案件', 'T024', 'T026', '_', ' ◇ 未分類', 'T021', 'ほか 2 件'])
+  expect(shape(ts, '近いうちに')).toEqual([' ◇ A案件', 'T031', 'T033', '_', ' ◇ B案件', 'T032'])
+  await ui.unmount()
+})
+
+test('T191 短い画面：行の形・色・[済] の薄い表示・「ほか N 件」・押すと詳細は今のまま。小見出しは太字で 1 行に切れる', async ($, on) => {
+  await setup($, on, { data: GROUPED, cal: CAL_OK })
+  const ui = await mountAll($, 60, 60)
+  const ts = await texts(ui)
+  expect(ts).toContain('[承認] T005 ルール変更の承認（1件）（11/2）')
+  expect(ts).toContain('[超過] T002 期限切れ・A（11/1）')
+  expect(ts).toContain('[今日] T004 今日・A')
+  expect(ts).toContain('[済] T011 計画 1')
+  expect(ts).toContain('[ToDo] T022 次 2')
+  expect(ts).toContain('T031 近 1（11/3）') // 近いうちは印が空 → 印なしで期日付き（今のまま）
+  const all = (await ui.findAll({ type: 'Text' })) as any[]
+  const by = (re: RegExp) => all.find(t => re.test(t.text))
+  expect(by(/T005/).props.color).toBe('red')
+  expect(by(/T002/).props.color).toBe('red')
+  expect(by(/T004/).props.color).toBeUndefined()
+  expect(by(/\[済\] T011/).props.dimColor).toBe(true)
+  const more = by(/^ほか/)
+  expect(more.props.dimColor).toBe(true)
+  const head = by(/^ ◇ C案件/)
+  expect(head.props.bold).toBe(true)
+  expect(head.props.wrap).toBe('truncate-end')
+  // 行を押すと詳細、ボタンも今のまま
+  expect(await ui.find({ type: 'Button', key: 'mine-T005' })).toBeTruthy()
+  expect(await ui.find({ type: 'Button', key: 'aiNext-T022' })).toBeTruthy()
+  expect(await ui.find({ type: 'Button', text: /ガントへ/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Button', text: /全部のタスクを見る/ })).toBeTruthy()
+  await ui.unmount()
+})
+
+test('T191 短い画面：「なし」「計画なし」は小見出しなしのまま。カテゴリが 1 つだけなら小見出し 1 つで空行は入らない。分類なしだけなら「◇ 未分類」', async ($, on) => {
+  await setup($, on, { data: { tasks: [gx('T001', '分類なし', { assignee: 'dev-a' })], daily_sprints: [] }, cal: CAL_OK })
+  const ui = await mountAll($, 60, 60)
+  const ts = await texts(ui)
+  expect(shape(ts, '山田さん（今日まで）')).toEqual(['なし'])
+  expect(shape(ts, 'AI（今日の計画）')).toEqual(['計画なし'])
+  expect(shape(ts, 'AI（これから）')).toEqual([' ◇ 未分類', 'T001'])
+  expect(shape(ts, '近いうちに')).toEqual(['なし'])
+  await ui.unmount()
+})

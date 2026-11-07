@@ -12,7 +12,7 @@ const GANTT_TITLE = 'これから2週間'
 
 const EMPTY: Board = { today: '', mine: [], ai: [], aiNext: [], aiNextMore: 0, all: [], soon: [], openRequests: 0, error: '' }
 // 形を変えたら shape の札も変える（前の版がしまった値を読まないように）
-const board = atom({ plugin: 'ai-bunshin-panel', key: 'board' } as const, EMPTY, { shape: 'board-4' })
+const board = atom({ plugin: 'ai-bunshin-panel', key: 'board' } as const, EMPTY, { shape: 'board-5' })
 const HOME: View = { mode: 'home', page: 0 }
 const view = atom({ plugin: 'ai-bunshin-panel', key: 'view' } as const, HOME, { shape: 'view-2' })
 const mtime = atom({ plugin: 'ai-bunshin-panel', key: 'mtime' } as const, 0)
@@ -97,6 +97,18 @@ const UNCAT = '未分類'
 const DONE_HEAD = '完了'
 const catOf = (t: Task): string => (typeof t.category === 'string' && t.category.trim() ? t.category.trim() : UNCAT)
 
+// 短い画面の区切りの中を、カテゴリごとに分ける。カテゴリの順は「その区切りで最初に出てくる順」。未分類は最後。
+// カテゴリの中の行は、渡された並びのまま
+function groupByCat(rows: Row[]): { cat: string; rows: Row[] }[] {
+  const groups: { cat: string; rows: Row[] }[] = []
+  for (const r of rows) {
+    const g = groups.find(x => x.cat === r.category)
+    if (g) g.rows.push(r)
+    else groups.push({ cat: r.category, rows: [r] })
+  }
+  return [...groups.filter(g => g.cat !== UNCAT), ...groups.filter(g => g.cat === UNCAT)]
+}
+
 // 承認待ち：未完了で、担当が本人、題名が「ルール変更の承認」で始まるお願い（振り返りが出すお願いの目印）。印は [承認]
 const APPROVAL = 'ルール変更の承認'
 const APPROVAL_MARK = '承認'
@@ -106,7 +118,7 @@ const isApproval = (t: Task, OWNER: string) =>
 function build(data: any, today: string, OWNER: string): Board {
   const tasks: Task[] = data.tasks ?? []
   const open = tasks.filter(t => t.status !== '完了')
-  const row = (t: Task, mark: string): Row => ({ id: t.id, title: t.title, due: md(t.due ?? ''), mark })
+  const row = (t: Task, mark: string): Row => ({ id: t.id, title: t.title, due: md(t.due ?? ''), mark, category: catOf(t) })
   const byDue = (a: Task, b: Task) => (a.due ?? '').localeCompare(b.due ?? '')
 
   // 今日まで：期日の順。承認待ちは一番上（同じ仲間の中は期日の順のまま）
@@ -143,7 +155,6 @@ function build(data: any, today: string, OWNER: string): Board {
     ...row(t, t.status === '完了' ? '済' : isApproval(t, OWNER) ? APPROVAL_MARK : (t.status ?? '')),
     who: t.assignee ?? '',
     done: t.status === '完了',
-    category: catOf(t),
   })
   const sortedOpen = [...open].sort((a, b) => (a.priority ?? 999) - (b.priority ?? 999) || a.id.localeCompare(b.id))
   const order: string[] = []
@@ -835,6 +846,16 @@ export const register: Register = on => {
       </Button>
     )
 
+    // 区切りの中を「 ◇ カテゴリ」の小見出しで分ける。カテゴリの間に空行 1 行（最初の小見出しの前には入れない）
+    const grouped = (sec: string, rows: Row[], one: (r: Row) => any) =>
+      groupByCat(rows).flatMap((g, gi) => [
+        ...(gi > 0 ? [<Text key={`${sec}-gap-${gi}`}> </Text>] : []),
+        <Text key={`${sec}-cat-${gi}`} bold wrap="truncate-end">
+          {` ◇ ${g.cat}`}
+        </Text>,
+        ...g.rows.map(one),
+      ])
+
     return (
       <Box flexDirection="column">
         <Text bold>{md(b.today)} の予定</Text>
@@ -850,12 +871,12 @@ export const register: Register = on => {
         <Text bold> </Text>
         <Text bold>■ {call}（今日まで）</Text>
         {b.mine.length === 0 && <Text dimColor>なし</Text>}
-        {b.mine.map(r => line('mine', r, r.mark === '超過' || r.mark === APPROVAL_MARK ? 'red' : undefined))}
+        {grouped('mine', b.mine, r => line('mine', r, r.mark === '超過' || r.mark === APPROVAL_MARK ? 'red' : undefined))}
 
         <Text bold> </Text>
         <Text bold>■ AI（今日の計画）</Text>
         {b.ai.length === 0 && <Text dimColor>計画なし</Text>}
-        {b.ai.map(r =>
+        {grouped('ai', b.ai, r =>
           r.mark === '済' ? (
             <Button key={`ai-${r.id}`} plain dimColor onPress={() => void show($, r.id)}>
               <Text dimColor wrap="truncate-end">
@@ -870,7 +891,7 @@ export const register: Register = on => {
         <Text bold> </Text>
         <Text bold>■ AI（これから）</Text>
         {b.aiNext.length === 0 && <Text dimColor>なし</Text>}
-        {b.aiNext.map(r => line('aiNext', r))}
+        {grouped('aiNext', b.aiNext, r => line('aiNext', r))}
         {b.aiNextMore > 0 && <Text dimColor>ほか {b.aiNextMore} 件</Text>}
 
         {tries.length > 0 && <Text bold> </Text>}
@@ -884,7 +905,7 @@ export const register: Register = on => {
         <Text bold> </Text>
         <Text bold>■ 近いうちに（{call}）</Text>
         {b.soon.length === 0 && <Text dimColor>なし</Text>}
-        {b.soon.map(r => line('soon', r, r.mark === APPROVAL_MARK ? 'red' : undefined))}
+        {grouped('soon', b.soon, r => line('soon', r, r.mark === APPROVAL_MARK ? 'red' : undefined))}
 
         <Text bold> </Text>
         <Box flexDirection="row">
