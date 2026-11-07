@@ -8,12 +8,12 @@
     {
       "name": "ai-bunshin",
       "source": "./plugins/ai-bunshin",
-      "description": "本人の業務を代行する AI 分身"
+      "description": "本人の業務を代行する Shadow Desk（指揮官＋部下7人の AI）"
     },
     {
       "name": "ai-bunshin-panel",
       "source": "./plugins/ai-bunshin-panel",
-      "description": "Shadow Desk コックピット：右に今日のやること・予定・お願いを右に出す（任意。ターミナル版で確認・本人のフォルダでだけ出る）"
+      "description": "Shadow Desk コックピット：今日のやること・予定・お願いを右に出す（任意。ターミナル版で確認・本人のフォルダでだけ出る）"
     }
   ]
 }
