@@ -126,7 +126,7 @@ def add_dir_repos(cfg, home):
 
 
 def marketplace_roots(user_home, spec):
-    """known_marketplaces.json の source が directory のものの installLocation（S12）。読めない・無い・形が違うものは足さない"""
+    """known_marketplaces.json の source が directory のものの installLocation（S12）。読めない・無い・形が違うものは足さない。ただし directory の場所が使えない形なら作らない"""
     m = spec.get("marketplaces")
     if not isinstance(m, dict) or not isinstance(m.get("file"), str) or m.get("base") != "user_home" \
             or not isinstance(m.get("source_kind"), str):
@@ -143,8 +143,11 @@ def marketplace_roots(user_home, spec):
         if not isinstance(ent, dict) or not isinstance(ent.get("source"), dict) or ent["source"].get("source") != m["source_kind"]:
             continue
         loc = ent.get("installLocation")
-        if not isinstance(loc, str) or not os.path.isabs(loc) or any(ch in BAD_PATH_CHARS for ch in loc):
-            continue
+        if not isinstance(loc, str):
+            continue   # 場所が書かれていない項目は、守る相手が無い
+        if not os.path.isabs(loc) or any(ch in BAD_PATH_CHARS for ch in loc):
+            # 守る先の場所がある（directory）のに、囲いに書けない形：黙って飛ばすと守らないまま Python を許してしまう。作らない（S05）
+            raise Fail("マーケットプレイス（%s）の場所が使えない形です（相対パス・使えない文字）" % str(name)[:40])
         p = Path(os.path.normpath(loc))
         if str(p) != "/" and p.is_dir():
             out.append((str(name), p))

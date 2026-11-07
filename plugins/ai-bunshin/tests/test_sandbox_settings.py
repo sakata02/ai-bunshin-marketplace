@@ -68,7 +68,7 @@ def mkfixture():
         "mine": {"source": {"source": "directory", "path": str(mkt)}, "installLocation": str(mkt)},
         "second": {"source": {"source": "directory", "path": str(other_mkt)}, "installLocation": str(other_mkt)},
         "gone": {"source": {"source": "directory", "path": "x"}, "installLocation": str(root / "nowhere")},
-        "rel": {"source": {"source": "directory", "path": "x"}, "installLocation": "relative/dir"},
+        "gh_bad": {"source": {"source": "github", "repo": "x/z"}, "installLocation": "relative/(1)"},   # directory でなければ見ない
         "broken1": "x", "broken2": {"source": "directory"}, "broken3": {"source": {"source": "directory"}, "installLocation": 5},
     }), encoding="utf-8")
     repo = root / "repos" / "hp"
@@ -266,7 +266,7 @@ def test_marketplace_roots():
     s = ok_json(fx)
     for r in (fx["mkt"], fx["mkt2"]):
         check(nfc(str(r)) in deny_write(s) and rule(nfc(str(r)), "dir") in deny_edit(s), "S12 directory のマーケットプレイスのルートを丸ごと守る：%s" % r.name)
-    check(not any("gh_clone" in x or "nowhere" in x or "relative" in x for x in deny_write(s)), "S12 github・無い・相対の installLocation は足さない")
+    check(not any("gh_clone" in x or "nowhere" in x or "relative" in x for x in deny_write(s)), "S12 github・無い installLocation は足さない")
     # --plugin-root を渡さない形でなく、渡した plugin-root が別の場所でも、マーケットプレイスは足される
     other = fx["root"] / "cache" / "p"
     other.mkdir(parents=True)
@@ -290,6 +290,23 @@ def test_marketplace_roots():
     f.mkdir()
     rc, out, err = run(fx)
     check(rc == 0, "S12 known_marketplaces.json がフォルダでも作る rc=%s" % rc)
+    # R1：directory の場所が使えない形（相対パス・使えない文字）なら作らない。黙って飛ばして Python を許さない
+    kf = fx["uh"] / ".claude/plugins/known_marketplaces.json"
+    if kf.is_dir():   # 直前の「ファイルがフォルダ」の形を脇へ移す（作った一時フォルダの中だけ。終わりにまとめて片付く）
+        kf.rename(fx["uh"] / ".claude/plugins/was_dir")
+    ok_ent = {"source": {"source": "directory", "path": "x"}, "installLocation": str(fx["mkt"])}
+    for loc in ["relative/dir", "mk", "./x", "~/mk", str(fx["root"] / "mk (1)"), str(fx["root"] / "mk*"), str(fx["root"] / "mk[1]"),
+                str(fx["root"] / "mk{a}"), str(fx["root"] / "mk?"), str(fx["root"] / "mk\nx")]:
+        kf.write_text(json.dumps({"p": {"source": {"source": "directory", "path": "x"}, "installLocation": loc}, "ok": ok_ent}), encoding="utf-8")
+        rc, out, err = run(fx)
+        check(rc == 1 and out == "" and err.count("\n") == 1 and "マーケットプレイス" in err, "R1 使えない形 %r は作らない rc=%s" % (loc, rc))
+        check(SECRET not in err, "R1 エラーに URL が出ない")
+    # directory でない項目が使えない形でも、作る（見ない）。場所が書かれていない directory も作る（守る相手が無い）
+    kf.write_text(json.dumps({"g": {"source": {"source": "github", "repo": "x"}, "installLocation": "relative/(1)"},
+                              "n": {"source": {"source": "directory"}}, "ok": ok_ent}), encoding="utf-8")
+    rc, out, err = run(fx)
+    check(rc == 0 and str(fx["mkt"]) in deny_write(json.loads(out)), "R1 github の使えない形・場所なしの directory は読み飛ばして作る rc=%s err=%s" % (rc, err))
+    kf.write_text(json.dumps({"ok": ok_ent}), encoding="utf-8")
     # 一覧の marketplaces の書き方が違うときは作らない
     base = json.loads(PATHS_JSON.read_text(encoding="utf-8"))
     for mod in (lambda d: d.pop("marketplaces"), lambda d: d["marketplaces"].pop("file"), lambda d: d["marketplaces"].update(base="home")):
@@ -525,7 +542,7 @@ def test_paths_json_shape():
     check(ids == want, "一覧の id が決定どおり：差 %s" % (ids ^ want))
     check(spec["add_dir_git"] == [{"path": ".git/hooks", "kind": "dir"}, {"path": ".git/config", "kind": "file"}], "X12 add_dir_git")
     stay = {(m["base"], m["path"]) for m in spec["must_stay_writable"]}
-    check(stay == {("home", "00_タスク管理/data/tasks.json")}, "must_stay_writable は tasks.json だけ（S04 改）")
+    check(stay == {("home", "00_タスク管理"), ("home", "00_タスク管理/data/tasks.json")}, "must_stay_writable は 00_タスク管理 と tasks.json だけ（R2）")
     check(spec["marketplaces"]["source_kind"] == "directory", "S12 directory のものだけ")
     check(all(e["path"] not in ("scripts/auto", "scripts/auto/logs", "scripts/auto/run.sh", "scripts/hooks", "scripts/mods", "00_タスク管理/data/tasks.json")
               for e in spec["entries"]), "S04 一覧に scripts の中の個別の項目・tasks.json が無い（scripts/ を丸ごと）")

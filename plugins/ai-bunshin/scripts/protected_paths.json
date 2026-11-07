@@ -32,6 +32,7 @@
   ],
   "add_dir_git_why": "T097 X12 config の dev.projects で --add-dir に足すリポジトリごと",
   "must_stay_writable": [
+    {"base": "home", "path": "00_タスク管理",                "why": "将来、広い守り方が足されたときに気づけるように（部下D 提案）"},
     {"base": "home", "path": "00_タスク管理/data/tasks.json", "why": "S02 tasks.json は書けるまま（削除は見張りに残す）"}
   ]
 }
