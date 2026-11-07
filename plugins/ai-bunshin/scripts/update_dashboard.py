@@ -157,6 +157,72 @@ def load_config(path):
     return cfg, None
 
 
+# ---------- 使い方の型（display。T182①）----------
+# 型は「見せ方」だけを変える（U01）。安全の仕組みや中の動きは読まない・変えない（U02）。
+# 読むのはこのファイルだけ。check_config には入れない（U08：display の問題で全体を止めない）。
+DISPLAY_TYPES = ("simple", "full")
+DISPLAY_OVERRIDE_NAMES = ("features", "terms", "requests_max", "stop_notice", "review_view", "team_view")
+SIMPLE_REQUESTS_MAX = 3   # シンプルでお願いを一度に見せる件数（期限を過ぎたものは、これを超えても全部出す。U03）
+REQUESTS_MAX_RANGE = (1, 20)
+# 「[見せ方：…]」の文面。scripts/set_display.py にも同じ文を持たせる（U02：import で共通にしない。K3：テストで比べる）
+DISPLAY_LINE = {"simple": "[見せ方：シンプル（言葉・件数の決まりを守る）]",
+                "full": "[見せ方：フル（今までどおり）]"}
+DISPLAY_BROKEN_LINE = "[見せ方：設定の display.type を読めないので、フルで動いています（simple か full に直してください）]"
+
+
+def read_display(cfg):
+    """config の display を読む。戻り値：{"type", "line", "overrides", "invalid"}。例外は出さない（U08・U14）。
+    - 無い・空（None・""・{}・[]）→ 静かにフル（line は空。案内を出さない）
+    - 壊れている（辞書でない・type が simple／full 以外）→ フルにして、案内の1行（overrides は読まない）
+    - overrides は決まった6つの名前と値だけ読む。名前が違うものは無視。値が範囲外のものは invalid に入れ、その項目はフル（U14）"""
+    out = {"type": "full", "line": "", "overrides": {}, "invalid": set()}
+    raw = cfg.get("display") if isinstance(cfg, dict) else None
+    if raw is None or raw == "" or raw == {} or raw == []:
+        return out
+    if not isinstance(raw, dict):
+        out["line"] = DISPLAY_BROKEN_LINE
+        return out
+    if "type" in raw:
+        typ = raw["type"]
+        if not (isinstance(typ, str) and typ in DISPLAY_TYPES):
+            out["line"] = DISPLAY_BROKEN_LINE
+            return out
+        out["type"] = typ
+        out["line"] = DISPLAY_LINE[typ]
+    ov = raw.get("overrides")
+    if isinstance(ov, dict):
+        for name in DISPLAY_OVERRIDE_NAMES:
+            if name not in ov:
+                continue
+            v = ov[name]
+            if name == "requests_max":
+                ok = (isinstance(v, int) and not isinstance(v, bool)
+                      and REQUESTS_MAX_RANGE[0] <= v <= REQUESTS_MAX_RANGE[1])
+            else:
+                ok = isinstance(v, str) and v in DISPLAY_TYPES
+            if ok:
+                out["overrides"][name] = v
+            else:
+                out["invalid"].add(name)
+    return out
+
+
+def overrides_line(disp):
+    """効く個別の設定が1つ以上あるときの1行（「[見せ方：…]」のすぐ前の行に出す。U11）。無ければ空。
+    文面と並び（DISPLAY_OVERRIDE_NAMES の順）は scripts/set_display.py の overrides_line と同じ（K3：テストで比べる）。"""
+    ov = disp["overrides"]
+    return ("個別の設定（型より優先）：" + "、".join(f"{n}={ov[n]}" for n in DISPLAY_OVERRIDE_NAMES if n in ov)) if ov else ""
+
+
+def requests_cap(disp):
+    """お願いを一度に見せる件数の上限。None は全件。個別の設定は型より強い（U06）。範囲外の値の項目はフル（U14）。"""
+    if "requests_max" in disp["overrides"]:
+        return disp["overrides"]["requests_max"]
+    if "requests_max" in disp["invalid"]:
+        return None
+    return SIMPLE_REQUESTS_MAX if disp["type"] == "simple" else None
+
+
 ROOT = find_root() or Path(os.getcwd()).resolve()
 CONFIG_JSON = ROOT / "設定" / "config.json"
 _cfg, CONFIG_ERROR = load_config(CONFIG_JSON)
@@ -164,6 +230,7 @@ OWNER = _cfg.get("owner", "本人")                 # tasks.json の assignee �
 OWNER_CALL = _cfg.get("owner_call", OWNER + "さん")  # 文章での呼び方
 AI_NAME = _cfg.get("ai_name", "AI")
 DEPARTMENTS = _cfg.get("departments", []) + ["共通"]
+DISPLAY = read_display(_cfg)   # 使い方の型（T182①）。config に無ければ静かにフル
 PLUGIN_ROOT = Path(__file__).resolve().parent.parent
 RULES_MD = PLUGIN_ROOT / "rules" / "commander.md"   # 指揮官ルール（Windows の展開で壊れないよう、プラグインの中のファイル名は英数字）
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -1461,6 +1528,12 @@ def auto_run_warning(today, cal):
 def summary_text(ctx, limit=10, with_ids=False):
     lines = [f"[{AI_NAME} タスク状況 {fmt(ctx['today'])}] 全体完了予定 {project_end_text(ctx)}"
              f"／{VELOCITY_LABEL} {ctx['velocity']:.1f}pt/日（{ctx['velocity_src']}）"]
+    # 型を AI に伝える（U11）。個別の設定の行が先、「[見せ方：…]」が後（set_display.py の出力と同じ並び。「[見せ方：…]」が最後の行）。
+    # 警告の行は main が先頭に足すので、並びは動かない（U12）
+    if overrides_line(DISPLAY):
+        lines.append(overrides_line(DISPLAY))
+    if DISPLAY["line"]:
+        lines.append(DISPLAY["line"])
     for t in ctx["open_tasks"][:limit]:
         due = parse_date(t.get("due"))
         lines.append(f"  {t['_rank']}. {t['id']} {t['title']} [{t['status']}/{role_name(t.get('assignee'))}] "
@@ -1482,10 +1555,17 @@ def summary_text(ctx, limit=10, with_ids=False):
             lines.append(f"  - {t['id']} {t['title']} — 期日 {fmt_jp(due) if due else 'なし'}"
                          f"{'（' + days_left(t, ctx['today']) + '）' if due else ''}")
     lines.append(f"[📌 {OWNER_CALL}へのお願い 未完了 {len(reqs)} 件]（00_タスク管理/{OWNER_CALL}へのお願い.md）")
-    for t in sorted(reqs, key=lambda t: parse_date(t.get("due")) or date.max):
+    ordered = sorted(reqs, key=lambda t: parse_date(t.get("due")) or date.max)
+    cap = requests_cap(DISPLAY)
+    shown = ordered
+    if cap is not None:   # シンプル：上限か、期限を過ぎたお願いの全件のうち多いほう（期日順なので期限超過が先に並ぶ。U03）
+        shown = ordered[:max(cap, sum(1 for t in ordered if t["_flag"] == FLAG_OVERDUE))]
+    for t in shown:
         due = parse_date(t.get("due"))
         lines.append(f"  - {t['id']} [{t.get('kind') or 'その他'}] {t['title']} — 期日 {fmt_jp(due) if due else '未設定'}"
                      f"（{days_left(t, ctx['today'])}）{' 🔴' if t['_flag'] == FLAG_OVERDUE else ''}")
+    if len(ordered) > len(shown):
+        lines.append(f"  …ほかに {len(ordered) - len(shown)} 件（一覧：00_タスク管理/{OWNER_CALL}へのお願い.md）")
     warns = assignment_warnings(ctx["tasks"])
     if warns:
         lines.append(f"[⚠ 振り分けの確認 {len(warns)} 件] " + "／".join(warns[:6]) + ("／…" if len(warns) > 6 else ""))
