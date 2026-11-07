@@ -131,16 +131,14 @@ def expected(fx):
         (fx["mkt"], "dir", "S12 マーケットプレイスのルート"),
         (fx["mkt2"], "dir", "S12 directory の2つ目"),
         (h / "CLAUDE.local.md", "file", "S13 CLAUDE.local.md"),
-        (h / ".git/hooks", "dir", "S13 本人のフォルダの .git/hooks"),
-        (h / ".git/config", "file", "S13 本人のフォルダの .git/config"),
+        (h / ".git", "dir", "S17 本人のフォルダの .git を丸ごと"),
         (uh / "Library/LaunchAgents", "dir", "S13 LaunchAgents"),
         (uh / ".claude/settings.json", "file", "S13 利用者の settings.json"),
         (uh / ".claude/CLAUDE.md", "file", "S13 利用者の CLAUDE.md"),
         (uh / ".claude/skills", "dir", "S13 skills"),
         (uh / ".claude/agents", "dir", "S13 agents"),
         (uh / ".claude/commands", "dir", "S13 commands"),
-        (repo / ".git/hooks", "dir", "X12 hooks"),
-        (repo / ".git/config", "file", "X12 config"),
+        (repo / ".git", "dir", "S17 足すリポジトリの .git を丸ごと"),
     ]
 
 
@@ -467,10 +465,11 @@ def test_add_dir_repos():
     fx = mkfixture()
     s = ok_json(fx)
     ww = [nfc(x) for x in deny_write(s)]
-    check(nfc(str(fx["repo"] / ".git/hooks")) in ww and nfc(str(fx["repo"] / ".git/config")) in ww, "X12 足すリポジトリの .git/hooks・.git/config")
-    # D4：ファイルかフォルダかは名前でなく一覧の kind で決まる（config はファイル＝ /** を付けない、hooks はフォルダ）
+    check(nfc(str(fx["repo"] / ".git")) in ww, "S17 足すリポジトリの .git が丸ごと denyWrite にある")
+    check(nfc(str(fx["repo"] / ".git/hooks")) not in ww and nfc(str(fx["repo"] / ".git/config")) not in ww, "S17 .git/hooks・.git/config の個別の項目は、丸ごとに含まれるので無い")
+    # D4：ファイルかフォルダかは名前でなく一覧の kind で決まる（.git はフォルダ＝ /** が付く）
     ee = [nfc(x) for x in deny_edit(s)]
-    check("Edit(/%s)" % nfc(str(fx["repo"] / ".git/config")) in ee and "Edit(/%s/**)" % nfc(str(fx["repo"] / ".git/hooks")) in ee, "D4 kind どおりの Edit の deny")
+    check("Edit(/%s/**)" % nfc(str(fx["repo"] / ".git")) in ee, "S17・D4 足すリポジトリの .git の Edit の deny（フォルダ丸ごと）")
     base = json.loads(PATHS_JSON.read_text(encoding="utf-8"))
     spec = json.loads(json.dumps(base))
     spec["add_dir_git"] = [{"path": ".git/info/exclude_x", "kind": "file"}, {"path": ".git/hooks_config", "kind": "dir"}]
@@ -480,7 +479,7 @@ def test_add_dir_repos():
     eg = [nfc(x) for x in deny_edit(sg)]
     check("Edit(/%s)" % nfc(str(fx["repo"] / ".git/info/exclude_x")) in eg, "D4 名前が config でなくても kind=file ならファイル")
     check("Edit(/%s/**)" % nfc(str(fx["repo"] / ".git/hooks_config")) in eg, "D4 名前が config で終わっても kind=dir ならフォルダ")
-    for bad in ([".git/hooks"], [{"path": ".git/x"}], [{"path": ".git/x", "kind": "pipe"}], [{"path": "/etc", "kind": "dir"}], [{"path": "../a", "kind": "dir"}]):
+    for bad in ([".git/hooks"], [{"path": ".git/x"}], [{"path": ".git", "kind": "gitt"}], [{"path": ".git/x", "kind": "pipe"}], [{"path": "/etc", "kind": "dir"}], [{"path": "../a", "kind": "dir"}]):
         spec["add_dir_git"] = bad
         pf.write_text(json.dumps(spec, ensure_ascii=False), encoding="utf-8")
         rc, out, err = run(fx, extra=["--paths-file", str(pf)])
@@ -561,7 +560,7 @@ def test_print_add_dirs():
     rc, out, err = run(fx, args=pa)
     check(rc == 0 and out.splitlines() == [str(fx["repo"])], "W7 本人のフォルダの外の実在の絶対パスだけ rc=%s out=%r" % (rc, out))
     s = ok_json(fx)
-    check(s is not None and nfc(str(fx["repo"] / ".git/hooks")) in deny_write(s), "W7 同じ先が囲いの守る先にも入る")
+    check(s is not None and nfc(str(fx["repo"] / ".git")) in deny_write(s), "W7 同じ先が囲いの守る先にも入る")
     # 本人のフォルダにリンクで入る先は「中」＝対象外（realpath で判定）
     link = fx["root"] / "リンク先"
     os.symlink(str(fx["home"] / "05_開発/x"), str(link))
@@ -625,16 +624,89 @@ def test_no_writes():
 def test_paths_json_shape():
     spec = json.loads(PATHS_JSON.read_text(encoding="utf-8"))
     ids = {e["id"] for e in spec["entries"]}
-    want = {"A-settings", "A-claude-md", "A-claude-local-md", "A-ai-bunshin-dir", "B-input", "C-claude", "C-git-hooks", "C-git-config",
+    want = {"A-settings", "A-claude-md", "A-claude-local-md", "A-ai-bunshin-dir", "B-input", "C-claude", "C-git",
             "D-plugin-cache", "D-plugin-source", "S04-scripts", "S13-launchagents", "S13-user-settings", "S13-user-claude-md",
             "S13-user-skills", "S13-user-agents", "S13-user-commands"}
     check(ids == want, "一覧の id が決定どおり：差 %s" % (ids ^ want))
-    check(spec["add_dir_git"] == [{"path": ".git/hooks", "kind": "dir"}, {"path": ".git/config", "kind": "file"}], "X12 add_dir_git")
+    check(spec["add_dir_git"] == [{"path": ".git", "kind": "git"}], "S17 add_dir_git は .git を丸ごと（kind=git）")
+    cg = [e for e in spec["entries"] if e["id"] == "C-git"]
+    check(len(cg) == 1 and cg[0]["base"] == "home" and cg[0]["path"] == ".git" and cg[0]["kind"] == "git", "S17 本人のフォルダの .git は丸ごと（kind=git）")
     stay = {(m["base"], m["path"]) for m in spec["must_stay_writable"]}
     check(stay == {("home", "00_タスク管理"), ("home", "00_タスク管理/data/tasks.json")}, "must_stay_writable は 00_タスク管理 と tasks.json だけ（R2）")
     check(spec["marketplaces"]["source_kind"] == "directory", "S12 directory のものだけ")
     check(all(e["path"] not in ("scripts/auto", "scripts/auto/logs", "scripts/auto/run.sh", "scripts/hooks", "scripts/mods", "00_タスク管理/data/tasks.json")
               for e in spec["entries"]), "S04 一覧に scripts の中の個別の項目・tasks.json が無い（scripts/ を丸ごと）")
+
+
+# --- 13. .git は丸ごと（S17）・.git がファイルの形（worktree・submodule）---
+def test_git_whole_dir():
+    fx = mkfixture()
+    s = ok_json(fx)
+    ww = [nfc(x) for x in deny_write(s)]
+    ee = [nfc(x) for x in deny_edit(s)]
+    for g in (fx["home"] / ".git", fx["repo"] / ".git"):
+        check(nfc(str(g)) in ww, "S17 .git が denyWrite にある：%s" % g)
+        check("Edit(/%s/**)" % nfc(str(g)) in ee, "S17 .git が Edit の deny（フォルダ丸ごと）にある：%s" % g)
+        for sub in (".git/hooks", ".git/config"):   # 丸ごとに含まれるので、個別の項目は無い
+            check(nfc(str(g.parent / sub)) not in ww, "S17 個別の項目が無い：%s" % (g.parent / sub))
+    # .git がまだ無い本人のフォルダでも、守る先に入る（あとで囲いの中で作られても守る）
+    fx2 = mkfixture()
+    (fx2["home"] / ".git").rename(fx2["home"] / "git_moved_away")
+    s2 = ok_json(fx2)
+    check(nfc(str(fx2["home"] / ".git")) in [nfc(x) for x in deny_write(s2)], "S17 .git が無くても守る先に入る")
+
+
+def _gitfile_fixture(abs_form, content=None):
+    """本人のフォルダの .git をファイル（gitdir: …）にする。指す先は本人のフォルダの外の作り物"""
+    fx = mkfixture()
+    (fx["home"] / ".git").rename(fx["home"] / "git_moved_away")
+    target = fx["root"] / "elsewhere" / "wt" / "gitdir_x"
+    target.mkdir(parents=True)
+    ref = str(target) if abs_form else os.path.relpath(str(target), str(fx["home"]))
+    data = content if content is not None else ("gitdir: %s\n" % ref).encode("utf-8")
+    (fx["home"] / ".git").write_bytes(data)
+    return fx, target
+
+
+def test_git_file_form():
+    for abs_form in (True, False):
+        fx, target = _gitfile_fixture(abs_form)
+        s = ok_json(fx)
+        ww = [nfc(x) for x in deny_write(s)]
+        ee = [nfc(x) for x in deny_edit(s)]
+        gf = fx["home"] / ".git"
+        tag = "絶対" if abs_form else "相対"
+        check(nfc(str(gf)) in ww and "Edit(/%s)" % nfc(str(gf)) in ee, "S17 .git ファイル（%s）そのものが denyWrite と Edit の deny（ファイル）にある" % tag)
+        check("Edit(/%s/**)" % nfc(str(gf)) not in ee, "S17 .git ファイルに /** は付けない（%s）" % tag)
+        check(nfc(str(target)) in ww and "Edit(/%s/**)" % nfc(str(target)) in ee, "S17 .git ファイルの指す先のフォルダ（%s）が denyWrite と Edit の deny にある" % tag)
+    # 足すリポジトリの .git がファイルのとき（相対の ../ で指す）
+    fx, target = _gitfile_fixture(True)
+    (fx["repo"] / ".git").rename(fx["repo"] / "git_moved_away")
+    t2 = fx["root"] / "elsewhere" / "repo_gitdir"
+    t2.mkdir(parents=True)
+    (fx["repo"] / ".git").write_text("gitdir: ../../elsewhere/repo_gitdir\n", encoding="utf-8")
+    s = ok_json(fx)
+    ww = [nfc(x) for x in deny_write(s)]
+    ee = [nfc(x) for x in deny_edit(s)]
+    check(nfc(str(fx["repo"] / ".git")) in ww and "Edit(/%s)" % nfc(str(fx["repo"] / ".git")) in ee, "S17 足すリポジトリの .git ファイルが両方にある")
+    check(nfc(os.path.realpath(str(t2))) in ww and "Edit(/%s/**)" % nfc(os.path.realpath(str(t2))) in ee, "S17 足すリポジトリの .git ファイルの指す先（相対の ../）が両方にある")
+    # 使えない形は終了コード 1・出力なし（S05）
+    notdir = str(fx["home"] / "CLAUDE.md")
+    cases = (
+        (b"", "空"), (b"not a gitdir line\n", "形が違う"), (b"gitdir: \n", "先が空"), (b"gitdir: nowhere/none\n", "先が無い"),
+        (b"gitdir: /\n", "先が /"), (("gitdir: %s\n" % notdir).encode("utf-8"), "先がフォルダでない"), (b"\xff\xfe\n", "読めない文字"),
+    )
+    for data, why in cases:
+        fy, _t = _gitfile_fixture(True, content=data)
+        rc, out, err = run(fy)
+        check(rc == 1 and out == "" and err.startswith("sandbox_settings:"), "S17・S05 使えない .git ファイル（%s）は作らない rc=%s" % (why, rc))
+        check(SECRET not in err, "エラーに URL が出ない")
+    # 足すリポジトリ側の使えない .git ファイル
+    fz = mkfixture()
+    (fz["repo"] / ".git").rename(fz["repo"] / "git_moved_away")
+    (fz["repo"] / ".git").write_text("garbage\n", encoding="utf-8")
+    rc, out, err = run(fz)
+    check(rc == 1 and out == "", "S17・S05 足すリポジトリの使えない .git ファイルも作らない rc=%s" % rc)
 
 
 # --- 想定外の例外でも URL を出さない・シンボリックリンクの実体も守る ---

@@ -16,6 +16,9 @@
   日本語のパスは NFC と NFD の両方を入れる（Mac のファイル名の形。T097 X13）。実体のパス（realpath）も入れる
 - tasks.json は書けるまま（S02）。一覧がそれを含むと作らずに止める（must_stay_writable）。本人の scripts/ は丸ごと守る
   （S04。囲いの中の update_dashboard.py は失敗のログを書けないが、write_error_log が例外を飲むので止まらない）
+- 本人のフォルダと --add-dir のリポジトリの .git は丸ごと守る（S17。kind=git）。.git がファイル（worktree・submodule の
+  「gitdir: <先>」）なら、そのファイルと指す先のフォルダの両方。指す先が読めない・使えない形なら作らない（S05）。
+  控えのコミットは囲いの外の daily_cycle.sh（backup_commit）がするので、囲いの中から .git に書けなくても困らない
 - マーケットプレイスは、利用者の known_marketplaces.json の source が directory のものの installLocation を
   丸ごと守る（S12）。読めない・無い・形が違うときは足さずに作る
 - 通信は止め、カレンダーの取得先の host だけ通す（S02・S09）。URL は環境変数で受け取り、host だけを取り出す。
@@ -160,6 +163,27 @@ def marketplace_roots(user_home, spec):
     return out
 
 
+def expand_git(tid, p):
+    """kind=git の守る先（S17）。.git がフォルダ（無くてもよい）なら、そのまま dir。
+    ファイルなら「gitdir: <先>」を読み、そのファイル（file）と指す先のフォルダ（dir）の両方。読めない・形が違う・先が無い／フォルダでないときは作らない（S05）"""
+    p = Path(p)
+    if not p.is_file():
+        return [(tid, p, "dir")]
+    try:
+        with open(p, encoding="utf-8") as f:
+            first = f.readline()
+    except Exception:
+        raise Fail("守る先 %s の .git ファイルを読めません" % tid)
+    m = re.match(r"^gitdir:[ \t]*(\S.*?)[ \t]*\r?\n?$", first)
+    if not m:
+        raise Fail("守る先 %s の .git ファイルが「gitdir: <先>」の形ではありません" % tid)
+    loc = m.group(1)
+    gd = Path(os.path.normpath(os.path.join(str(p.parent), loc)))   # 相対なら .git ファイルのあるフォルダから。絶対ならそのまま
+    if str(gd) == "/" or not gd.is_dir():
+        raise Fail("守る先 %s の .git ファイルが指す先が使えません（フォルダが無い）" % tid)
+    return [(tid, p, "file"), (tid + "-gitdir", gd, "dir")]
+
+
 def build_settings(home, plugin_roots, config_path, user_home, calendar_url, paths_file):
     home = need_abs_dir(home, "本人のフォルダ")
     roots = [need_abs_dir(r, "プラグインの元") for r in plugin_roots]
@@ -176,14 +200,18 @@ def build_settings(home, plugin_roots, config_path, user_home, calendar_url, pat
     targets = []
     for e in entries:
         if not isinstance(e, dict) or e.get("base") not in BASES or not isinstance(e.get("path"), str) \
-                or e.get("kind") not in ("dir", "file") or not isinstance(e.get("id"), str):
+                or e.get("kind") not in ("dir", "file", "git") or not isinstance(e.get("id"), str):
             raise Fail("守るパスの一覧の書き方が違います")
         rel = e["path"]
         if os.path.isabs(rel) or ".." in Path(rel).parts:
             raise Fail("守るパスの一覧の %s が相対パスではありません" % e["id"])
         bases = {"home": [home], "user_home": [user_home], "plugin_root": roots}[e["base"]]
         for b in bases:
-            targets.append((e["id"], Path(os.path.normpath(str(b / rel))), e["kind"]))
+            tp = Path(os.path.normpath(str(b / rel)))
+            if e["kind"] == "git":
+                targets.extend(expand_git(e["id"], tp))
+            else:
+                targets.append((e["id"], tp, e["kind"]))
     for i, (_mname, mpath) in enumerate(marketplace_roots(user_home, spec)):
         targets.append(("S12-marketplace-%d" % (i + 1), mpath, "dir"))
     git_rel = spec.get("add_dir_git")
@@ -191,10 +219,14 @@ def build_settings(home, plugin_roots, config_path, user_home, calendar_url, pat
         raise Fail("守るパスの一覧に add_dir_git がありません")
     for d in add_dir_repos(cfg, home):
         for r in git_rel:   # ファイルかフォルダかは、名前でなく一覧の kind で決める
-            if not isinstance(r, dict) or not isinstance(r.get("path"), str) or r.get("kind") not in ("dir", "file") \
+            if not isinstance(r, dict) or not isinstance(r.get("path"), str) or r.get("kind") not in ("dir", "file", "git") \
                     or os.path.isabs(r["path"]) or ".." in Path(r["path"]).parts:
                 raise Fail("守るパスの一覧の add_dir_git の書き方が違います")
-            targets.append(("X12-" + d.name, Path(os.path.normpath(str(d / r["path"]))), r["kind"]))
+            tp = Path(os.path.normpath(str(d / r["path"])))
+            if r["kind"] == "git":
+                targets.extend(expand_git("X12-" + d.name, tp))
+            else:
+                targets.append(("X12-" + d.name, tp, r["kind"]))
 
     # 書けるままにする先（tasks.json・logs）を含む守り方は作らない
     stay = spec.get("must_stay_writable")
