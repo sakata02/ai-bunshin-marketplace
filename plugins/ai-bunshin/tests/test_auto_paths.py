@@ -318,7 +318,7 @@ def t5_plan_context_has_read_write_range_line():
     assert use and not any(" Read," in x or " Write," in x or "Read," in x for x in use), use
     # 一覧に Glob・Grep が無いことと、1行が「Glob・Grep は使えない」と言うことは組（どちらかだけ変わったら落ちる）
     assert not any("Glob" in x or "Grep" in x for x in use) and "Glob・Grep は使えない" in j, (use, j)
-    assert "自動記憶（~/.claude の下）は、自動実行では読むだけ（書くのは止めている）" in j, j
+    assert "自動記憶（~/.claude の下）は、自動実行では読むだけ（Edit・Write での書き込みは止めている）" in j, j
     assert "ls・cat・find・grep など読むだけの命令は、下の範囲の中だけ動く" in lines[i], lines[i]
 
 
