@@ -429,7 +429,7 @@ run_claude() {
     esac
   done
   [ $rr_rc -ne 0 ] && log "プラグインの中を読む規則を作れませんでした（プラグインの中は読めない可能性があります）"
-  # Claude Code の自動記憶（~/.claude/projects/*/memory/）への書き込みだけを止める（T193。読み込みは残す）。
+  # Claude Code の自動記憶（~/.claude/projects/*/memory/）に書く道具（Edit・Write）で書くのを止める（T193。読み込みは残す）。Bash の中の Python からの書き込みは、囲いの守る先（S13-user-projects。sandbox_settings.py が作る --settings。T201）が止める。
   # 環境変数 CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 は読み込みも止めるので使わない。止める規則（Edit の deny。Write にも効く）は sandbox_settings.py が作り、
   # ここでこの起動の分だけ DENY に足す（DENY= の行は変えない＝T141 が読める形のまま）。囲いの点検の claude の止める道具にも同じものを足す（点検は本番の DENY を全部含む決まり＝test_sandbox_wiring k2。点検は Write・Edit を丸ごと止めているので、許可は広がらない）。ログに残すのは、こちらで決めた文だけ
   MEM_DENY=""

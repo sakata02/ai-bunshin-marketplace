@@ -13,9 +13,10 @@
   → 自動実行で読めるようにするプラグインの元の読み取りの規則 Read(//…/**) を1行に1つ出す（NFC・NFD・実体。T193 K3）。
     規則に使えない場所は出さず、標準エラーに1行（パスなし）。終了コードは0
   python3 sandbox_settings.py --home <本人のフォルダ> --print-memory-deny [--user-home <ホーム>]
-  → Claude Code の自動記憶（<ホーム>/.claude/projects/*/memory/）への書き込みを止める deny の規則
+  → Claude Code の自動記憶（<ホーム>/.claude/projects/*/memory/）に、書く道具（Edit・Write）で書くのを止める deny の規則
     Edit(//…/projects/*/memory/**) を1行に1つ出す（NFC・NFD・実体。環境変数 CLAUDE_CONFIG_DIR があればそちらも。T193）。
-    読み込みは止めない。規則に使えない場所は出さず、標準エラーに1行（パスなし）。終了コードは0
+    これは道具の止め方の1つ目。2つ目は囲いの守る先（S13-user-projects。Bash の中の Python の書き込み。T201）で、設定の JSON（引数なし）に入る。
+    どちらも読み込みは止めない。規則に使えない場所は出さず、標準エラーに1行（パスなし）。終了コードは0
   → 標準出力に JSON を1行（そのまま claude -p --settings "$(…)" に渡せる）
   → 作れないときは、標準エラーに日本語1行・終了コード1（呼ぶ側は Python を許さず、今の許可に退く。T119 S05）
 
@@ -368,7 +369,8 @@ def print_read_rules(plugin_roots):
 
 
 def print_memory_deny(user_home=None):
-    """自動記憶のフォルダ（<設定の置き場>/projects/*/memory/）への書き込みを止める deny の規則。Edit(//…/projects/*/memory/**) を1行に1つ（T193）。
+    """自動記憶のフォルダ（<設定の置き場>/projects/*/memory/）に、書く道具（Edit・Write）で書くのを止める deny の規則。Edit(//…/projects/*/memory/**) を1行に1つ（T193）。
+    Bash の中の Python の書き込みは、この規則では止まらない。囲いの守る先（S13-user-projects。build_settings。T201）が止める。
     Edit の規則は Write・NotebookEdit にも効く。規則に使えない場所は出さず、標準エラーに1行（パスは出さない）"""
     cands = [os.path.join(user_home or os.path.expanduser("~"), ".claude")]
     cfg = os.environ.get("CLAUDE_CONFIG_DIR")
