@@ -138,6 +138,14 @@ BODY = read(BODY_PATH)
 BODY_LINES = BODY.split("\n")
 
 
+# 分割のあとに決めて足した details の行（行の頭の文字）。古い版には無いので、a3・a4 では数えない（T134：tasks-json.md の category）
+ADDED_DETAIL_PREFIXES = ("- `category`：",)
+
+
+def is_added_detail_line(line):
+    return line.startswith(ADDED_DETAIL_PREFIXES)
+
+
 def details_files():
     return sorted(n for n in os.listdir(DETAILS_SRC)) if os.path.isdir(DETAILS_SRC) else []
 
@@ -181,7 +189,7 @@ def a3_each_details_file_is_a_contiguous_block_of_the_old_text():
     if not need_old():
         return
     for n in OLD_DETAIL_NAMES:
-        block = details_text(n).rstrip("\n").split("\n")
+        block = [l for l in details_text(n).rstrip("\n").split("\n") if not is_added_detail_line(l)]
         found = any(OLD_LINES[i:i + len(block)] == block for i in range(len(OLD_LINES) - len(block) + 1))
         assert found, f"{n}.md が古い版の連続した範囲と一致しない"
 
@@ -192,7 +200,7 @@ def a4_details_files_have_no_new_lines():
         return
     old = set(OLD_LINES)
     for n in OLD_DETAIL_NAMES:
-        new = [l for l in details_text(n).split("\n") if l.strip() and l not in old]
+        new = [l for l in details_text(n).split("\n") if l.strip() and l not in old and not is_added_detail_line(l)]
         assert not new, f"{n}.md に新しい行：{new[:2]}"
 
 

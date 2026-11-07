@@ -12,7 +12,7 @@ const GANTT_TITLE = 'これから2週間'
 
 const EMPTY: Board = { today: '', mine: [], ai: [], aiNext: [], aiNextMore: 0, all: [], soon: [], openRequests: 0, error: '' }
 // 形を変えたら shape の札も変える（前の版がしまった値を読まないように）
-const board = atom({ plugin: 'ai-bunshin-panel', key: 'board' } as const, EMPTY, { shape: 'board-3' })
+const board = atom({ plugin: 'ai-bunshin-panel', key: 'board' } as const, EMPTY, { shape: 'board-4' })
 const HOME: View = { mode: 'home', page: 0 }
 const view = atom({ plugin: 'ai-bunshin-panel', key: 'view' } as const, HOME, { shape: 'view-2' })
 const mtime = atom({ plugin: 'ai-bunshin-panel', key: 'mtime' } as const, 0)
@@ -92,6 +92,11 @@ async function findMe($: EngineInterface): Promise<Me | undefined> {
 const dayOf = (ms: number) => new Date(ms + 9 * 3600e3).toISOString().slice(0, 10)
 const md = (d: string) => (d ? `${Number(d.slice(5, 7))}/${Number(d.slice(8, 10))}` : '')
 
+// 案件のカテゴリ（tasks.json の category）。文字で、空でなければそのまま（前後の空白は除く）。無い・空・文字でないものは「未分類」
+const UNCAT = '未分類'
+const DONE_HEAD = '完了'
+const catOf = (t: Task): string => (typeof t.category === 'string' && t.category.trim() ? t.category.trim() : UNCAT)
+
 function build(data: any, today: string, OWNER: string): Board {
   const tasks: Task[] = data.tasks ?? []
   const open = tasks.filter(t => t.status !== '完了')
@@ -125,14 +130,20 @@ function build(data: any, today: string, OWNER: string): Board {
     .sort((a, b) => (a.priority ?? 999) - (b.priority ?? 999))
   const aiNext = next.slice(0, 6).map(t => row(t, t.status ?? ''))
 
-  // 全部のタスク：未完了を順位の順に、そのあとに完了を新しい順に
+  // 全部のタスク：未完了をカテゴリごとにまとめる（順位の順に並べ、カテゴリは「いちばん順位が高いタスク」が早い順。「未分類」は最後）。
+  // カテゴリの中は順位の順のまま。そのあとに完了を新しい順に（カテゴリでは分けない）
   const allRow = (t: Task): AllRow => ({
     ...row(t, t.status === '完了' ? '済' : (t.status ?? '')),
     who: t.assignee ?? '',
     done: t.status === '完了',
+    category: catOf(t),
   })
+  const sortedOpen = [...open].sort((a, b) => (a.priority ?? 999) - (b.priority ?? 999) || a.id.localeCompare(b.id))
+  const order: string[] = []
+  for (const t of sortedOpen) if (catOf(t) !== UNCAT && !order.includes(catOf(t))) order.push(catOf(t))
+  const rank = (t: Task) => (catOf(t) === UNCAT ? order.length : order.indexOf(catOf(t)))
   const all = [
-    ...[...open].sort((a, b) => (a.priority ?? 999) - (b.priority ?? 999) || a.id.localeCompare(b.id)),
+    ...sortedOpen.map((t, i) => ({ t, i })).sort((a, b) => rank(a.t) - rank(b.t) || a.i - b.i).map(x => x.t),
     ...tasks.filter(t => t.status === '完了').sort((a, b) => b.id.localeCompare(a.id)),
   ].map(allRow)
 
@@ -159,6 +170,7 @@ async function show($: EngineInterface, raw: string): Promise<Detail & { isPlace
       const pairs: [string, any][] = [
         ['状態', t.status],
         ['担当', t.assignee],
+        ['カテゴリ', typeof t.category === 'string' && t.category.trim() ? t.category.trim() : t.status === '完了' ? '' : UNCAT],
         ['種類', t.kind ? `${t.type ?? ''}／${t.kind}` : t.type],
         ['期日', t.due ? md(t.due) : ''],
         ['期日の理由', t.due_reason],
@@ -178,6 +190,45 @@ async function show($: EngineInterface, raw: string): Promise<Detail & { isPlace
   await update($, detail, () => d)
   const { isPlaced } = await $.ui.open({ id: PANE, title: d.error ? TITLE : `${d.id} の詳細` })
   return { ...d, isPlaced }
+}
+
+// 全部の一覧に出す行：カテゴリの見出し（■ カテゴリ（N））と、タスクの行。見出しも1行に数える
+type AllLine = { kind: 'head'; text: string; done: boolean } | { kind: 'row'; r: AllRow }
+
+// board.all（未完了はカテゴリごとにまとまり、完了は最後）から、見出しつきの行にする。N はその見出しの下の数
+function allLines(all: AllRow[]): AllLine[] {
+  const key = (r: AllRow) => (r.done ? '\u0000done' : `c:${r.category}`)
+  const lines: AllLine[] = []
+  for (let i = 0; i < all.length; ) {
+    let j = i
+    while (j < all.length && key(all[j]) === key(all[i])) j++
+    const name = all[i].done ? DONE_HEAD : all[i].category
+    lines.push({ kind: 'head', text: `■ ${name}（${j - i}）`, done: all[i].done })
+    for (let k = i; k < j; k++) lines.push({ kind: 'row', r: all[k] })
+    i = j
+  }
+  return lines
+}
+
+// 1ページ per 行に区切る。見出しも1行に数える。ページの頭がカテゴリの途中なら、その見出しに「（続き）」を付けてもう一度出す。
+// 見出しだけがページの最後に残るときは、次のページの頭に送る
+function paginate(lines: AllLine[], per: number): AllLine[][] {
+  const pages: AllLine[][] = []
+  let cur: (AllLine & { kind: 'head' }) | undefined
+  let i = 0
+  while (i < lines.length) {
+    const page: AllLine[] = []
+    if (lines[i].kind === 'row' && cur) page.push({ ...cur, text: `${cur.text}（続き）` })
+    while (i < lines.length && page.length < per) {
+      const l = lines[i]
+      if (l.kind === 'head' && page.length === per - 1 && i + 1 < lines.length) break
+      page.push(l)
+      if (l.kind === 'head') cur = l
+      i++
+    }
+    pages.push(page)
+  }
+  return pages.length ? pages : [[]]
 }
 
 // 詳細を閉じて、いま見ていた一覧（短い画面か全部の一覧）に戻る
@@ -580,9 +631,10 @@ export const register: Register = on => {
     if (v.mode === 'all') {
       // ページ送り：1ページが窓（bodyRows）に収まる行数にする。見出し・ボタン・足元で 5行使う
       const rowsPerPage = Math.max(5, Math.min(40, e.props.scroll.bodyRows - 5))
-      const pages = Math.max(1, Math.ceil(b.all.length / rowsPerPage))
+      const paged = paginate(allLines(b.all), rowsPerPage)
+      const pages = paged.length
       const page = Math.min(Math.max(0, v.page), pages - 1)
-      const shown = b.all.slice(page * rowsPerPage, (page + 1) * rowsPerPage)
+      const shown = paged[page]
       const openCount = b.all.filter(r => !r.done).length
       const go = (to: number) => void update($, view, () => ({ mode: 'all', page: Math.min(Math.max(0, to), pages - 1) }))
       return (
@@ -597,15 +649,21 @@ export const register: Register = on => {
           </Box>
           {b.error !== '' && <Text color="red">{b.error}</Text>}
           {b.all.length === 0 && b.error === '' && <Text dimColor>なし</Text>}
-          {shown.map(r => (
-            <Button key={`all-${r.id}`} plain dimColor={r.done} onPress={() => void show($, r.id)}>
-              <Text wrap="truncate-end" dimColor={r.done}>
-                [{r.mark}] {r.id} {r.title}
-                {r.who ? ` ・${r.who}` : ''}
-                {r.due && !r.done ? `（${r.due}）` : ''}
+          {shown.map((l, i) =>
+            l.kind === 'head' ? (
+              <Text key={`all-head-${page}-${i}`} bold dimColor={l.done} wrap="truncate-end">
+                {l.text}
               </Text>
-            </Button>
-          ))}
+            ) : (
+              <Button key={`all-${l.r.id}`} plain dimColor={l.r.done} onPress={() => void show($, l.r.id)}>
+                <Text wrap="truncate-end" dimColor={l.r.done}>
+                  [{l.r.mark}] {l.r.id} {l.r.title}
+                  {l.r.who ? ` ・${l.r.who}` : ''}
+                  {l.r.due && !l.r.done ? `（${l.r.due}）` : ''}
+                </Text>
+              </Button>
+            ),
+          )}
           <Text dimColor>行を押すと詳細</Text>
         </Box>
       )

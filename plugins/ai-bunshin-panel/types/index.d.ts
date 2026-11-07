@@ -1,6 +1,6 @@
 export type Row = { id: string; title: string; due: string; mark: string }
-// 全部のタスクの一覧の1行（担当と状態つき）
-export type AllRow = Row & { who: string; done: boolean }
+// 全部のタスクの一覧の1行（担当と状態つき）。category は案件の名前（無い・空・文字でないときは「未分類」。完了は分けないので使わない）
+export type AllRow = Row & { who: string; done: boolean; category: string }
 // 右のパネルの表示：ふだんの短い画面（home）か、全部のタスクの一覧（all）。page は 0 から
 export type View = { mode: 'home' | 'all' | 'gantt'; page: number }
 export type Board = {

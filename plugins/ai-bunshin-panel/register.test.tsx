@@ -132,20 +132,22 @@ test('全部のタスクに切り替え、ページを送り、短い画面に�
   const r = await $.tool.call({ tool: 'mcp__ai-bunshin-panel__show_all_tasks' })
   expect(JSON.stringify(r)).toContain('20件')
 
-  // bodyRows 10 → 1 ページ 5 行 → 4 ページ
+  // bodyRows 10 → 1 ページ 5 行。見出し（■ 未分類（12）・■ 完了（8））も 1 行に数えるので、22 行 → 5 ページ（T134 で 4 → 5）
   ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-  expect((await ui.find({ type: 'Text', text: /全部のタスク/ }))?.text).toContain('1/4')
+  expect((await ui.find({ type: 'Text', text: /全部のタスク/ }))?.text).toContain('1/5')
   expect((await ui.find({ type: 'Text', text: /全部のタスク/ }))?.text).toContain('未完了 12')
+  expect(await ui.find({ type: 'Text', text: /■ 未分類（12）/ })).toBeTruthy()
   expect(await ui.find({ type: 'Text', text: /未完了1 / })).toBeTruthy()
   expect(await ui.find({ type: 'Text', text: /未完了6 / })).toBeFalsy()
   expect(await ui.find({ type: 'Button', text: /次/ })).toBeTruthy()
   expect(await ui.find({ type: 'Button', text: /前/ })).toBeFalsy()
   await ui.press({ key: 'next' })
-  expect((await ui.find({ type: 'Text', text: /全部のタスク/ }))?.text).toContain('2/4')
+  expect((await ui.find({ type: 'Text', text: /全部のタスク/ }))?.text).toContain('2/5')
   expect(await ui.find({ type: 'Text', text: /未完了6 / })).toBeTruthy()
   await ui.press({ key: 'next' })
   await ui.press({ key: 'next' })
-  expect((await ui.find({ type: 'Text', text: /全部のタスク/ }))?.text).toContain('4/4')
+  await ui.press({ key: 'next' })
+  expect((await ui.find({ type: 'Text', text: /全部のタスク/ }))?.text).toContain('5/5')
   expect(await ui.find({ type: 'Text', text: /\[済\].*完了3/ })).toBeTruthy()
   // 最終ページでは「次 →」が出ない
   expect(await ui.find({ type: 'Button', text: /次/ })).toBeFalsy()
@@ -223,13 +225,14 @@ test('tasks.json はあるが JSON が壊れているとき：最初は赤いエ
   await ui.unmount()
 })
 
-test('端数のある最終ページ：21 件・5 ページ目は 1 行', async ($, on) => {
+test('端数のある最終ページ：21 件・見出しも 1 行に数えて 6 ページ。最後は「（続き）」の見出しと 1 行（T134 で 5 → 6）', async ($, on) => {
   await setup($, on, { data: open(21), hasFile: true, mtime: 1 })
   await $.tool.call({ tool: 'mcp__ai-bunshin-panel__show_all_tasks' })
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-  expect(await heading(ui)).toContain('1/5')
-  for (let i = 0; i < 4; i++) await ui.press({ key: 'next' })
-  expect(await heading(ui)).toContain('5/5')
+  expect(await heading(ui)).toContain('1/6')
+  for (let i = 0; i < 5; i++) await ui.press({ key: 'next' })
+  expect(await heading(ui)).toContain('6/6')
+  expect(await ui.find({ type: 'Text', text: /■ 未分類（21）（続き）/ })).toBeTruthy()
   expect(await ui.find({ type: 'Text', text: /件21/ })).toBeTruthy()
   expect(await ui.find({ type: 'Text', text: /件20/ })).toBeFalsy()
   expect(await ui.find({ type: 'Button', text: /次/ })).toBeFalsy()
@@ -242,7 +245,7 @@ test('件数が減ったとき：2 ページ目にいても最後のページに
   await $.tool.call({ tool: 'mcp__ai-bunshin-panel__show_all_tasks' })
   let ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   await ui.press({ key: 'next' })
-  expect(await heading(ui)).toContain('2/4')
+  expect(await heading(ui)).toContain('2/5')
   await ui.unmount()
 
   src.data = open(3)
@@ -824,4 +827,207 @@ test('ガント：呼び方が長い人は期限超過の行が折り返す。�
   expect(lines).toBeLessThanOrEqual(12)
   expect((await ganttRows(ui)).length).toBe(4) // 12 - 6 - 折り返して 2 行 = 4 行
   await ui.unmount()
+})
+
+// ---------- 案件のカテゴリ（T134）。tasks.json の category で、全部の一覧をまとめて出す ----------
+
+const AT = 'mcp__ai-bunshin-panel__show_all_tasks'
+type CT = { id: string; title: string; priority?: number; category?: unknown; status?: string; assignee?: string }
+const ct = (id: string, title: string, priority: number | undefined, category?: unknown, status = 'ToDo'): CT => ({
+  id,
+  title,
+  priority,
+  ...(category === undefined ? {} : { category }),
+  status,
+  assignee: 'dev-a',
+})
+const catData = (tasks: CT[]) => ({ tasks, daily_sprints: [] })
+// 画面に出ている文字を、上から順に（見出し・行・足元）。ボタンは含まない
+const texts = async (ui: any) => ((await ui.findAll({ type: 'Text' })) as { text: string }[]).map(t => t.text)
+const heads = (ts: string[]) => ts.filter(t => t.startsWith('■ '))
+const taskIds = (ts: string[]) => ts.map(t => /^\[[^\]]*\] (T\d+) /.exec(t)?.[1]).filter((x): x is string => !!x)
+const mountAll = async ($: any, rows = 30, cols = 40) =>
+  $.ui.mount({ ...PANE, surface: 'terminal', props: { ...PANE.props, bodyColumns: cols, scroll: { offset: 0, bodyRows: rows } } })
+
+const MIX = [
+  ct('T001', '手前の仕事', 5, 'A案件'),
+  ct('T002', '分類なし1', 1), // いちばん順位が高いが「未分類」は未完了の最後
+  ct('T003', 'B の先頭', 2, 'B案件'),
+  ct('T004', 'A の2つめ', 6, 'A案件'),
+  ct('T005', 'C の先頭', 3, 'C案件'),
+  ct('T006', 'B の2つめ', 9, 'B案件'),
+  ct('T007', '完了A', undefined, 'A案件', '完了'),
+  ct('T008', '完了なし', undefined, undefined, '完了'),
+]
+
+test('カテゴリ（C1・C2）：未完了はカテゴリごとにまとまる。カテゴリの順は「いちばん順位が高いタスク」の順。「未分類」は未完了の最後、完了はその後ろに1つだけ', async ($, on) => {
+  const { n } = await setup($, on, { data: catData(MIX) })
+  await $.tool.call({ tool: AT })
+  const ui = await mountAll($)
+  const ts = await texts(ui)
+  // B（順位2）→ C（3）→ A（5）→ 未分類 → 完了
+  expect(heads(ts)).toEqual(['■ B案件（2）', '■ C案件（1）', '■ A案件（2）', '■ 未分類（1）', '■ 完了（2）'])
+  // カテゴリの中は今の並び（順位の順）のまま。完了は新しい順
+  expect(taskIds(ts)).toEqual(['T003', 'T006', 'T005', 'T001', 'T004', 'T002', 'T008', 'T007'])
+  // 行の形は今のまま
+  expect(ts).toContain('[ToDo] T003 B の先頭 ・dev-a')
+  expect(ts).toContain('[済] T008 完了なし ・dev-a')
+  await ui.unmount()
+  expect(n.writes).toBe(0)
+})
+
+test('カテゴリ（C2）：見出しの件数は実物の件数と合う。数え漏れ・二重がない', async ($, on) => {
+  await setup($, on, { data: catData(MIX) })
+  await $.tool.call({ tool: AT })
+  const ui = await mountAll($)
+  const ts = await texts(ui)
+  const sum = heads(ts).reduce((n, h) => n + Number(/（(\d+)）$/.exec(h)![1]), 0)
+  expect(sum).toBe(MIX.length)
+  const ids = taskIds(ts)
+  expect(new Set(ids).size).toBe(ids.length)
+  expect(ids.length).toBe(MIX.length)
+  // 未完了の見出しの合計は、上の「未完了 N」と同じ
+  const top = (await heading(ui)) as string
+  const openSum = heads(ts).filter(h => !h.startsWith('■ 完了')).reduce((n, h) => n + Number(/（(\d+)）$/.exec(h)![1]), 0)
+  expect(top).toContain(`未完了 ${openSum}`)
+  await ui.unmount()
+})
+
+test('カテゴリ（C1）：無い・空・空白だけ・数字・null・配列・オブジェクト・真偽値は「未分類」に入り、落ちない。前後の空白は除いて同じカテゴリに', async ($, on) => {
+  const bad: unknown[] = [undefined, '', '   ', 123, null, ['A案件'], { a: 1 }, true]
+  const rows = [
+    ...bad.map((c, i) => ct(`T${String(i + 1).padStart(3, '0')}`, `おかしな${i + 1}`, i + 1, c)),
+    ct('T020', '空白つき', 20, '  A案件  '),
+    ct('T021', '空白なし', 21, 'A案件'),
+  ]
+  await setup($, on, { data: catData(rows) })
+  await $.tool.call({ tool: AT })
+  const ui = await mountAll($)
+  const ts = await texts(ui)
+  expect(heads(ts)).toEqual(['■ A案件（2）', '■ 未分類（8）'])
+  expect(taskIds(ts).length).toBe(10)
+  await ui.unmount()
+})
+
+test('カテゴリ（C2）：完了は、カテゴリがあっても全部まとめて最後の「■ 完了（N）」に入る（薄く）。未完了が 0 件でも落ちない', async ($, on) => {
+  await setup($, on, { data: catData([ct('T001', '済A', undefined, 'A案件', '完了'), ct('T002', '済B', undefined, 'B案件', '完了')]) })
+  await $.tool.call({ tool: AT })
+  const ui = await mountAll($)
+  const ts = await texts(ui)
+  expect(heads(ts)).toEqual(['■ 完了（2）'])
+  const h = ((await ui.findAll({ type: 'Text' })) as any[]).find(t => t.text === '■ 完了（2）')
+  expect(h.props.dimColor).toBe(true)
+  const o = ((await ui.findAll({ type: 'Text' })) as any[]).find(t => t.text.includes('T001'))
+  expect(o.props.dimColor).toBe(true)
+  await ui.unmount()
+})
+
+test('カテゴリ（C2）：順位が同じ・順位が無いタスクでも、カテゴリの順は安定（順位なしは最後・同順位は ID 順）', async ($, on) => {
+  const rows = [ct('T001', 'x', undefined, 'N案件'), ct('T002', 'y', 3, 'M案件'), ct('T003', 'z', 3, 'L案件')]
+  await setup($, on, { data: catData(rows) })
+  await $.tool.call({ tool: AT })
+  const ui = await mountAll($)
+  expect(heads(await texts(ui))).toEqual(['■ M案件（1）', '■ L案件（1）', '■ N案件（1）'])
+  await ui.unmount()
+})
+
+test('カテゴリ（C3）：ページの頭がカテゴリの途中なら「（続き）」付きの見出しをもう一度出す。見出しも 1 行に数える。ふつうの頭には付けない', async ($, on) => {
+  // A案件 7 件・B案件 2 件。bodyRows 10 → 1 ページ 5 行
+  const rows = [
+    ...Array.from({ length: 7 }, (_, i) => ct(`T00${i + 1}`, `a${i + 1}`, i + 1, 'A案件')),
+    ct('T008', 'b1', 8, 'B案件'),
+    ct('T009', 'b2', 9, 'B案件'),
+  ]
+  await setup($, on, { data: catData(rows) })
+  await $.tool.call({ tool: AT })
+  const ui = await mountAll($, 10)
+  const p1 = await texts(ui)
+  expect(heads(p1)).toEqual(['■ A案件（7）']) // 1 ページ目：見出し＋4件（続きは付かない）
+  expect(taskIds(p1)).toEqual(['T001', 'T002', 'T003', 'T004'])
+  await ui.press({ key: 'next' })
+  const p2 = await texts(ui)
+  expect(heads(p2)).toEqual(['■ A案件（7）（続き）']) // 2 ページ目：頭は A の途中
+  expect(taskIds(p2)).toEqual(['T005', 'T006', 'T007'])
+  expect((await heading(ui)) as string).toContain('2/3')
+  // B の見出しがページの最後の1行だけになるときは、次のページの頭に送る（見出しだけを残さない）
+  await ui.press({ key: 'next' })
+  const p3 = await texts(ui)
+  expect(heads(p3)).toEqual(['■ B案件（2）'])
+  expect(taskIds(p3)).toEqual(['T008', 'T009'])
+  expect((await heading(ui)) as string).toContain('3/3')
+  // 全ページを通して、行が1回ずつ出ている
+  await ui.unmount()
+})
+
+test('カテゴリ（C3）：どのページも bodyRows - 5 行に収まり、全ページで行が 1 回ずつ。続きの見出しは名前と件数が元と同じ', async ($, on) => {
+  const rows = [
+    ...Array.from({ length: 13 }, (_, i) => ct(`T${String(i + 1).padStart(3, '0')}`, `a${i + 1}`, i + 1, 'A案件')),
+    ...Array.from({ length: 6 }, (_, i) => ct(`T${String(i + 20).padStart(3, '0')}`, `m${i + 1}`, 20 + i)), // 未分類
+    ...Array.from({ length: 4 }, (_, i) => ct(`T${String(i + 40).padStart(3, '0')}`, `d${i + 1}`, undefined, 'A案件', '完了')),
+  ]
+  await setup($, on, { data: catData(rows) })
+  await $.tool.call({ tool: AT })
+  const ui = await mountAll($, 10)
+  const seen: string[] = []
+  let pages = 1
+  for (let p = 0; p < pages; p++) {
+    const ts = await texts(ui)
+    if (p === 0) pages = Number(/\/(\d+) ページ/.exec((await heading(ui)) as string)![1])
+    // 見出し（全部のタスク …）と足元（行を押すと詳細）を除いた中身が 5 行以内
+    const body = ts.filter(t => t !== '行を押すと詳細' && !t.startsWith('全部のタスク'))
+    expect(body.length).toBeLessThanOrEqual(5)
+    seen.push(...taskIds(ts))
+    for (const h of heads(ts)) expect(h).toMatch(/^■ (A案件|未分類|完了)（(13|6|4)）(（続き）)?$/)
+    if (p < pages - 1) await ui.press({ key: 'next' })
+  }
+  expect(seen.sort()).toEqual(rows.map(r => r.id).sort())
+  await ui.unmount()
+})
+
+test('カテゴリ（C4）：ふつうの画面は区画も並びも変わらず、カテゴリの見出しは出ない', async ($, on) => {
+  await setup($, on, { data: catData(MIX) })
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const ts = await texts(ui)
+  expect(heads(ts)).toEqual(['■ 今日の予定', '■ 山田さん（今日まで）', '■ AI（今日の計画）', '■ AI（これから）', '■ 近いうちに（山田さん）'])
+  expect(ts.some(t => /■ [ABC]案件/.test(t))).toBe(false)
+  await ui.unmount()
+})
+
+test('カテゴリ（C4）：タスクの詳細に「カテゴリ：…」が出る。無いときは、未完了なら「未分類」、完了なら出さない', async ($, on) => {
+  await setup($, on, { data: catData(MIX) })
+  const detailText = async (id: string) => {
+    await $.tool.call({ tool: 'mcp__ai-bunshin-panel__open_task', id })
+    const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+    const ts = await texts(ui)
+    await ui.unmount()
+    return ts
+  }
+  expect(await detailText('T001')).toContain('カテゴリ：A案件')
+  expect(await detailText('T002')).toContain('カテゴリ：未分類')
+  expect((await detailText('T008')).some(t => t.startsWith('カテゴリ：'))).toBe(false)
+  expect(await detailText('T007')).toContain('カテゴリ：A案件')
+})
+
+test('カテゴリ（C5・C6）：見出しは1行で切れる（truncate-end）。幅20でも崩れず、一覧→詳細→戻ると全部の一覧、ガントも動く', async ($, on) => {
+  const long = 'とても長いカテゴリの名前がここに入ります（幅を超える）'
+  const { titles } = await setup($, on, {
+    data: catData([ct('T001', 'x', 1, long), ct('T002', 'y', 2, long)]),
+    forecast: fcFile([ft('T001', '実装', 'AI', '2026-11-02', '2026-11-03')]),
+  })
+  await $.tool.call({ tool: AT })
+  let ui = await mountAll($, 12, 20)
+  const h = ((await ui.findAll({ type: 'Text' })) as any[]).find(t => t.text.startsWith('■ '))
+  expect(h.text).toBe(`■ ${long}（2）`)
+  expect(h.props.wrap).toBe('truncate-end')
+  await ui.unmount()
+  await $.tool.call({ tool: 'mcp__ai-bunshin-panel__open_task', id: 'T001' })
+  expect(titles.at(-1)).toBe('T001 の詳細')
+  ui = await mountAll($, 12, 20)
+  await ui.press({ key: 'back' })
+  expect(titles.at(-1)).toBe('全部のタスク')
+  await ui.unmount()
+  await $.tool.call({ tool: GT })
+  expect(titles.at(-1)).toBe('これから2週間')
+  await $.tool.call({ tool: 'mcp__ai-bunshin-panel__open_task', id: '' })
+  expect(titles.at(-1)).toBe('今日のやること')
 })
