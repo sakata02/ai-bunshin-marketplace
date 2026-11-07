@@ -20,6 +20,7 @@ DASH="$PLUGIN_ROOT/scripts/update_dashboard.py"
 WATCH="$PLUGIN_ROOT/scripts/watch_check.py"          # 時間の上限・手数の上限・見張りの点検・「上限で止めた」印（T095・T066）
 LIMITED="$PLUGIN_ROOT/scripts/auto/run_limited.py"   # claude を時間の上限つきで動かす（T095）
 SANDBOX="$PLUGIN_ROOT/scripts/sandbox_settings.py"  # 実行の段の囲いの設定を作る（T119）。-I＝本人のフォルダの中のファイルを読み込まない
+CANARY="$PLUGIN_ROOT/scripts/sandbox_canary.py"     # 囲いが効いているかを確かめる点検（T119 G4a）。-I で動かす
 PLUGIN_ROOT_RAW="${0:a:h:h:h}"                       # 呼ばれた名前のままのプラグインの場所（installPath）。PLUGIN_ROOT はリンクを解いた実体
 # カレンダーの URL は、この実行の環境変数に載せない（claude の中から読めないように。T119 S14）。囲いの設定を作る1行にだけ付けて渡す
 unset AI_BUNSHIN_CALENDAR_URL
@@ -104,6 +105,7 @@ LIMITED_PID=""   # 起動中の run_limited の PID（背景で動かして wait
 LAUNCHING=0      # 1＝起動の直前から PID を控えるまで（この間に届いたときは $! を使う）
 BG_BEFORE=""     # 起動の直前の $!（まだ背景に出していない・前の run_limited の PID のままのときは、使わない）
 CUR_OUT=""       # 起動中の run_limited の出力の一時ファイル（名前を決めたら、ファイルを作る前に控える）
+CUR_TMPS=()      # 囲いの点検が作る一時ファイル（設定の写し・結果。名前を決めたら、作る前に控える）
 on_stop() {
   local name=$1 num=$2 pid=$LIMITED_PID stopped=0
   trap '' TERM HUP INT   # 片づけの最中に重ねて届いても、途中でやめない
@@ -118,6 +120,8 @@ on_stop() {
     stopped=1
   fi
   [ -n "$CUR_OUT" ] && rm -f "$CUR_OUT"
+  local f
+  for f in "${CUR_TMPS[@]}"; do rm -f "$f"; done   # 囲いの点検の一時ファイル（設定の写し・結果）
   # ログの文は実際の動きに合わせる：run_limited が動いていたとき（claude を起動したあと）だけ「claude を止め」と書く
   if [ "$stopped" = 1 ]; then
     log "シグナル（$name）を受けて止めました。claude を止め、ロックと一時ファイルを片づけました"
@@ -268,6 +272,59 @@ except BaseException:
 PY
 }
 
+# 囲いのカナリア（T119 G4a。決定 S05・S06・S15・S16）：Python を許す前に、囲いが本当に効いているかを1回確かめる。
+# 囲いは claude の中の Bash に掛かるもので、外から同じ囲いは作れない。そこで本番と同じ --settings と、点検の道具（sandbox_canary.py）だけを許す --allowedTools で、
+# 短い claude -p を1回動かし、その中で点検の道具を動かす。結果は本人のフォルダの tasks.json と同じフォルダに JSON で残る（点検の道具が書く）。
+# 囲いの外のここで、道具に --judge を付けて読む。全部止まった（6つの項目がすべて blocked）ときだけ戻り値 0。
+# 通った・確かめられなかった・結果が無い・claude が失敗・時間切れ・道具が無い、のどれでも戻り値 1（呼ぶ側は Python を許さず、今の許可に退く）。
+# 理由は CANARY_WHY（項目名と状態だけ。パス・URL を入れない）。run_claude と同じく、背景で動かして wait する（シグナルを受けたら on_stop が止める）
+sandbox_canary() {
+  local sjson="$1" nonce="$RUN_ID.canary" sec="${AI_BUNSHIN_CANARY_SEC:-180}" min cstatus jrc cprompt
+  local sfile="$LOG_DIR/.out.canary_settings.$$" cres="$ROOT/00_タスク管理/data/.sandbox_canary.$$.json" cout="$LOG_DIR/.out.canary.$$"
+  CANARY_WHY=""
+  case "$sec" in (''|*[!0-9]*|0) sec=180 ;; esac
+  min=$((sec / 60.0))
+  if [ ! -f "$CANARY" ]; then CANARY_WHY="点検の道具が無い"; return 1; fi
+  CUR_TMPS=("$sfile" "$cres" "$cres.tmp" "$cout")   # CUR_OUT は run_claude の出力ファイル用に空けておく（上書きすると、シグナルのときに残る）
+  if ! printf '%s\n' "$sjson" > "$sfile" 2>/dev/null || ! : > "$cout" 2>/dev/null; then
+    CANARY_WHY="点検の一時ファイルを作れなかった"
+    rm -f "$sfile" "$cout"; CUR_TMPS=()
+    return 1
+  fi
+  rm -f "$cres" "$cres.tmp"
+  cprompt="これは自動実行の囲いの点検です。次の Bash コマンドを、1回だけ、そのままの形で実行してください。ほかのコマンドの実行・ファイルの読み書き・調べものはしないでください。終わったら「完了」とだけ答えてください。
+python3 -I \"$CANARY\" --home \"$ROOT\" --settings-file \"$sfile\" --nonce \"$nonce\" --out \"$cres\""
+  BG_BEFORE=$!   # （囲いの点検の起動。run_claude と同じ控え方。test_long_run_watch の目印が1つに決まるよう、行末に注を付けてある）
+  LAUNCHING=1    # （同上）
+  python3 "$LIMITED" --minutes "$min" --stdout "$cout" -- claude -p "$cprompt" \
+    --permission-mode acceptEdits \
+    --model sonnet \
+    --max-turns 6 \
+    --allowedTools "Bash(python3 -I \"$CANARY\":*),Bash(python3 -I $CANARY:*)" \
+    --disallowedTools "$DENY" \
+    --settings "$sjson" \
+    "${ADD_DIR_ARGS[@]}" \
+    < /dev/null 2>> "$LOG" &
+  LIMITED_PID=$!
+  LAUNCHING=0    # （同上）
+  wait "$LIMITED_PID"
+  cstatus=$?
+  LIMITED_PID=""
+  if [ $cstatus -eq 124 ]; then
+    CANARY_WHY="時間切れ"
+  elif [ $cstatus -ne 0 ]; then
+    CANARY_WHY="claude が失敗した（終了コード $cstatus）"
+  else
+    CANARY_WHY=$(python3 -I "$CANARY" --judge "$cres" --nonce "$nonce" 2>/dev/null)
+    jrc=$?
+    [ $jrc -ne 0 ] && [ -z "$CANARY_WHY" ] && CANARY_WHY="判定できなかった"
+    [ $jrc -eq 0 ] && CANARY_WHY=""
+  fi
+  rm -f "$sfile" "$cres" "$cres.tmp" "$cout"
+  CUR_TMPS=()
+  [ -z "$CANARY_WHY" ]
+}
+
 # claude を時間の上限と手数の上限つきで動かす（T095・T066）。結果は RESULT、終了コードは STATUS。
 # 時間の上限（auto.max_minutes。段階を決めたあとに決める）を超えたら、自分の起動した claude のグループだけを止めて exit 124。
 # 手数の上限（auto.max_turns。claude -p --max-turns）は claude 自身が止まる。終了コード 1 で、出力の最後の行が上限の文面（Error: Reached max turns (N)）のときだけ、
@@ -312,12 +369,28 @@ run_claude() {
     if [ $sbx_rc -eq 0 ] && printf '%s' "$sbx_json" | python3 -I -c 'import json,sys
 d=json.load(sys.stdin)
 sys.exit(0 if isinstance(d, dict) and d.get("sandbox", {}).get("enabled") is True else 1)' 2>/dev/null; then
-      SANDBOX_ARGS=(--settings "$sbx_json")
-      SANDBOX_TOOLS=",Bash(python3:*)"
-      log "囲いの設定を作れたので、Python を許して動かす"
+      # 囲いの設定は作れた。Python を許す前に、囲いが本当に効いているかを点検する（カナリア）。全部止まった日だけ許す。
+      # 通った・確かめられなかった・時間切れ・点検が動かなかった日は、囲い（--settings）も Python も付けず、今の許可で動かす（囲いなしでの Python はあり得ない。S05・S19）
+      if sandbox_canary "$sbx_json"; then
+        SANDBOX_ARGS=(--settings "$sbx_json")
+        SANDBOX_TOOLS=",Bash(python3:*)"
+        log "囲いの設定を作れたので、点検（カナリア）も全部止まったのを確かめて、Python を許して動かす"
+      else
+        SANDBOX_ARGS=()
+        SANDBOX_TOOLS=""
+        log "囲いの点検（カナリア）が通らなかったので、Python は許さず今の許可で動かす（項目：${CANARY_WHY:-不明}）"
+        case "$CANARY_WHY" in
+          *write=leaked*|*case=leaked*) log "囲いの点検：守る先に、名前が .ai-bunshin-canary- で始まる空のファイルが残っているかもしれません（消さずに残しています。確かめてください）" ;;
+        esac
+        case "$CANARY_WHY" in
+          *parent_mv=leaked*) log "囲いの点検：本人のフォルダ直下のフォルダの名前を一時的に変えました。名前に .ai-bunshin-canary- が付いたフォルダが残っていたら、元の名前に戻してください" ;;
+        esac
+      fi
     else
       # 理由は囲いの設定を作る道具の1行。パス・URL らしきものが入っていたら出さない（ログに残さない）
-      sbx_why=$(printf '%s\n' "$sbx_out" | head -n 1 | sed 's/^sandbox_settings: //' | cut -c1-120)
+      sbx_why=$(printf '%s\n' "$sbx_out" | head -n 1 | sed 's/^sandbox_settings: //' | python3 -I -c 'import sys
+t = sys.stdin.buffer.read().decode("utf-8", "replace").splitlines()
+sys.stdout.buffer.write(((t[0] if t else "")[:120]).encode("utf-8"))' 2>/dev/null)   # 文字の数で切る（cut -c は C ロケールでバイトで切るため）
       [ $sbx_rc -eq 0 ] && sbx_why="囲いの設定の形が正しくありません"
       if [[ "$sbx_why" == *'://'* || "$sbx_why" == *'/'[^\ ]* || "$sbx_why" == *"$ROOT"* ]]; then sbx_why="理由の文面に場所が含まれるため省略"; fi
       SANDBOX_ARGS=()
