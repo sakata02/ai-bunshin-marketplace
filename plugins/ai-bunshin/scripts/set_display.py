@@ -13,8 +13,8 @@
   名前：features terms requests_max stop_notice review_view team_view
   値：simple か full（requests_max だけは 1〜20 の整数）
 
-「[見せ方：…]」の1行を必ず出す（設計 U11・P12）。起動時のまとめ（update_dashboard.py）と同じ文面（K3）。
-個別の設定があるときは、その1行の次に「個別の設定（型より優先）：terms=full、…」を出す。
+最後の行は必ず「[見せ方：…]」（設計 U11・P12）。起動時のまとめ（update_dashboard.py）と同じ文面（K3）。
+個別の設定があるときは、その「すぐ前の行」に「個別の設定（型より優先）：terms=full、…」を出す（K11）。
 終了コード：0＝成功、1＝config が読めない・書けない・自動実行の中など、2＝使い方・値の間違い（何も書かない）。
 """
 import json
@@ -33,7 +33,7 @@ TYPE_LINE = {"simple": "[見せ方：シンプル（言葉・件数の決まり�
              "full": "[見せ方：フル（今までどおり）]"}
 BROKEN_LINE = "[見せ方：設定の display.type を読めないので、フルで動いています（simple か full に直してください）]"
 
-USAGE = __doc__.split("使い方:")[1].split("「[見せ方：…]」の1行を必ず")[0].rstrip()
+USAGE = __doc__.split("使い方:")[1].split("最後の行は必ず")[0].rstrip()
 USAGE = "使い方:" + USAGE
 
 
@@ -97,7 +97,7 @@ def display_line(typ, broken=False):
 
 
 def overrides_line(ov):
-    """個別の設定があるときの1行（「[見せ方：…]」の次に出す。K11）。無ければ空。update_dashboard.py の overrides_line と同じ文面・並び。"""
+    """個別の設定があるときの1行（「[見せ方：…]」のすぐ前に出す。K11）。無ければ空。update_dashboard.py の overrides_line と同じ文面・並び。"""
     return ("個別の設定（型より優先）：" + "、".join(f"{n}={ov[n]}" for n in OVERRIDE_NAMES if n in ov)) if ov else ""
 
 
@@ -323,9 +323,9 @@ def main(argv=None):
             print(show_table(typ, ov, cfg.get("display") not in (None, "", {}, []), invalid))
             for n in notes:
                 print("注意：" + n)
-            print(display_line(typ, broken))
             if overrides_line(ov):
                 print(overrides_line(ov))
+            print(display_line(typ, broken))
             return 0
 
         if os.environ.get("AI_BUNSHIN_AUTO_RUN"):
@@ -350,9 +350,9 @@ def main(argv=None):
                 print("個別の設定を全部戻しました。型は変えていません")
         for n in notes:
             print("注意：" + n)
-        print(display_line(typ, broken))
         if overrides_line(ov):
-            print(overrides_line(ov))   # 「[見せ方：…]」の次の行（K11。起動時のまとめと同じ並び）
+            print(overrides_line(ov))   # 「[見せ方：…]」のすぐ前の行（K11。起動時のまとめと同じ並び）
+        print(display_line(typ, broken))   # 最後の行は必ず「[見せ方：…]」（P12）
         return 0
     except Fail as e:
         print(str(e), file=sys.stderr)

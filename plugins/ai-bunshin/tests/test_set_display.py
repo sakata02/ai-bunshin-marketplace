@@ -5,7 +5,7 @@
 - 型を切り替えても個別の設定（overrides）は残る。消すのは reset-overrides のときだけ
 - 知らない名前・値は書かない（requests_max は 1〜20 の整数だけ）。使い方の間違いは終了コード2
 - 壊れた config.json（JSON でない・空・{ } でない・UTF-8 でない・無い）は書き換えず、日本語で案内して終了コード1
-- 新しい「[見せ方：…]」の1行を出す（P12）。個別の設定の行はその次の行（K11）。update_dashboard.py と同じ文面・並び（K3・K8）
+- 新しい「[見せ方：…]」の1行を出す（P12）。最後の行は必ず「[見せ方：…]」で、個別の設定の行はそのすぐ前（K11）。update_dashboard.py と同じ文面・並び（K3・K8）
 - show・書いたあとの見え方は、update_dashboard.py の read_display と同じ（範囲外の値は「範囲外のためフル」。K8）
 - 自動実行の中では切り替えない（P4）：環境変数で止める。daily_cycle.sh の DENY・道具の絞りでも届かない
 - 書き込み：一時ファイル→置き換え。失敗しても・書いている間にほかで書き換えられても、元のファイルは壊れない・一時ファイルを残さない
@@ -406,14 +406,14 @@ def t14_last_line_is_new_state():
         rc, out, err = run(root, *args)
         assert rc == 0, (args, err)
         assert kata_line(out) == want, (args, out)
-    # 個別の設定があるときは、「[見せ方：…]」の次の行に出す（K11）。個別の設定が無いときは「[見せ方：…]」が最後の行
+        assert out.rstrip("\n").split("\n")[-1] == want, f"{args}：最後の行が「[見せ方：…]」でない（P12）：{out!r}"
+    # 個別の設定があるときは、「[見せ方：…]」のすぐ前の行に出す（K11）。最後の行は必ず「[見せ方：…]」
+    ov_line = "個別の設定（型より優先）：terms=full、requests_max=5"
     run(root, "override", "terms", "full")
-    rc, out, err = run(root, "override", "requests_max", "5")
-    lines = out.rstrip("\n").split("\n")
-    assert lines[-2] == FULL_LINE and lines[-1] == "個別の設定（型より優先）：terms=full、requests_max=5", out
-    rc, out, err = run(root, "show")
-    lines = out.rstrip("\n").split("\n")
-    assert lines[-2] == FULL_LINE and lines[-1] == "個別の設定（型より優先）：terms=full、requests_max=5", out
+    for args in (("override", "requests_max", "5"), ("show",), ("type", "full"), ("type", "full")):
+        rc, out, err = run(root, *args)
+        lines = out.rstrip("\n").split("\n")
+        assert lines[-2] == ov_line and lines[-1] == FULL_LINE, (args, out)
     rc, out, err = run(root, "reset-overrides")
     assert out.rstrip("\n").split("\n")[-1] == FULL_LINE and "個別の設定（型より優先）" not in out, out
 
@@ -787,7 +787,7 @@ def t34_show_table_says_out_of_range_means_full():
         assert rc == 0, err
         assert f"| {name} | 範囲外のためフル |" in out, (ov, out)
         assert "| team_view | full |" in out and "個別の設定（型より優先）：team_view=full" in out, out
-        assert f"{name}=" not in out.split("[見せ方：")[1], f"{ov}：効かない値を、効く個別の設定の行に出している"
+        assert f"{name}=" not in out.split("個別の設定（型より優先）")[1],f"{ov}：効かない値を、効く個別の設定の行に出している"
     # 有効な値と、値を書いていない項目は今までどおり
     root = make_owner(dump({"display": {"type": "simple", "overrides": {"requests_max": 20}}}))
     out = run(root, "show")[1]
@@ -801,11 +801,33 @@ def t35_show_notes_missing_type():
     rc, out, err = run(root, "show")
     assert rc == 0, err
     assert out.index("type 未設定（フル）") < out.index(FULL_LINE), out
-    assert kata_line(out) == FULL_LINE and out.rstrip("\n").split("\n")[-1] == "個別の設定（型より優先）：terms=full", out
+    assert out.rstrip("\n").split("\n")[-2:] == ["個別の設定（型より優先）：terms=full", FULL_LINE], out
     # type が書いてあるとき・display が無いときは、この注記を出さない
     for v in ({"display": {"type": "simple"}}, {}, {"display": {}}):
         out = run(make_owner(dump(v)), "show")[1]
         assert "type 未設定" not in out, (v, out)
+
+
+@case
+def t36_line_order_same_as_update_dashboard_startup():
+    # 起動時のまとめ（update_dashboard.py の出力）と、set_display.py の出力で、2つの行が同じ文・同じ並び（個別の設定の行 → 「[見せ方：…]」）
+    for disp in ({"type": "simple", "overrides": {"terms": "full", "requests_max": 5}},
+                 {"type": "full", "overrides": {"team_view": "simple"}},
+                 {"type": "simple", "overrides": {}}):
+        cfg = {"owner": "テスト", "owner_call": "テストさん", "ai_name": "テストAI", "departments": ["総務"], "display": disp}
+        root = make_owner(dump(cfg))
+        with open(os.path.join(root, "00_タスク管理", "data", "tasks.json"), "w", encoding="utf-8") as f:
+            json.dump({"project": {"name": "テストAI", "daily_capacity_default": 8.0, "holidays": []}, "daily_sprints": [],
+                       "sprints": [], "tasks": []}, f, ensure_ascii=False)
+        r = subprocess.run([sys.executable, os.path.join(SCRIPTS, "update_dashboard.py")], capture_output=True, text=True,
+                           encoding="utf-8", env=env_for(root), cwd=root, timeout=120, input="")
+        start = r.stdout.split("\n")
+        rc, out, err = run(root, "show")
+        mine = [l for l in out.split("\n") if l.startswith(("個別の設定（型より優先）", "[見せ方："))]
+        i = next(n for n, l in enumerate(start) if l.startswith("[見せ方："))
+        theirs = start[i - 1:i + 1] if disp["overrides"] else start[i:i + 1]
+        assert theirs == mine, f"{disp}：起動時の出力と並び・文が違う\n起動時：{theirs}\nset_display：{mine}\n{r.stdout[:600]}{r.stderr[:300]}"
+        assert (not disp["overrides"]) or start[i - 1].startswith("個別の設定（型より優先）"), "個別の設定の行が「[見せ方：…]」のすぐ前にない"
 
 
 shutil.rmtree(BASE, ignore_errors=True)
