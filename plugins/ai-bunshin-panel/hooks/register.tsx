@@ -465,9 +465,9 @@ function ganttCells(t: ForecastTask, days: ForecastDay[]): { cells: string; beyo
   return { cells: mark.join(''), beyond }
 }
 
-// 棒の行は「本人」「AI」の2つのまとまりに分ける（見出しの件数は、そのまとまりの描ける件数）
+// 棒の行は案件のカテゴリごとのまとまりに分ける（見出しの件数は、そのカテゴリの描ける件数）
 type GanttGroup = { label: string; count: number; rows: string[] }
-type GanttShow = { head: string; overdueLine: string; axis: string; groups: GanttGroup[]; waitLine: string; more: number }
+type GanttShow = { head: string; overdueLine: string; axis: string; groups: GanttGroup[]; waitLine: string; more: number; drawn: number }
 
 // 棒（または印）の行にできるタスクと、期限を過ぎた本人のタスク（今日より前が期日。行にせず件数だけ出す）に分ける
 function ganttSplit(g: Gantt) {
@@ -478,37 +478,42 @@ function ganttSplit(g: Gantt) {
 }
 
 // 画面に出す文字を作る（幅 cols・窓の高さ bodyRows）。タスク名の幅は残りの幅から、行の数は窓の高さから決める。
-// 棒の行のほかに使う行：見出し・凡例・日付・「ほか」・件数のまとめ・ボタンで 6 行、期限超過の行（呼び方が長い人は折り返す分）
-function ganttLines(g: Gantt, cols: number, bodyRows: number, call: string): GanttShow {
+// 棒の行のほかに使う行：見出し・凡例・日付・「ほか」・件数のまとめ・ボタンで 6 行、期限超過の行（呼び方が長い人は折り返す分）。
+// 棒の行はカテゴリごとにまとめる。カテゴリは board.all の並び（全部の一覧と同じ。「未分類」は最後）。
+// forecast.json の tasks にはカテゴリが無いので、id で board.all から引く（引けないものは「未分類」）
+function ganttLines(g: Gantt, cols: number, bodyRows: number, call: string, all: AllRow[]): GanttShow {
   const { draw, overdue } = ganttSplit(g)
   const overdueLine = overdue > 0 ? `期限超過 ${overdue} 件（${call}・今日より前）` : ''
   const overdueRows = overdueLine ? Math.ceil(cellWidth(overdueLine) / Math.max(1, cols)) : 0
-  // 見出し（まとまりごとに1行）と、まとまりの間の空行も、窓の行に数える
-  const own = draw.filter(t => t.who === '本人')
-  const ai = draw.filter(t => t.who !== '本人')
-  const sets = [
-    { label: call, list: own },
-    { label: 'AI', list: ai },
-  ].filter(x => x.list.length > 0)
-  const overhead = sets.length === 0 ? 0 : sets.length * 2 - 1 // 見出し + 空行（2つのまとまりなら 2 + 1）
-  const rowsMax = Math.max(sets.length, bodyRows - 6 - overdueRows - overhead)
-  // 棒の数：両方に件数があれば最低1行ずつ。残りは前（本人）から詰める
-  const take = sets.map(x => x.list.length)
-  if (sets.length === 2 && take[0] + take[1] > rowsMax) {
-    take[0] = Math.min(take[0], Math.max(1, rowsMax - 1))
-    take[1] = Math.min(take[1], Math.max(1, rowsMax - take[0]))
-  } else if (sets.length === 1) {
-    take[0] = Math.min(take[0], rowsMax)
+  const catById = new Map<string, string>()
+  const order: string[] = []
+  for (const r of all) {
+    if (r.done) continue
+    catById.set(r.id, r.category)
+    if (r.category !== UNCAT && !order.includes(r.category)) order.push(r.category)
   }
-  const picked = sets.map((x, i) => x.list.slice(0, take[i]))
+  order.push(UNCAT)
+  const sets = order
+    .map(name => ({ name, list: draw.filter(t => (catById.get(t.id) ?? UNCAT) === name) }))
+    .filter(x => x.list.length > 0)
+  // 窓の行：先頭から、見出し・間の空行・最低1行ずつが入るところまでのカテゴリを出す（k 個で 3k - 1 行）。入らないカテゴリは見出しごと出さない
+  const avail = Math.max(0, bodyRows - 6 - overdueRows)
+  const shownSets = Math.min(sets.length, Math.floor((avail + 1) / 3))
+  // 棒の数：出すカテゴリに最低1行ずつ。余った行は前のカテゴリから詰める
+  let spare = shownSets === 0 ? 0 : avail - (shownSets * 3 - 1)
+  const picked = sets.slice(0, shownSets).map(x => {
+    const take = Math.min(x.list.length, 1 + spare)
+    spare -= take - 1
+    return x.list.slice(0, take)
+  })
   const shownAll = picked.flat()
   const idW = Math.max(4, ...shownAll.map(t => cellWidth(t.id)))
   const titleW = Math.max(6, Math.min(24, cols - idW - 1 - 1 - g.days.length - 2))
   const lead = ' '.repeat(idW + 1 + titleW + 1)
-  const groups: GanttGroup[] = sets.map((x, i) => ({
-    label: `■ ${x.label}（${x.list.length}）`,
-    count: x.list.length,
-    rows: picked[i].map(t => {
+  const groups: GanttGroup[] = picked.map((rows, i) => ({
+    label: `■ ${sets[i].name}（${sets[i].list.length}）`,
+    count: sets[i].list.length,
+    rows: rows.map(t => {
       const { cells, beyond } = ganttCells(t, g.days)
       return `${fitCells(t.id, idW)} ${fitCells(t.title, titleW)} ${cells}${beyond ? '→' : ''}`
     }),
@@ -522,6 +527,7 @@ function ganttLines(g: Gantt, cols: number, bodyRows: number, call: string): Gan
     groups,
     waitLine: parts.length ? `${parts.join('・')}（棒なし）` : '',
     more: draw.length - shownAll.length,
+    drawn: draw.length,
   }
 }
 
@@ -733,7 +739,7 @@ export const register: Register = on => {
 
     if (v.mode === 'gantt') {
       const g = await read($, gantt)
-      const show = g.ok ? ganttLines(g, e.props.bodyColumns, e.props.scroll.bodyRows, call) : undefined
+      const show = g.ok ? ganttLines(g, e.props.bodyColumns, e.props.scroll.bodyRows, call, b.all) : undefined
       return (
         <Box flexDirection="column">
           <Text bold>{show ? show.head : GANTT_TITLE}</Text>
@@ -741,7 +747,7 @@ export const register: Register = on => {
           {show && <Text dimColor wrap="truncate-end">= AI　* 期日　. 休み　→ 先</Text>}
           {show && show.overdueLine !== '' && <Text wrap="wrap">{show.overdueLine}</Text>}
           {show && <Text dimColor>{show.axis}</Text>}
-          {show && show.groups.length === 0 && <Text dimColor>棒にできるタスクなし</Text>}
+          {show && show.drawn === 0 && <Text dimColor>棒にできるタスクなし</Text>}
           {show &&
             show.groups.map((grp, gi) => [
               gi > 0 ? <Text key={`gantt-gap-${gi}`}> </Text> : null,

@@ -813,7 +813,7 @@ test('ガント：凡例とまとめの行は幅40で1行。いちばん行が�
     const lines = texts.reduce((n, t) => n + Math.max(1, Math.ceil(wcols(t) / 40)), 0) + buttons
     expect(lines).toBeLessThanOrEqual(bodyRows)
     // 窓が高いほど棒の行が増える（行の数は窓の高さで決まる）
-    if (bodyRows === 10) expect((await ganttRows(ui)).length).toBe(2) // 期限超過の行は1行・まとまりの見出し1行 → 10 - 6 - 1 - 1 = 2 行（T188）
+    if (bodyRows === 10) expect((await ganttRows(ui)).length).toBe(2) // 期限超過の行は1行 → 10 - 6 - 1 = 3 行のうち、見出し1行 + 棒 2 行（T189）
     await ui.unmount()
   }
 })
@@ -834,11 +834,11 @@ test('ガント：呼び方が長い人は期限超過の行が折り返す。�
   const buttons = ((await ui.findAll({ type: 'Button' })) as { text: string }[]).length
   const lines = texts.reduce((n, t) => n + Math.max(1, Math.ceil(wcols(t) / 40)), 0) + buttons
   expect(lines).toBeLessThanOrEqual(12)
-  expect((await ganttRows(ui)).length).toBe(3) // 12 - 6 - 折り返して 2 行 - まとまりの見出し 1 行 = 3 行（T188）
+  expect((await ganttRows(ui)).length).toBe(3) // 12 - 6 - 折り返して 2 行 = 4 行のうち、見出し 1 行 + 棒 3 行（T189）
   await ui.unmount()
 })
 
-// ---------- 最初にガント・本人と AI を分けて空行（T188） ----------
+// ---------- 最初にガントで開く（T188）。棒の行のまとめ方は下の T189 ----------
 
 const textsOf = async (ui: any) => ((await ui.findAll({ type: 'Text' })) as { text: string }[]).map(t => t.text)
 const rowsAt = (bodyRows: number) => ({ ...PANE.props, scroll: { offset: 0, bodyRows } })
@@ -878,98 +878,165 @@ test('T188 起動：本人のフォルダの外では開かない（forecast.jso
   expect(n.forecastReads).toBe(0)
 })
 
-test('T188 まとまり：先に本人「■ 山田さん（N）」、次に AI「■ AI（N）」。間に空行が1行。まとまりの中は forecast の順のまま。列はそろう', async ($, on) => {
-  // forecast の順は AI・本人・AI・本人・AI（混ぜておく）
-  const tasks = [aiT(1), own(1), aiT(2), own(2), aiT(3)]
-  await setup($, on, { data: open(1), forecast: fcFile(tasks) })
-  const ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: rowsAt(30) })
+// ---------- T189：ガントの棒の行を、案件のカテゴリ（OASYS・AI分身 など）ごとにまとめる ----------
+// forecast.json の tasks にはカテゴリが無い。tasks.json（board.all）から id で引く。引けないものは「未分類」
+type GT1 = { id: string; title: string; priority: number; category?: unknown; status: string; assignee: string }
+const gt = (id: string, priority: number, category?: unknown): GT1 => ({
+  id,
+  title: `題${id}`,
+  priority,
+  ...(category === undefined ? {} : { category }),
+  status: 'ToDo',
+  assignee: 'dev-a',
+})
+const gdata = (tasks: GT1[]) => ({ tasks, daily_sprints: [] })
+const headsOf = (t: string[]) => t.filter(x => x.startsWith('■ '))
+const screenLines = (t: string[], buttons: number) => t.reduce((n, x) => n + Math.max(1, Math.ceil(wcols(x) / 40)), 0) + buttons
+// 4 つのカテゴリ（A・B・C・D）に 3 件ずつ。カテゴリの並びは順位の順（A→B→C→D）。forecast の順は混ぜておく
+const four = () => {
+  const ids = ['A', 'B', 'C', 'D']
+  const data = gdata(ids.flatMap((c, ci) => [1, 2, 3].map(k => gt(`T5${ci}${k}`, ci * 3 + k, `${c}案件`))))
+  const tasks = [3, 2, 1].flatMap(k => ids.map((_, ci) => ft(`T5${ci}${k}`, `題${ci}${k}`, ci % 2 ? '本人' : 'AI', '2026-11-02', '2026-11-04')))
+  return { data, tasks }
+}
+
+test('T189 カテゴリ：見出し「■ カテゴリ（N）」。並びは全部の一覧と同じ（順位の順・未分類は最後）。件数 0 のカテゴリは出ない。間に空行 1 行。中は forecast の順。列はそろう', async ($, on) => {
+  // 順位：T301=1(A)、T201=2(B)、T202=3(B)、T302=4(カテゴリなし)。T400=0(C・forecast に無い)。T303 は tasks.json に無い
+  const data = gdata([gt('T400', 0, 'C案件'), gt('T301', 1, 'A案件'), gt('T201', 2, 'B案件'), gt('T202', 3, 'B案件'), gt('T302', 4)])
+  // forecast の順：T302・T201・T301・T303・T202（混ぜておく）
+  const tasks = [aiT(2), own(1), aiT(1), aiT(3), own(2)]
+  await setup($, on, { data, forecast: fcFile(tasks) })
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: rowsAt(40) })
   const t = await textsOf(ui)
-  const i1 = t.indexOf('■ 山田さん（2）')
-  const i2 = t.indexOf('■ AI（3）')
-  expect(i1).toBeGreaterThan(-1)
-  expect(i2).toBeGreaterThan(i1)
-  expect(t.slice(i1 + 1, i2 - 1).map(r => r.slice(0, 4))).toEqual(['T201', 'T202'])
-  expect(t[i2 - 1]).toBe(' ') // まとまりの間の空行は1行だけ
-  expect(t[i1 - 1]).not.toBe(' ') // 先頭のまとまりの前には空行を足さない
-  expect(t.slice(i2 + 1, i2 + 4).map(r => r.slice(0, 4))).toEqual(['T301', 'T302', 'T303'])
-  // 列：日付の軸と棒の行は、日付の始まる位置が同じ（見出しは列の外）
+  // 全部の一覧と同じ順（C は順位 0 で先だが、描く棒が無いので出ない）
+  expect(headsOf(t)).toEqual(['■ A案件（1）', '■ B案件（2）', '■ 未分類（2）'])
+  const iA = t.indexOf('■ A案件（1）')
+  const iB = t.indexOf('■ B案件（2）')
+  const iU = t.indexOf('■ 未分類（2）')
+  expect(t.slice(iA + 1, iB - 1).map(r => r.slice(0, 4))).toEqual(['T301'])
+  expect(t.slice(iB + 1, iU - 1).map(r => r.slice(0, 4))).toEqual(['T201', 'T202'])
+  expect(t.slice(iU + 1, iU + 3).map(r => r.slice(0, 4))).toEqual(['T302', 'T303']) // forecast の順。引けない T303 は未分類
+  // 空行：まとまりの間に 1 行ずつ。先頭の前には入れない
+  expect(t[iB - 1]).toBe(' ')
+  expect(t[iU - 1]).toBe(' ')
+  expect(t[iA - 1]).not.toBe(' ')
+  expect(t.filter(x => x === ' ').length).toBe(2)
+  // 列：日付の軸と棒の行は幅が同じ
   const axis = t.find(x => /^ +[0-9]{14}$/.test(x))!
-  const rows = [...t.slice(i1 + 1, i2 - 1), ...t.slice(i2 + 1, i2 + 4)]
-  for (const r of rows) expect(wcols(r)).toBe(wcols(axis))
+  for (const r of [...t.slice(iA + 1, iA + 2), ...t.slice(iB + 1, iB + 3), ...t.slice(iU + 1, iU + 3)]) expect(wcols(r)).toBe(wcols(axis))
+  // 本人／AI の見出しは無い。印（AI は =、本人は *）と凡例はそのまま
+  expect(t.some(x => x.startsWith('■ 山田さん') || x.startsWith('■ AI'))).toBe(false)
+  expect(t).toContain('= AI　* 期日　. 休み　→ 先')
+  expect(t.find(x => x.startsWith('T301'))).toContain('=')
+  expect(t.find(x => x.startsWith('T201'))).toContain('*')
+  await ui.unmount()
+  // 全部の一覧と同じ見出しの形・順
+  await $.tool.call({ tool: AT })
+  const all = await $.ui.mount({ ...PANE, surface: 'terminal', props: rowsAt(40) })
+  expect(headsOf(await textsOf(all)).filter(h => !/（0）/.test(h)).map(h => h.replace(/（\d+）/, ''))).toEqual(['■ C案件', '■ A案件', '■ B案件', '■ 未分類'])
+  await all.unmount()
+})
+
+test('T189 カテゴリ：カテゴリが無い・空・文字でないものは未分類。tasks.json に無い id も未分類。未分類だけなら見出しは 1 つ（空行なし）', async ($, on) => {
+  const data = gdata([gt('T201', 1, ''), gt('T202', 2, '  '), gt('T203', 3, 7), gt('T301', 4, null)])
+  await setup($, on, { data, forecast: fcFile([own(1), own(2), own(3), aiT(1), aiT(9)]) })
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: rowsAt(40) })
+  const t = await textsOf(ui)
+  expect(headsOf(t)).toEqual(['■ 未分類（5）'])
+  expect(t).not.toContain(' ')
   await ui.unmount()
 })
 
-test('T188 まとまり：件数は表示しきれない分も含む。窓が小さいときも、両方に最低1行ずつ棒を出す。残りは前（本人）から詰める', async ($, on) => {
-  const tasks = [...Array.from({ length: 5 }, (_, i) => own(i)), ...Array.from({ length: 5 }, (_, i) => aiT(i))]
-  await setup($, on, { data: open(1), forecast: fcFile(tasks) })
-  // bodyRows 12：12 - 6 - 見出し2 - 空行1 = 3 行 → 本人 2・AI 1。ほか 7 件。窓に収まる
-  let ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: rowsAt(12) })
-  let t = await textsOf(ui)
-  expect(t).toContain('■ 山田さん（5）')
-  expect(t).toContain('■ AI（5）')
-  expect((await ganttRows(ui)).map(r => r.slice(0, 4))).toEqual(['T200', 'T201', 'T300'])
-  expect((await ui.find({ type: 'Text', text: /^ほか/ }))?.text).toBe('ほか 7 件')
-  const buttons = ((await ui.findAll({ type: 'Button' })) as unknown[]).length
-  expect(t.reduce((n, x) => n + Math.max(1, Math.ceil(wcols(x) / 40)), 0) + buttons).toBeLessThanOrEqual(12)
-  await ui.unmount()
-  // bodyRows 10：本来は 1 行しか空かないが、両方に1行ずつは出す
-  ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: rowsAt(10) })
-  expect((await ganttRows(ui)).map(r => r.slice(0, 4))).toEqual(['T200', 'T300'])
-  expect((await ui.find({ type: 'Text', text: /^ほか/ }))?.text).toBe('ほか 8 件')
+test('T189 カテゴリ：カテゴリの前後の空白は除いて同じまとまりになる', async ($, on) => {
+  const data = gdata([gt('T201', 1, 'X案件'), gt('T301', 2, ' X案件 ')])
+  await setup($, on, { data, forecast: fcFile([own(1), aiT(1)]) })
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: rowsAt(40) })
+  expect(headsOf(await textsOf(ui))).toEqual(['■ X案件（2）'])
   await ui.unmount()
 })
 
-test('T188 まとまり：本人が1件・AI が多いとき、窓が小さくても本人の1行は消えない。残りは AI', async ($, on) => {
-  const tasks = [own(0), ...Array.from({ length: 8 }, (_, i) => aiT(i))]
-  await setup($, on, { data: open(1), forecast: fcFile(tasks) })
-  const ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: rowsAt(12) })
-  expect((await ganttRows(ui)).map(r => r.slice(0, 4))).toEqual(['T200', 'T300', 'T301'])
-  expect((await ui.find({ type: 'Text', text: /^ほか/ }))?.text).toBe('ほか 6 件')
-  await ui.unmount()
+test('T189 小さい窓：見出し・空行も数え、前のカテゴリから最低 1 行ずつ。入らないカテゴリは見出しごと出さず、件数は「ほか」へ。余りは前から詰める。窓をはみ出さない', async ($, on) => {
+  const { data, tasks } = four()
+  await setup($, on, { data, forecast: fcFile(tasks) })
+  const buttonsOf = async (ui: any) => ((await ui.findAll({ type: 'Button' })) as unknown[]).length
+  // [bodyRows, 出る見出し, 出る行（棒の数）, ほか]
+  const cases: [number, string[], string[], number][] = [
+    // 10：棒に使える行 4 → 1 カテゴリ（見出し 1 + 3 行）。ほか 9
+    [10, ['■ A案件（3）'], ['T503', 'T502', 'T501'], 9],
+    // 13：7 行 → 2 カテゴリ（見出し 2 + 空行 1 + 4 行）：A に 3、B に 1。ほか 8
+    [13, ['■ A案件（3）', '■ B案件（3）'], ['T503', 'T502', 'T501', 'T513'], 8],
+    // 14：8 行 → 3 カテゴリ（見出し 3 + 空行 2 + 3 行）：1 行ずつ。D は見出しごと出ない。ほか 9
+    [14, ['■ A案件（3）', '■ B案件（3）', '■ C案件（3）'], ['T503', 'T513', 'T523'], 9],
+    // 16：10 行 → 3 カテゴリ、余り 2 を前から詰める（A に 3）。ほか 7
+    [16, ['■ A案件（3）', '■ B案件（3）', '■ C案件（3）'], ['T503', 'T502', 'T501', 'T513', 'T523'], 7],
+  ]
+  for (const [rows, heads, ids, more] of cases) {
+    const ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: rowsAt(rows) })
+    const t = await textsOf(ui)
+    expect(headsOf(t)).toEqual(heads)
+    expect((await ganttRows(ui)).map(r => r.slice(0, 4))).toEqual(ids)
+    expect((await ui.find({ type: 'Text', text: /^ほか/ }))?.text).toBe(`ほか ${more} 件`)
+    expect(screenLines(t, await buttonsOf(ui))).toBeLessThanOrEqual(rows)
+    await ui.unmount()
+  }
+  // 高さを 6〜40 まで動かしても、はみ出さない・行は 1 回ずつ・見出しの件数は変わらない・ほか＋出た行 = 12
+  for (let rows = 6; rows <= 40; rows++) {
+    const ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: rowsAt(rows) })
+    const t = await textsOf(ui)
+    expect(screenLines(t, await buttonsOf(ui))).toBeLessThanOrEqual(rows)
+    const shown = (await ganttRows(ui)).map(r => r.slice(0, 4))
+    expect(new Set(shown).size).toBe(shown.length)
+    const more = (await ui.find({ type: 'Text', text: /^ほか/ }))?.text
+    expect(shown.length + (more ? Number(/ほか (\d+) 件/.exec(more)![1]) : 0)).toBe(12)
+    for (const h of headsOf(t)) expect(h).toMatch(/^■ [ABCD]案件（3）$/)
+    await ui.unmount()
+  }
+  // 十分に高ければ全部出る（ほかは出ない）
   const tall = await $.ui.mount({ ...PANE, surface: 'terminal', props: rowsAt(40) })
-  expect((await ganttRows(tall)).length).toBe(9)
+  expect(headsOf(await textsOf(tall))).toEqual(['■ A案件（3）', '■ B案件（3）', '■ C案件（3）', '■ D案件（3）'])
+  expect((await ganttRows(tall)).length).toBe(12)
   expect(await tall.find({ type: 'Text', text: /^ほか/ })).toBeFalsy()
   await tall.unmount()
 })
 
-test('T188 まとまり：AI だけのときは見出しが1つ（空行なし）。件数は見えない分も含む', async ($, on) => {
-  await setup($, on, { data: open(1), forecast: fcFile(Array.from({ length: 8 }, (_, i) => aiT(i))) })
-  const ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: rowsAt(10) })
+test('T189 小さい窓：最低 1 行も入らないほど低いときは、見出しを出さず、全部「ほか N 件」。「棒にできるタスクなし」とは言わない', async ($, on) => {
+  const { data, tasks } = four()
+  await setup($, on, { data, forecast: fcFile(tasks) })
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: rowsAt(7) }) // 7 - 6 = 1 行：見出し + 1 行は入らない
   const t = await textsOf(ui)
-  expect(t.filter(x => x.startsWith('■ '))).toEqual(['■ AI（8）'])
-  expect(t).not.toContain(' ')
-  expect((await ganttRows(ui)).length).toBe(3) // 10 - 6 - 見出し 1
+  expect(headsOf(t)).toEqual([])
+  expect((await ganttRows(ui)).length).toBe(0)
+  expect((await ui.find({ type: 'Text', text: /^ほか/ }))?.text).toBe('ほか 12 件')
+  expect(t).not.toContain('棒にできるタスクなし')
   await ui.unmount()
 })
 
-test('T188 まとまり：本人だけのときも見出しは1つ（空行なし）', async ($, on) => {
-  await setup($, on, { data: open(1), forecast: fcFile([own(0), own(1)]) })
-  const ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: rowsAt(30) })
-  const t = await textsOf(ui)
-  expect(t.filter(x => x.startsWith('■ '))).toEqual(['■ 山田さん（2）'])
-  expect(t).not.toContain(' ')
-  await ui.unmount()
-})
-
-test('T188 まとまり：棒にできるものが無いときは、見出しは出ない', async ($, on) => {
-  await setup($, on, { data: open(1), forecast: fcFile([ft('T901', '待ち', 'AI', null, null, '見積もり待ち')]) })
-  const ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: rowsAt(30) })
-  const t = await textsOf(ui)
-  expect(t.filter(x => x.startsWith('■ '))).toEqual([])
-  expect(t).toContain('棒にできるタスクなし')
-  await ui.unmount()
-})
-
-test('T188 まとまり：期限超過の行・凡例・見積もり待ち・「短い画面へ」は残る。期限超過の本人は棒にも見出しの件数にも入らない', async ($, on) => {
-  const tasks = [aiT(0), own(0), ft('T290', '切れ', '本人', null, '2026-10-30'), ft('T291', '待ち', 'AI', null, null, '見積もり待ち')]
-  await setup($, on, { data: open(1), forecast: fcFile(tasks) })
-  const ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: rowsAt(30) })
+test('T189 カテゴリ：期限超過の行を引いた分、窓が狭まる。期限超過の本人は棒にも見出しの件数にも入らない。凡例・見積もり待ち・「短い画面へ」は残る', async ($, on) => {
+  const data = gdata([gt('T301', 1, 'A案件'), gt('T302', 2, 'A案件'), gt('T201', 3, 'B案件'), gt('T290', 4, 'B案件')])
+  const tasks = [aiT(1), aiT(2), own(1), ft('T290', '切れ', '本人', null, '2026-10-30'), ft('T291', '待ち', 'AI', null, null, '見積もり待ち')]
+  await setup($, on, { data, forecast: fcFile(tasks) })
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: rowsAt(40) })
   const t = await textsOf(ui)
   expect(t).toContain('期限超過 1 件（山田さん・今日より前）')
   expect(t).toContain('= AI　* 期日　. 休み　→ 先')
   expect(t).toContain('見積もり待ち 1（棒なし）')
-  expect(t).toContain('■ 山田さん（1）')
+  expect(headsOf(t)).toEqual(['■ A案件（2）', '■ B案件（1）'])
   expect(await ui.find({ type: 'Button', text: /短い画面へ/ })).toBeTruthy()
+  await ui.unmount()
+  // 低い窓：期限超過の 1 行ぶん引く。10 - 6 - 1 = 3 行 → A だけ（見出し 1 + 2 行）。ほか 1 件
+  const small = await $.ui.mount({ ...PANE, surface: 'terminal', props: rowsAt(10) })
+  expect(headsOf(await textsOf(small))).toEqual(['■ A案件（2）'])
+  expect((await ganttRows(small)).length).toBe(2)
+  expect((await small.find({ type: 'Text', text: /^ほか/ }))?.text).toBe('ほか 1 件')
+  await small.unmount()
+})
+
+test('T189 カテゴリ：棒にできるものが無いときは、見出しは出ない', async ($, on) => {
+  await setup($, on, { data: gdata([gt('T901', 1, 'A案件')]), forecast: fcFile([ft('T901', '待ち', 'AI', null, null, '見積もり待ち')]) })
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: rowsAt(30) })
+  const t = await textsOf(ui)
+  expect(headsOf(t)).toEqual([])
+  expect(t).toContain('棒にできるタスクなし')
   await ui.unmount()
 })
 
