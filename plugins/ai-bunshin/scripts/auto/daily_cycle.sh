@@ -19,21 +19,13 @@ PLUGIN_ROOT="${0:A:h:h:h}"
 DASH="$PLUGIN_ROOT/scripts/update_dashboard.py"
 WATCH="$PLUGIN_ROOT/scripts/watch_check.py"          # 時間の上限・手数の上限・見張りの点検・「上限で止めた」印（T095・T066）
 LIMITED="$PLUGIN_ROOT/scripts/auto/run_limited.py"   # claude を時間の上限つきで動かす（T095）
-# 開発の置き場所のうち、本人のフォルダの外にあるリポジトリ（自動実行でも編集できるように --add-dir で渡す）
-ADD_DIRS=(${(f)"$(python3 - "$ROOT" <<'PY'
-import json, os, sys
-from pathlib import Path
-root = Path(sys.argv[1])
-try:
-    cfg = json.load(open(root / "設定" / "config.json", encoding="utf-8-sig"))
-except Exception:
-    sys.exit(0)
-for p in (cfg.get("dev") or {}).get("projects", []):
-    d = Path(os.path.expanduser(p.get("path", "")))
-    if p.get("path") and d.is_absolute() and root not in [d, *d.parents] and d.exists():
-        print(d)
-PY
-)"})
+SANDBOX="$PLUGIN_ROOT/scripts/sandbox_settings.py"  # 実行の段の囲いの設定を作る（T119）。-I＝本人のフォルダの中のファイルを読み込まない
+PLUGIN_ROOT_RAW="${0:a:h:h:h}"                       # 呼ばれた名前のままのプラグインの場所（installPath）。PLUGIN_ROOT はリンクを解いた実体
+# カレンダーの URL は、この実行の環境変数に載せない（claude の中から読めないように。T119 S14）。囲いの設定を作る1行にだけ付けて渡す
+unset AI_BUNSHIN_CALENDAR_URL
+# 開発の置き場所のうち、本人のフォルダの外にあるリポジトリ（自動実行でも編集できるように --add-dir で渡す）。
+# 囲いの守る先（sandbox_settings.py）と同じ判定にそろえるため、同じ道具（--print-add-dirs）で出す（T119 W7）
+ADD_DIRS=(${(f)"$(python3 -I "$SANDBOX" --home "$ROOT" --print-add-dirs 2>/dev/null)"})
 ADD_DIR_ARGS=()
 for d in ${(u)ADD_DIRS}; do ADD_DIR_ARGS+=(--add-dir "$d"); done
 AI_NAME=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1], encoding="utf-8-sig")).get("ai_name","AI"))' "$ROOT/設定/config.json" 2>/dev/null || echo AI)
@@ -185,7 +177,9 @@ case "$PHASE:$HEAD" in
 esac
 
 # 使える道具を絞る（送信・削除・設定やスクリプトの変更はできない）
-TOOLS="Read,Write,Edit,Glob,Grep,Agent,SendMessage,Skill,Bash(python3 *update_dashboard.py*),Bash(python3 *lock_check.py*),Bash(python3 $DASH:*),Bash(python3 \"$DASH\":*)"
+# Bash は update_dashboard.py・lock_check.py の完全なパス（ワイルドカードなし。T062）。スキルは "${CLAUDE_PLUGIN_ROOT}/scripts/…" を引用符つきで呼ぶので、引用符なし・ありの両方
+# 実行の段で囲いが作れたときだけ足す Python（SANDBOX_TOOLS）と、リンク経由の同じ道具の許可（LINK_TOOLS）は、run_claude の中で足す（ここには書かない）
+TOOLS="Read,Write,Edit,Glob,Grep,Agent,SendMessage,Skill,Bash(python3 $DASH:*),Bash(python3 \"$DASH\":*),Bash(python3 $PLUGIN_ROOT/scripts/lock_check.py:*),Bash(python3 \"$PLUGIN_ROOT/scripts/lock_check.py\":*)"
 DENY="Bash(rm:*),Bash(curl:*),Edit(.claude/settings.json),Edit(scripts/**),Edit(/$PLUGIN_ROOT/**),Edit(設定/**),Edit(CLAUDE.md),Edit(.claude/**)"
 if [ "$PHASE" = "do" ]; then
   TOOLS="$TOOLS,WebSearch,WebFetch"   # 実行では調査のためにネットを読むことだけ許可
@@ -256,6 +250,24 @@ backup_commit() {
   return 0
 }
 
+# 囲いの設定を作る道具に渡すカレンダーの URL（通信の許可の host だけに使う）。config に calendar（ics）があり、Mac で、キーチェーンから取れたときだけ標準出力に出す。
+# 取れない・つないでいないときは何も出さない。取り方は calendar_today.py と同じ（キーチェーンの名前・空白の取り除き）。エラーも出さない（URL・理由をログに残さない）
+calendar_url_for_sandbox() {
+  python3 -I - "$PLUGIN_ROOT/scripts" "$ROOT" 2>/dev/null <<'PY'
+import json, sys
+try:
+    sys.path.insert(0, sys.argv[1])
+    cfg = json.load(open(sys.argv[2] + "/設定/config.json", encoding="utf-8-sig"))
+    cal = cfg.get("calendar")
+    if isinstance(cal, dict) and cal.get("type") == "ics" and not cal.get("ics_file"):
+        import calendar_today
+        if calendar_today._platform() == "darwin":
+            sys.stdout.write(calendar_today.keychain_secret(cal.get("keychain", "ai-bunshin-calendar")))
+except BaseException:
+    pass
+PY
+}
+
 # claude を時間の上限と手数の上限つきで動かす（T095・T066）。結果は RESULT、終了コードは STATUS。
 # 時間の上限（auto.max_minutes。段階を決めたあとに決める）を超えたら、自分の起動した claude のグループだけを止めて exit 124。
 # 手数の上限（auto.max_turns。claude -p --max-turns）は claude 自身が止まる。終了コード 1 で、出力の最後の行が上限の文面（Error: Reached max turns (N)）のときだけ、
@@ -275,6 +287,44 @@ run_claude() {
   CUR_OUT="$out"
   : > "$out" || { log "一時ファイルを作れませんでした"; exit 1; }
   start=$(date '+%Y-%m-%d %H:%M:%S')
+  # 囲い（T119）：Python を許すのは実行（do）の段だけ。計画・振り返りは今のまま。
+  # 囲いの設定を作れたとき（終了コード0）だけ --settings を付けて Bash(python3:*) を許す。作れなければ、どちらも付けず今の許可（完全一致）のまま動かす
+  SANDBOX_ARGS=()
+  SANDBOX_TOOLS=""
+  LINK_TOOLS=""
+  if [ "$PLUGIN_ROOT_RAW" != "$PLUGIN_ROOT" ]; then   # リンク経由で呼ばれた（installPath が実体と違う）ときは、そちらの名前の完全なパスも許す
+    LINK_TOOLS=",Bash(python3 $PLUGIN_ROOT_RAW/scripts/update_dashboard.py:*),Bash(python3 \"$PLUGIN_ROOT_RAW/scripts/update_dashboard.py\":*),Bash(python3 $PLUGIN_ROOT_RAW/scripts/lock_check.py:*),Bash(python3 \"$PLUGIN_ROOT_RAW/scripts/lock_check.py\":*)"
+  fi
+  if [ "$PHASE" = "do" ]; then
+    local cal_url sbx_out sbx_rc sbx_json sbx_why
+    cal_url=$(calendar_url_for_sandbox)   # 取れなければ空。変数にだけ入れ、export しない・ログに書かない
+    local sbx_roots=(--plugin-root "$PLUGIN_ROOT")
+    [ "$PLUGIN_ROOT_RAW" != "$PLUGIN_ROOT" ] && sbx_roots+=(--plugin-root "$PLUGIN_ROOT_RAW")
+    # 標準エラーも一緒に受ける（失敗の理由の1行を使う。成功のときの標準エラーは空）
+    if [ -n "$cal_url" ]; then
+      sbx_out=$(AI_BUNSHIN_CALENDAR_URL="$cal_url" python3 -I "$SANDBOX" --home "$ROOT" "${sbx_roots[@]}" 2>&1 < /dev/null)
+    else
+      sbx_out=$(python3 -I "$SANDBOX" --home "$ROOT" "${sbx_roots[@]}" 2>&1 < /dev/null)
+    fi
+    sbx_rc=$?
+    cal_url=""
+    sbx_json=$(printf '%s\n' "$sbx_out" | tail -n 1)
+    if [ $sbx_rc -eq 0 ] && printf '%s' "$sbx_json" | python3 -I -c 'import json,sys
+d=json.load(sys.stdin)
+sys.exit(0 if isinstance(d, dict) and d.get("sandbox", {}).get("enabled") is True else 1)' 2>/dev/null; then
+      SANDBOX_ARGS=(--settings "$sbx_json")
+      SANDBOX_TOOLS=",Bash(python3:*)"
+      log "囲いの設定を作れたので、Python を許して動かす"
+    else
+      # 理由は囲いの設定を作る道具の1行。パス・URL らしきものが入っていたら出さない（ログに残さない）
+      sbx_why=$(printf '%s\n' "$sbx_out" | head -n 1 | sed 's/^sandbox_settings: //' | cut -c1-120)
+      [ $sbx_rc -eq 0 ] && sbx_why="囲いの設定の形が正しくありません"
+      if [[ "$sbx_why" == *'://'* || "$sbx_why" == *'/'[^\ ]* || "$sbx_why" == *"$ROOT"* ]]; then sbx_why="理由の文面に場所が含まれるため省略"; fi
+      SANDBOX_ARGS=()
+      SANDBOX_TOOLS=""
+      log "囲いの設定を作れなかったので、Python は許さず今の許可で動かす（理由：${sbx_why:-不明}）"
+    fi
+  fi
   log "claude を起動（時間の上限 ${LIMIT_MIN}分・手数の上限 ${MAX_TURNS}回）"
   # 背景で動かして wait する（前景だと、シグナルを受けても run_limited と claude が残るため）。
   # 受けたときは on_stop が run_limited を止めて終わるので、ここに戻るのは run_limited が自分で終わったときだけ（STATUS はその終了コード）
@@ -284,8 +334,9 @@ run_claude() {
     --permission-mode acceptEdits \
     --model opus \
     --max-turns "$MAX_TURNS" \
-    --allowedTools "$TOOLS" \
+    --allowedTools "$TOOLS$LINK_TOOLS$SANDBOX_TOOLS" \
     --disallowedTools "$DENY" \
+    "${SANDBOX_ARGS[@]}" \
     "${ADD_DIR_ARGS[@]}" \
     < /dev/null 2>> "$LOG" &
   LIMITED_PID=$!

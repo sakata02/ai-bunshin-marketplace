@@ -5,6 +5,9 @@
   python3 sandbox_settings.py --home <本人のフォルダの絶対パス> --plugin-root <プラグインの元の絶対パス>
         [--plugin-root <もう1つ>] [--config <config.json>] [--user-home <ホーム>] [--paths-file <一覧>]
         [--calendar-url-env <環境変数の名前>]
+  python3 sandbox_settings.py --home <本人のフォルダ> --print-add-dirs [--config <config.json>]
+  → 本人のフォルダの外にある開発のリポジトリ（config の dev.projects）を1行に1つ出す。読めなければ何も出さず終了コード0
+    （daily_cycle.sh の --add-dir と、囲いの守る先を同じ判定にそろえる。T119 W7）
   → 標準出力に JSON を1行（そのまま claude -p --settings "$(…)" に渡せる）
   → 作れないときは、標準エラーに日本語1行・終了コード1（呼ぶ側は Python を許さず、今の許可に退く。T119 S05）
 
@@ -142,15 +145,18 @@ def marketplace_roots(user_home, spec):
     for name, ent in data.items():
         if not isinstance(ent, dict) or not isinstance(ent.get("source"), dict) or ent["source"].get("source") != m["source_kind"]:
             continue
-        loc = ent.get("installLocation")
-        if not isinstance(loc, str):
-            continue   # 場所が書かれていない項目は、守る相手が無い
-        if not os.path.isabs(loc) or any(ch in BAD_PATH_CHARS for ch in loc):
-            # 守る先の場所がある（directory）のに、囲いに書けない形：黙って飛ばすと守らないまま Python を許してしまう。作らない（S05）
-            raise Fail("マーケットプレイス（%s）の場所が使えない形です（相対パス・使えない文字）" % str(name)[:40])
-        p = Path(os.path.normpath(loc))
-        if str(p) != "/" and p.is_dir():
-            out.append((str(name), p))
+        # 守る場所は installLocation と source.path の両方（片方だけ書かれていても、両方あって違っても、書かれたものは全部）。
+        # 場所が書かれた形で、囲いに書けない形（相対パス・使えない文字・/）なら、黙って飛ばすと守らないまま Python を許してしまうので作らない（S05）
+        cands = [v for v in (ent.get("installLocation"), ent["source"].get("path")) if isinstance(v, str)]
+        seen = []
+        for loc in cands:   # 場所が1つも書かれていない項目は、守る相手が無い
+            if not os.path.isabs(loc) or any(ch in BAD_PATH_CHARS for ch in loc) or os.path.normpath(loc).strip("/") == "":
+                raise Fail("マーケットプレイス（%s）の場所が使えない形です（相対パス・使えない文字・ルート）" % str(name)[:40])
+            p = Path(os.path.normpath(loc))
+            if p not in seen:
+                seen.append(p)
+                if p.is_dir():
+                    out.append((str(name), p))
     return out
 
 
@@ -231,6 +237,19 @@ def build_settings(home, plugin_roots, config_path, user_home, calendar_url, pat
     }
 
 
+def print_add_dirs(config, home):
+    """daily_cycle.sh の --add-dir に渡す先。読めない・無いときは何も出さない（前の daily_cycle.sh と同じ）"""
+    try:
+        cfg = load_json(config, "config.json")
+        dirs = add_dir_repos(cfg, Path(home))
+    except Exception:
+        return 0
+    for d in dirs:
+        if not any(ch in str(d) for ch in "\n\r\x00"):   # 1行に1つで渡すので、改行を含む先は渡さない
+            sys.stdout.write(str(d) + "\n")
+    return 0
+
+
 class JaParser(argparse.ArgumentParser):
     def error(self, message):   # 既定は終了コード2・英語。呼ぶ側が見るのは「1」なので日本語1行に揃える
         raise Fail("引数が正しくありません（--home と --plugin-root が要ります）")
@@ -244,9 +263,12 @@ def main(argv=None):
     ap.add_argument("--user-home", default=os.path.expanduser("~"))
     ap.add_argument("--paths-file", default=str(DEFAULT_PATHS_FILE))
     ap.add_argument("--calendar-url-env", default=DEFAULT_URL_ENV)
+    ap.add_argument("--print-add-dirs", action="store_true")
     try:
         a = ap.parse_args(argv)
         config = a.config or str(Path(a.home) / "設定" / "config.json")
+        if a.print_add_dirs:
+            return print_add_dirs(config, a.home)
         url = os.environ.get(a.calendar_url_env, "")
         out = build_settings(a.home, a.plugin_root, config, a.user_home, url, a.paths_file)
         sys.stdout.write(json.dumps(out, ensure_ascii=True, separators=(",", ":")) + "\n")

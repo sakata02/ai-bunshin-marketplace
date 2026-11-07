@@ -67,7 +67,7 @@ def mkfixture():
         "official": {"source": {"source": "github", "repo": "x/y"}, "installLocation": str(root / "gh_clone")},
         "mine": {"source": {"source": "directory", "path": str(mkt)}, "installLocation": str(mkt)},
         "second": {"source": {"source": "directory", "path": str(other_mkt)}, "installLocation": str(other_mkt)},
-        "gone": {"source": {"source": "directory", "path": "x"}, "installLocation": str(root / "nowhere")},
+        "gone": {"source": {"source": "directory", "path": str(root / "nowhere_src")}, "installLocation": str(root / "nowhere")},
         "gh_bad": {"source": {"source": "github", "repo": "x/z"}, "installLocation": "relative/(1)"},   # directory でなければ見ない
         "broken1": "x", "broken2": {"source": "directory"}, "broken3": {"source": {"source": "directory"}, "installLocation": 5},
     }), encoding="utf-8")
@@ -245,7 +245,7 @@ def test_stay_writable_guard():
     # マーケットプレイスのルートが tasks.json を含む（本人のフォルダの親を登録した）ときも作らない
     fx = mkfixture()
     (fx["uh"] / ".claude/plugins/known_marketplaces.json").write_text(json.dumps(
-        {"p": {"source": {"source": "directory", "path": "x"}, "installLocation": str(fx["root"])}}), encoding="utf-8")
+        {"p": {"source": {"source": "directory", "path": str(fx["root"])}, "installLocation": str(fx["root"])}}), encoding="utf-8")
     rc, out, err = run(fx)
     check(rc == 1 and out == "" and "S12-marketplace" in err, "S12 マーケットプレイスのルートが tasks.json を含むときは作らない rc=%s err=%s" % (rc, err))
 
@@ -294,7 +294,7 @@ def test_marketplace_roots():
     kf = fx["uh"] / ".claude/plugins/known_marketplaces.json"
     if kf.is_dir():   # 直前の「ファイルがフォルダ」の形を脇へ移す（作った一時フォルダの中だけ。終わりにまとめて片付く）
         kf.rename(fx["uh"] / ".claude/plugins/was_dir")
-    ok_ent = {"source": {"source": "directory", "path": "x"}, "installLocation": str(fx["mkt"])}
+    ok_ent = {"source": {"source": "directory", "path": str(fx["mkt"])}, "installLocation": str(fx["mkt"])}
     for loc in ["relative/dir", "mk", "./x", "~/mk", str(fx["root"] / "mk (1)"), str(fx["root"] / "mk*"), str(fx["root"] / "mk[1]"),
                 str(fx["root"] / "mk{a}"), str(fx["root"] / "mk?"), str(fx["root"] / "mk\nx")]:
         kf.write_text(json.dumps({"p": {"source": {"source": "directory", "path": "x"}, "installLocation": loc}, "ok": ok_ent}), encoding="utf-8")
@@ -495,6 +495,95 @@ def test_add_dir_repos():
     check(s2 is not None and not any(str(fx["repo"]) in x for x in deny_write(s2)), "dev が無ければ足すリポジトリの .git の項目は入らない")
     write_cfg(fx, dict(fx["cfg"], dev="x"))
     check(ok_json(fx) is not None, "dev が文字列でも作れる（読み飛ばす）")
+
+
+def test_marketplace_source_path():
+    """W6（G2 の低1・低2）：installLocation が無く source.path だけでも守る。両方あって違えば両方。使えない形・/ は作らない"""
+    fx = mkfixture()
+    kf = fx["uh"] / ".claude/plugins/known_marketplaces.json"
+    only_src = fx["root"] / "only_src"
+    only_src.mkdir()
+    other_loc = fx["root"] / "other_loc"
+    other_loc.mkdir()
+
+    def ent(path=None, loc=None):
+        e = {"source": {"source": "directory"}}
+        if path is not None:
+            e["source"]["path"] = path
+        if loc is not None:
+            e["installLocation"] = loc
+        kf.write_text(json.dumps({"a": e}), encoding="utf-8")
+
+    # source.path だけ（installLocation なし）
+    ent(path=str(only_src))
+    s = ok_json(fx)
+    check(s is not None and nfc(str(only_src)) in deny_write(s) and rule(nfc(str(only_src)), "dir") in deny_edit(s),
+          "W6 installLocation が無く source.path だけでも守る")
+    # 両方あって違えば両方
+    ent(path=str(only_src), loc=str(other_loc))
+    s = ok_json(fx)
+    ww = deny_write(s) if s else []
+    check(nfc(str(only_src)) in ww and nfc(str(other_loc)) in ww, "W6 両方あって違えば両方守る")
+    # installLocation が文字列でなくても、source.path は守る
+    ent(path=str(only_src), loc=5)
+    s = ok_json(fx)
+    check(s is not None and nfc(str(only_src)) in deny_write(s), "W6 installLocation が文字列でなくても source.path を守る")
+    # 同じ場所が2回書かれても二重にならない
+    ent(path=str(only_src), loc=str(only_src))
+    s = ok_json(fx)
+    check(s is not None and deny_write(s).count(nfc(str(only_src))) == 1, "W6 同じ場所が2回書かれても1つ")
+    # どちらかが使えない形なら、もう片方が良くても作らない。/ も作らない
+    for bad in ["relative/dir", "x", "~/mk", str(fx["root"] / "mk (1)"), str(fx["root"] / "mk*"), "/", "//", "/.", "/../"]:
+        ent(path=bad, loc=str(other_loc))
+        rc, out, err = run(fx)
+        check(rc == 1 and out == "" and err.count("\n") == 1 and "マーケットプレイス" in err, "W6 source.path が使えない形 %r は作らない rc=%s" % (bad, rc))
+        check(SECRET not in err and str(fx["root"]) not in err, "W6 エラーに URL・パスが出ない")
+        ent(path=str(other_loc), loc=bad)
+        rc, out, err = run(fx)
+        check(rc == 1 and out == "", "W6 installLocation が使えない形 %r は作らない（/ を含む）rc=%s" % (bad, rc))
+        ent(path=bad)
+        rc, out, err = run(fx)
+        check(rc == 1 and out == "", "W6 source.path だけが使えない形 %r は作らない rc=%s" % (bad, rc))
+    # path が実在しなければ足さない（作れる）
+    ent(path=str(fx["root"] / "nope"))
+    rc, out, err = run(fx)
+    check(rc == 0 and "nope" not in out, "W6 実在しない source.path は足さない rc=%s" % rc)
+    # source.path が文字列でない（installLocation だけ）なら今までどおり
+    ent(path=7, loc=str(other_loc))
+    s = ok_json(fx)
+    check(s is not None and nfc(str(other_loc)) in deny_write(s), "W6 source.path が数でも installLocation は守る")
+
+
+def test_print_add_dirs():
+    """W7（G2 の低5）：daily_cycle.sh の --add-dir と囲いの守る先は、同じ判定（--print-add-dirs）"""
+    fx = mkfixture()
+    pa = ["--home", str(fx["home"]), "--print-add-dirs"]
+    rc, out, err = run(fx, args=pa)
+    check(rc == 0 and out.splitlines() == [str(fx["repo"])], "W7 本人のフォルダの外の実在の絶対パスだけ rc=%s out=%r" % (rc, out))
+    s = ok_json(fx)
+    check(s is not None and nfc(str(fx["repo"] / ".git/hooks")) in deny_write(s), "W7 同じ先が囲いの守る先にも入る")
+    # 本人のフォルダにリンクで入る先は「中」＝対象外（realpath で判定）
+    link = fx["root"] / "リンク先"
+    os.symlink(str(fx["home"] / "05_開発/x"), str(link))
+    write_cfg(fx, dict(fx["cfg"], dev={"projects": [{"path": str(link)}, {"path": str(fx["repo"])}, {"path": str(fx["repo"])}]}))
+    rc, out, err = run(fx, args=pa)
+    check(rc == 0 and str(link) not in out and str(fx["repo"]) in out, "W7 リンクで本人のフォルダの中に入る先は出さない（realpath）out=%r" % out)
+    s = ok_json(fx)
+    check(s is not None and not any("リンク先" in x for x in deny_write(s)), "W7 リンクで中に入る先は囲いの守る先にも入らない")
+    write_cfg(fx, dict(fx["cfg"], dev={"projects": [{"path": "~/sbx_nowhere_dir_zz"}]}))
+    rc, out, err = run(fx, args=pa)
+    check(rc == 0 and out == "", "W7 実在しない先は出さない")
+    # 読めない・無いときは何も出さず終了コード0（前の daily_cycle.sh と同じ）
+    for body in ["{", "[]", "null"]:
+        (fx["home"] / "設定/config.json").write_text(body, encoding="utf-8")
+        rc, out, err = run(fx, args=pa)
+        check(rc == 0 and out == "" and err == "", "W7 config が %r でも何も出さず終了コード0 rc=%s err=%s" % (body, rc, err))
+    (fx["home"] / "設定/config.json").unlink()
+    rc, out, err = run(fx, args=pa)
+    check(rc == 0 and out == "", "W7 config が無くても何も出さず終了コード0")
+    (fx["home"] / "設定/config.json").write_bytes(b"\xef\xbb\xbf" + json.dumps(fx["cfg"], ensure_ascii=False).encode("utf-8"))
+    rc, out, err = run(fx, args=pa)
+    check(rc == 0 and out.splitlines() == [str(fx["repo"])], "W7 BOM 付き config も読める")
 
 
 def test_multiple_plugin_roots():
