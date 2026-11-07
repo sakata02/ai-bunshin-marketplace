@@ -1,10 +1,12 @@
 """scripts/set_display.py のテスト（T182 組②。設計 T146 §1 の P1・P4・P6・P8・P11・P12 と §5）。
 - display のキーだけを書く：ほかのキー（ng_allow・maintainer など）・値・並びは変えない。見張り（ng_guard）の目で見ても同じ
 - 書き方を守る：BOM・CRLF・字下げ（2・4・タブ・1行）・末尾の改行・日本語の \\u 表記・ファイルの権限・リンク
+- リンクの先が本人のフォルダの外なら書かない（K9）
 - 型を切り替えても個別の設定（overrides）は残る。消すのは reset-overrides のときだけ
 - 知らない名前・値は書かない（requests_max は 1〜20 の整数だけ）。使い方の間違いは終了コード2
 - 壊れた config.json（JSON でない・空・{ } でない・UTF-8 でない・無い）は書き換えず、日本語で案内して終了コード1
-- 終わりの1行は必ず新しい「[見せ方：…]」（P12）。update_dashboard.py と同じ文面
+- 新しい「[見せ方：…]」の1行を出す（P12）。個別の設定の行はその次の行（K11）。update_dashboard.py と同じ文面・並び（K3・K8）
+- show・書いたあとの見え方は、update_dashboard.py の read_display と同じ（範囲外の値は「範囲外のためフル」。K8）
 - 自動実行の中では切り替えない（P4）：環境変数で止める。daily_cycle.sh の DENY・道具の絞りでも届かない
 - 書き込み：一時ファイル→置き換え。失敗しても・書いている間にほかで書き換えられても、元のファイルは壊れない・一時ファイルを残さない
 - P1：display を読む所は set_display.py と update_dashboard.py だけ（scripts/・hooks・雛形の settings.json を機械で調べる）
@@ -105,8 +107,11 @@ def run(root, *args, **extra):
     return r.returncode, r.stdout, r.stderr
 
 
-def last_line(out):
-    return out.rstrip("\n").split("\n")[-1]
+def kata_line(out):
+    """出力の中の「[見せ方：…]」の行（1行だけであること）。"""
+    found = [l for l in out.split("\n") if l.startswith("[見せ方：")]
+    assert len(found) == 1, f"「[見せ方：…]」の行が{len(found)}行：{out!r}"
+    return found[0]
 
 
 def tmp_files(root):
@@ -266,9 +271,9 @@ def t06_file_mode_kept():
 
 
 @case
-def t07_symlink_target_written_link_kept():
+def t07_symlink_inside_folder_target_written_link_kept():
     root = make_owner(None)
-    real = os.path.join(new_dir("real"), "real_config.json")
+    real = os.path.join(root, "設定", "real_config.json")
     with open(real, "wb") as f:
         f.write(dump(standard_cfg()))
     os.symlink(real, cfg_path(root))
@@ -276,6 +281,26 @@ def t07_symlink_target_written_link_kept():
     assert rc == 0, err
     assert os.path.islink(cfg_path(root)), "リンクが普通のファイルに置き換わった"
     assert json.loads(open(real, encoding="utf-8").read())["display"]["type"] == "simple"
+
+
+@case
+def t07b_symlink_pointing_outside_folder_not_written():
+    # K9：リンクの先が本人のフォルダの外なら書かない。外のファイルも、リンクも、変えない
+    root = make_owner(None)
+    outside = os.path.join(new_dir("outside"), "real_config.json")
+    raw = dump(standard_cfg())
+    with open(outside, "wb") as f:
+        f.write(raw)
+    os.symlink(outside, cfg_path(root))
+    for args in (("type", "simple"), ("override", "terms", "full")):
+        rc, out, err = run(root, *args)
+        assert rc == 1 and "リンク" in err and "外" in err and "Traceback" not in err, (args, rc, err)
+        assert "[見せ方：" not in out, out
+        assert open(outside, "rb").read() == raw, "リンクの先（本人のフォルダの外）を書き換えた"
+        assert os.path.islink(cfg_path(root)) and os.path.realpath(cfg_path(root)) == os.path.realpath(outside)
+    assert not tmp_files(os.path.dirname(outside)) and not tmp_files(root)
+    rc, out, err = run(root, "show")   # 読むだけなら使える
+    assert rc == 0, err
 
 
 # ---------------------------------------------------------------- 型の切り替えと overrides（P6）
@@ -306,7 +331,7 @@ def t09_reset_overrides_only_on_request():
     rc, out, err = run(root, "reset-overrides")
     assert rc == 0, err
     assert read_cfg(root)["display"] == {"type": "full", "overrides": {}}, "型は変えず、個別の設定だけ空に"
-    assert last_line(out) == FULL_LINE
+    assert kata_line(out) == FULL_LINE
 
 
 @case
@@ -316,7 +341,7 @@ def t10_noop_does_not_write():
     before, m = read_bytes(root), os.stat(cfg_path(root)).st_mtime_ns
     for args in (("type", "simple"), ("reset-overrides",)):
         rc, out, err = run(root, *args)
-        assert rc == 0 and "すでに" in out and last_line(out) == SIMPLE_LINE, (args, out, err)
+        assert rc == 0 and "すでに" in out and kata_line(out) == SIMPLE_LINE, (args, out, err)
     assert read_bytes(root) == before and os.stat(cfg_path(root)).st_mtime_ns == m, "変更が無いのに書き換えた"
 
 
@@ -380,13 +405,17 @@ def t14_last_line_is_new_state():
     for args, want in cases:
         rc, out, err = run(root, *args)
         assert rc == 0, (args, err)
-        assert last_line(out) == want, (args, out)
-        assert out.count("[見せ方：") == 1, (args, out)
-    # 個別の設定があるときは、その1行を「[見せ方：…]」の前に出す
+        assert kata_line(out) == want, (args, out)
+    # 個別の設定があるときは、「[見せ方：…]」の次の行に出す（K11）。個別の設定が無いときは「[見せ方：…]」が最後の行
     run(root, "override", "terms", "full")
     rc, out, err = run(root, "override", "requests_max", "5")
     lines = out.rstrip("\n").split("\n")
-    assert lines[-2] == "個別の設定（型より優先）：terms=full、requests_max=5" and lines[-1] == FULL_LINE, out
+    assert lines[-2] == FULL_LINE and lines[-1] == "個別の設定（型より優先）：terms=full、requests_max=5", out
+    rc, out, err = run(root, "show")
+    lines = out.rstrip("\n").split("\n")
+    assert lines[-2] == FULL_LINE and lines[-1] == "個別の設定（型より優先）：terms=full、requests_max=5", out
+    rc, out, err = run(root, "reset-overrides")
+    assert out.rstrip("\n").split("\n")[-1] == FULL_LINE and "個別の設定（型より優先）" not in out, out
 
 
 @case
@@ -406,10 +435,10 @@ def t16_missing_display_created_before_maintainer():
     assert "display" not in cfg
     root = make_owner(dump(cfg))
     rc, out, err = run(root, "show")
-    assert rc == 0 and last_line(out) == FULL_LINE and "未設定" in out, out
+    assert rc == 0 and kata_line(out) == FULL_LINE and "未設定" in out, out
     assert read_bytes(root) == dump(cfg), "show は書かない"
     rc, out, err = run(root, "type", "full")
-    assert rc == 0 and last_line(out) == FULL_LINE, (out, err)
+    assert rc == 0 and kata_line(out) == FULL_LINE, (out, err)
     got = read_cfg(root)
     assert got["display"] == {"type": "full", "overrides": {}}
     keys = list(got)
@@ -434,7 +463,7 @@ def t18_broken_display_values():
         assert rc == 0, (bad, err)
         got = read_cfg(root)
         assert got["display"] == {"type": "simple", "overrides": {}} and got["owner"] == "x" and got["maintainer"] is False, (bad, got)
-        assert last_line(out) == SIMPLE_LINE
+        assert kata_line(out) == SIMPLE_LINE
     # overrides がリスト → 空の辞書にして書く
     root = make_owner(b'{"display": {"type": "simple", "overrides": ["terms"]}}\n')
     assert run(root, "override", "terms", "full")[0] == 0
@@ -445,13 +474,13 @@ def t18_broken_display_values():
 def t19_broken_type_kept_with_notice_until_fixed():
     root = make_owner(b'{"display": {"type": "simpel", "overrides": {"terms": "full"}}}\n')
     rc, out, err = run(root, "show")
-    assert rc == 0 and last_line(out) == BROKEN_LINE and "simple か full ではない" in out, out
+    assert rc == 0 and kata_line(out) == BROKEN_LINE and "simple か full ではない" in out, out
     rc, out, err = run(root, "override", "features", "simple")
-    assert rc == 0 and last_line(out) == BROKEN_LINE, out
+    assert rc == 0 and kata_line(out) == BROKEN_LINE, out
     assert read_cfg(root)["display"]["type"] == "simpel", "type を黙って直さない"
     assert read_cfg(root)["display"]["overrides"] == {"terms": "full", "features": "simple"}
     rc, out, err = run(root, "type", "simple")
-    assert rc == 0 and last_line(out) == SIMPLE_LINE, out
+    assert rc == 0 and kata_line(out) == SIMPLE_LINE, out
     assert read_cfg(root)["display"]["overrides"] == {"terms": "full", "features": "simple"}, "直しても個別の設定は残る"
 
 
@@ -462,7 +491,8 @@ def t20_unknown_entries_kept_but_not_used():
     root = make_owner(raw)
     rc, out, err = run(root, "show")
     assert rc == 0 and "ng_guard" in out and "無視" in out, out
-    assert "team_view | full" in out and "terms | 型どおり" in out, out
+    assert "team_view | full" in out and "terms | 範囲外のためフル" in out, out
+    assert "ng_guard" not in out.split("| 項目")[1].split("注意")[0], "知らない名前は表に出さない（注意の行にだけ）"
     rc, out, err = run(root, "override", "requests_max", "4")
     assert rc == 0, err
     d = read_cfg(root)["display"]
@@ -535,7 +565,7 @@ def t24_refuses_in_auto_run_but_show_works():
         assert rc == 1 and "自動実行" in err, (args, rc, err)
         assert read_bytes(root) == before
     rc, out, err = run(root, "show", AI_BUNSHIN_AUTO_RUN="20261107-0900")
-    assert rc == 0 and last_line(out) == FULL_LINE, (rc, out, err)
+    assert rc == 0 and kata_line(out) == FULL_LINE, (rc, out, err)
 
 
 @case
@@ -671,6 +701,111 @@ def t31_writes_only_config_json():
     for args in (("type", "simple"), ("override", "terms", "full"), ("reset-overrides",), ("show",)):
         assert run(root, *args)[0] == 0
     assert snap() == before
+
+
+# ---------------------------------------------------------------- K8・X4：読む側（update_dashboard.py）と同じ見え方
+
+def import_dashboard():
+    """update_dashboard.py を、一時の本人のフォルダを指して読み込む（読むだけ。本物のフォルダは見ない）。"""
+    root = make_owner(dump({"owner": "テスト", "owner_call": "テストさん", "ai_name": "テストAI", "departments": ["総務"]}))
+    old = {k: os.environ.get(k) for k in ("AI_BUNSHIN_HOME", "CLAUDE_PROJECT_DIR")}
+    os.environ["AI_BUNSHIN_HOME"] = root
+    os.environ.pop("CLAUDE_PROJECT_DIR", None)
+    try:
+        spec = importlib.util.spec_from_file_location("update_dashboard_for_set_display_test",
+                                                      os.path.join(SCRIPTS, "update_dashboard.py"))
+        m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(m)
+    finally:
+        for k, v in old.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+    return m
+
+
+DISPLAY_SAMPLES = [
+    ("display が無い", None),
+    ("空の辞書", {}),
+    ("空の文字列", ""),
+    ("空のリスト", []),
+    ("数（0）", 0),
+    ("文字列", "simple"),
+    ("type だけ（simple）", {"type": "simple"}),
+    ("type full・overrides 空", {"type": "full", "overrides": {}}),
+    ("壊れた type（綴り）", {"type": "simpel"}),
+    ("壊れた type（数）", {"type": 7}),
+    ("壊れた type と overrides（読まない）", {"type": "simpel", "overrides": {"terms": "full"}}),
+    ("type が無く overrides だけ", {"overrides": {"terms": "full"}}),
+    ("requests_max が範囲外（99）", {"type": "simple", "overrides": {"requests_max": 99}}),
+    ("requests_max が 0", {"type": "simple", "overrides": {"requests_max": 0}}),
+    ("requests_max が文字の数字", {"type": "simple", "overrides": {"requests_max": "5"}}),
+    ("requests_max が True", {"type": "simple", "overrides": {"requests_max": True}}),
+    ("requests_max が 5.0", {"type": "simple", "overrides": {"requests_max": 5.0}}),
+    ("知らない名前", {"type": "simple", "overrides": {"ng_guard": "off", "terms": "full"}}),
+    ("決まった名前で知らない値", {"type": "simple", "overrides": {"terms": "maybe", "features": 1, "team_view": "full"}}),
+    ("overrides がリスト", {"type": "simple", "overrides": ["terms"]}),
+    ("全部有効（順番ばらばら）", {"type": "full", "overrides": {"team_view": "simple", "requests_max": 20, "features": "full",
+                                                      "review_view": "simple", "terms": "full", "stop_notice": "simple"}}),
+]
+
+
+@case
+def t32_view_matches_update_dashboard_read_display():
+    ud, sd = import_dashboard(), import_set_display()
+    for label, v in DISPLAY_SAMPLES:
+        r = ud.read_display({} if v is None else {"display": v})
+        typ, ov, notes, broken, invalid = sd.effective(v)
+        assert typ == r["type"], f"{label}：型が違う {typ} / {r['type']}"
+        assert ov == r["overrides"], f"{label}：効く個別の設定が違う {ov} / {r['overrides']}"
+        assert invalid == r["invalid"], f"{label}：範囲外の項目が違う {invalid} / {r['invalid']}"
+        assert broken == (r["line"] == ud.DISPLAY_BROKEN_LINE), f"{label}：壊れ判定が違う"
+        if broken or r["line"]:
+            assert sd.display_line(typ, broken) == r["line"], f"{label}：「[見せ方：…]」の文面が違う"
+        else:
+            assert typ == "full", f"{label}：起動時は無言（フル）なのに型が full でない"
+        # X4：個別の設定の行が1文字も違わない
+        assert sd.overrides_line(ov) == ud.overrides_line(r), f"{label}：個別の設定の行が違う"
+
+
+@case
+def t33_same_text_constants_as_update_dashboard():
+    ud, sd = import_dashboard(), import_set_display()
+    assert sd.TYPE_LINE == ud.DISPLAY_LINE and sd.BROKEN_LINE == ud.DISPLAY_BROKEN_LINE
+    assert tuple(sd.OVERRIDE_NAMES) == tuple(ud.DISPLAY_OVERRIDE_NAMES) and tuple(sd.TYPES) == tuple(ud.DISPLAY_TYPES)
+    assert tuple(sd.REQUESTS_RANGE) == tuple(ud.REQUESTS_MAX_RANGE)
+
+
+@case
+def t34_show_table_says_out_of_range_means_full():
+    # K8：読む側が「その項目はフル」と扱う値は、表でも「範囲外のためフル」
+    for ov in ({"requests_max": 99}, {"requests_max": "5"}, {"requests_max": 0}, {"requests_max": True}, {"terms": "maybe"}):
+        name = next(iter(ov))
+        root = make_owner(dump({"display": {"type": "simple", "overrides": dict(ov, team_view="full")}}))
+        rc, out, err = run(root, "show")
+        assert rc == 0, err
+        assert f"| {name} | 範囲外のためフル |" in out, (ov, out)
+        assert "| team_view | full |" in out and "個別の設定（型より優先）：team_view=full" in out, out
+        assert f"{name}=" not in out.split("[見せ方：")[1], f"{ov}：効かない値を、効く個別の設定の行に出している"
+    # 有効な値と、値を書いていない項目は今までどおり
+    root = make_owner(dump({"display": {"type": "simple", "overrides": {"requests_max": 20}}}))
+    out = run(root, "show")[1]
+    assert "| requests_max | 20 |" in out and "| terms | 型どおり |" in out and "範囲外" not in out, out
+
+
+@case
+def t35_show_notes_missing_type():
+    # X2：type が無く overrides だけのとき、「[見せ方：…]」の前に「type 未設定（フル）」と注記する
+    root = make_owner(dump({"display": {"overrides": {"terms": "full"}}}))
+    rc, out, err = run(root, "show")
+    assert rc == 0, err
+    assert out.index("type 未設定（フル）") < out.index(FULL_LINE), out
+    assert kata_line(out) == FULL_LINE and out.rstrip("\n").split("\n")[-1] == "個別の設定（型より優先）：terms=full", out
+    # type が書いてあるとき・display が無いときは、この注記を出さない
+    for v in ({"display": {"type": "simple"}}, {}, {"display": {}}):
+        out = run(make_owner(dump(v)), "show")[1]
+        assert "type 未設定" not in out, (v, out)
 
 
 shutil.rmtree(BASE, ignore_errors=True)

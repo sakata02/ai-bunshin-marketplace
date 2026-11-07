@@ -13,8 +13,8 @@
   名前：features terms requests_max stop_notice review_view team_view
   値：simple か full（requests_max だけは 1〜20 の整数）
 
-終わりの1行は必ず「[見せ方：…]」（設計 U11・P12）。起動時のまとめ（update_dashboard.py）と同じ文面（K3）。
-個別の設定があるときは、その1行の前に「個別の設定（型より優先）：terms=full、…」を出す。
+「[見せ方：…]」の1行を必ず出す（設計 U11・P12）。起動時のまとめ（update_dashboard.py）と同じ文面（K3）。
+個別の設定があるときは、その1行の次に「個別の設定（型より優先）：terms=full、…」を出す。
 終了コード：0＝成功、1＝config が読めない・書けない・自動実行の中など、2＝使い方・値の間違い（何も書かない）。
 """
 import json
@@ -33,7 +33,7 @@ TYPE_LINE = {"simple": "[見せ方：シンプル（言葉・件数の決まり�
              "full": "[見せ方：フル（今までどおり）]"}
 BROKEN_LINE = "[見せ方：設定の display.type を読めないので、フルで動いています（simple か full に直してください）]"
 
-USAGE = __doc__.split("使い方:")[1].split("終わりの1行")[0].rstrip()
+USAGE = __doc__.split("使い方:")[1].split("「[見せ方：…]」の1行を必ず")[0].rstrip()
 USAGE = "使い方:" + USAGE
 
 
@@ -57,35 +57,38 @@ def valid_override(name, value):
 
 
 def effective(display):
-    """display の中身から (型, 効く個別の設定, 気づいたこと, 型が壊れているか) を出す。
+    """display の中身から (型, 効く個別の設定, 気づいたこと, 型が壊れているか, 値が範囲外の項目) を出す（K8）。
     読み方は update_dashboard.py の read_display と同じ：無い・空は静かにフル。壊れている（{ } でない・type が simple か full 以外）ときは
-    フルにして、個別の設定は読まない。"""
+    フルにして、個別の設定は読まない。決まった名前で値が範囲外の項目は、その項目だけフル（invalid に入れる）。知らない名前は無視。"""
     notes = []
     if display is None or display == "" or display == {} or display == []:
-        return "full", {}, notes, False
+        return "full", {}, notes, False, set()
     if not isinstance(display, dict):
-        return "full", {}, ["display が { } の形ではないので、フルとして扱っています（個別の設定は使っていません）"], True
+        return "full", {}, ["display が { } の形ではないので、フルとして扱っています（個別の設定は使っていません）"], True, set()
     typ = "full"
     if "type" in display:
         t = display["type"]
         if not (isinstance(t, str) and t in TYPES):
             return "full", {}, ["display の type が simple か full ではないので、フルとして扱っています（個別の設定は使っていません）。"
-                                "直すには「シンプルにして」か「フルにして」と言ってください"], True
+                                "直すには「シンプルにして」か「フルにして」と言ってください"], True, set()
         typ = t
+    else:
+        notes.append("type 未設定（フル）として動いています。個別の設定だけが入っています。型を決めるには「シンプルにして」か「フルにして」と言ってください")
     raw_ov = display.get("overrides", {})
-    ov = {}
+    ov, invalid, unknown = {}, set(), []
     if not isinstance(raw_ov, dict):
         notes.append("display の overrides が { } の形ではないので、個別の設定は使っていません")
     else:
-        ignored = []
         for k, v in raw_ov.items():
             if valid_override(k, v):
                 ov[k] = v
+            elif k in OVERRIDE_NAMES:
+                invalid.add(k)
             else:
-                ignored.append(f"{k}={json.dumps(v, ensure_ascii=False)}")
-        if ignored:
-            notes.append("決まりにない個別の設定は無視しています：" + "、".join(ignored))
-    return typ, {n: ov[n] for n in OVERRIDE_NAMES if n in ov}, notes, False
+                unknown.append(f"{k}={json.dumps(v, ensure_ascii=False)}")
+        if unknown:
+            notes.append("決まりにない名前の個別の設定は無視しています：" + "、".join(unknown))
+    return typ, {n: ov[n] for n in OVERRIDE_NAMES if n in ov}, notes, False, invalid
 
 
 def display_line(typ, broken=False):
@@ -94,7 +97,7 @@ def display_line(typ, broken=False):
 
 
 def overrides_line(ov):
-    """個別の設定があるときの1行（「[見せ方：…]」の前に出す）。無ければ空。"""
+    """個別の設定があるときの1行（「[見せ方：…]」の次に出す。K11）。無ければ空。update_dashboard.py の overrides_line と同じ文面・並び。"""
     return ("個別の設定（型より優先）：" + "、".join(f"{n}={ov[n]}" for n in OVERRIDE_NAMES if n in ov)) if ov else ""
 
 
@@ -281,11 +284,24 @@ def next_display(cfg, op, args):
     return ordered
 
 
-def show_table(typ, ov, has_display):
+def show_table(typ, ov, has_display, invalid=()):
     rows = ["| 項目 | 今の値 |", "|---|---|", f"| 型（type） | {typ}{'' if has_display else '（display が未設定なのでフル）'} |"]
     for n in OVERRIDE_NAMES:
-        rows.append(f"| {n} | {ov[n] if n in ov else '型どおり'} |")
+        rows.append(f"| {n} | {ov[n] if n in ov else '範囲外のためフル' if n in invalid else '型どおり'} |")
     return "\n".join(rows)
+
+
+def check_link_inside(path, root):
+    """設定/config.json がリンクのとき、リンクの先が本人のフォルダの中か（K9）。外なら書かない（見張りの印も、書き先も本人のフォルダの中だけ）。"""
+    target = os.path.realpath(path)
+    base = os.path.realpath(root)
+    try:
+        inside = os.path.commonpath([target, base]) == base
+    except ValueError:   # Windows でドライブが違うとき
+        inside = False
+    if not inside:
+        raise Fail(f"設定/config.json がリンクで、リンクの先（{target}）が本人のフォルダの外にあります。外のファイルは書き換えません。"
+                   "何も書き換えていません。リンクの先を本人のフォルダの中にするか、リンクをやめてから、もう一度言ってください")
 
 
 def main(argv=None):
@@ -302,12 +318,14 @@ def main(argv=None):
         cfg, raw, style = load_config(path)
 
         if op == "show":
-            typ, ov, notes, broken = effective(cfg.get("display"))
+            typ, ov, notes, broken, invalid = effective(cfg.get("display"))
             print("今の見せ方（設定/config.json の display）")
-            print(show_table(typ, ov, cfg.get("display") not in (None, "", {}, [])))
+            print(show_table(typ, ov, cfg.get("display") not in (None, "", {}, []), invalid))
             for n in notes:
                 print("注意：" + n)
             print(display_line(typ, broken))
+            if overrides_line(ov):
+                print(overrides_line(ov))
             return 0
 
         if os.environ.get("AI_BUNSHIN_AUTO_RUN"):
@@ -315,10 +333,11 @@ def main(argv=None):
                        "何も書き換えていません")
 
         display = next_display(cfg, op, args)
-        typ, ov, notes, broken = effective(display)
+        typ, ov, notes, broken, invalid = effective(display)
         if cfg.get("display") == display:
             print("すでにその設定です（設定/config.json は書き換えていません）")
         else:
+            check_link_inside(path, root)
             new_cfg = with_display(cfg, display)
             data = render(new_cfg, style)
             check_only_display_changed(cfg, data, style, display)
@@ -331,9 +350,9 @@ def main(argv=None):
                 print("個別の設定を全部戻しました。型は変えていません")
         for n in notes:
             print("注意：" + n)
-        if overrides_line(ov):
-            print(overrides_line(ov))
         print(display_line(typ, broken))
+        if overrides_line(ov):
+            print(overrides_line(ov))   # 「[見せ方：…]」の次の行（K11。起動時のまとめと同じ並び）
         return 0
     except Fail as e:
         print(str(e), file=sys.stderr)
