@@ -1,6 +1,6 @@
 {
   "version": 2,
-  "about": "自動実行の囲い（sandbox_settings.py）が守る先の一覧。ここが1か所の正。denyWrite（Bash に OS）と Edit の deny（道具）の両方がここから作られる。base は home＝本人のフォルダ、user_home＝ユーザーのホーム、plugin_root＝プラグインの元。無いフォルダ・ファイルも入れる（あとで囲いの中で作られても守る）。決定：T119 S02・S04・S12・S13・S17・S23・S24（決定一覧.md）",
+  "about": "自動実行の囲い（sandbox_settings.py）が守る先の一覧。ここが1か所の正。denyWrite（Bash に OS）と Edit の deny（道具）の両方がここから作られる。base は home＝本人のフォルダ、user_home＝ユーザーのホーム、plugin_root＝プラグインの元。無いフォルダ・ファイルも入れる（あとで囲いの中で作られても守る）。決定：T119 S02・S04・S12・S13・S17・S23・S24（決定一覧.md）・T201（自動記憶）",
   "entries": [
     {"id": "A-settings",        "base": "home",        "path": "設定",                 "kind": "dir",  "why": "S02 設定"},
     {"id": "A-claude-md",       "base": "home",        "path": "CLAUDE.md",            "kind": "file", "why": "S02 本人設定"},
@@ -18,7 +18,8 @@
     {"id": "S13-user-claude-md","base": "user_home",   "path": ".claude/CLAUDE.md",    "kind": "file", "why": "S13 利用者の指示"},
     {"id": "S13-user-skills",   "base": "user_home",   "path": ".claude/skills",       "kind": "dir",  "why": "S13 自動で読み込まれる"},
     {"id": "S13-user-agents",   "base": "user_home",   "path": ".claude/agents",       "kind": "dir",  "why": "S13 自動で読み込まれる"},
-    {"id": "S13-user-commands", "base": "user_home",   "path": ".claude/commands",     "kind": "dir",  "why": "S13 自動で読み込まれる"}
+    {"id": "S13-user-commands", "base": "user_home",   "path": ".claude/commands",     "kind": "dir",  "why": "S13 自動で読み込まれる"},
+    {"id": "S13-user-projects", "base": "user_home",   "path": ".claude/projects",     "kind": "dir",  "why": "T201 自動記憶（projects/*/memory/）と会話の記録の置き場。囲いの中の Python から書けないように（Claude Code 本体は囲いの外で書く。環境変数 CLAUDE_CONFIG_DIR があればその projects も sandbox_settings.py が足す）"}
   ],
   "marketplaces": {
     "file": ".claude/plugins/known_marketplaces.json",

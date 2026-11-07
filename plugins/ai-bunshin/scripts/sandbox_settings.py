@@ -30,6 +30,9 @@
   控えのコミットは囲いの外の daily_cycle.sh（backup_commit）がするので、囲いの中から .git に書けなくても困らない
 - マーケットプレイスは、利用者の known_marketplaces.json の source が directory のものの installLocation を
   丸ごと守る（S12）。読めない・無い・形が違うときは足さずに作る
+- Claude Code の自動記憶（<ホーム>/.claude/projects/*/memory/）と会話の記録の置き場 <ホーム>/.claude/projects は、一覧（S13-user-projects）で
+  丸ごと守る（T201）。環境変数 CLAUDE_CONFIG_DIR があればその projects も守る。値が相対パス・/・使えない文字なら作らない（S05）。
+  読むのは止めない（denyRead は作らない）。Claude Code 本体が書く会話の記録は囲いの外なので止まらない
 - 通信は止め、カレンダーの取得先の host だけ通す（S02・S09）。URL は環境変数で受け取り、host だけを取り出す。
   URL そのものは出力・エラー・ログに出さない。config に calendar（ics）が無い人は全部止める
 - 許可の一覧（permissions.allow）・読み取りの守り（denyRead）は作らない（S08・S10）
@@ -252,6 +255,14 @@ def build_settings(home, plugin_roots, config_path, user_home, calendar_url, pat
                 targets.extend(expand_git("X12-" + d.name, tp))
             else:
                 targets.append(("X12-" + d.name, tp, r["kind"]))
+
+    # 環境変数 CLAUDE_CONFIG_DIR があれば、そちらの projects（自動記憶と会話の記録の置き場）も守る（T201）。
+    # 使えない形（相対パス・/・使えない文字）のときは、黙って飛ばすと守らないまま Python を許してしまうので作らない（S05）。空の値は「無い」と同じ
+    cfg_dir = os.environ.get("CLAUDE_CONFIG_DIR")
+    if cfg_dir:
+        if not os.path.isabs(cfg_dir) or any(ch in BAD_PATH_CHARS for ch in cfg_dir) or os.path.normpath(cfg_dir).strip("/") == "":
+            raise Fail("環境変数 CLAUDE_CONFIG_DIR の場所が使えない形です（相対パス・使えない文字・ルート）")
+        targets.append(("S13-user-projects-config-dir", Path(os.path.normpath(cfg_dir)) / "projects", "dir"))
 
     # 書けるままにする先（tasks.json・logs）を含む守り方は作らない
     stay = spec.get("must_stay_writable")
