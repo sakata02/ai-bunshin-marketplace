@@ -170,7 +170,7 @@ async function show($: EngineInterface, raw: string): Promise<Detail & { isPlace
       const pairs: [string, any][] = [
         ['状態', t.status],
         ['担当', t.assignee],
-        ['カテゴリ', typeof t.category === 'string' && t.category.trim() ? t.category.trim() : t.status === '完了' ? '' : UNCAT],
+        ['カテゴリ', catOf(t) === UNCAT && t.status === '完了' ? '' : catOf(t)],
         ['種類', t.kind ? `${t.type ?? ''}／${t.kind}` : t.type],
         ['期日', t.due ? md(t.due) : ''],
         ['期日の理由', t.due_reason],

@@ -923,7 +923,7 @@ test('カテゴリ（C2）：完了は、カテゴリがあっても全部まと
 })
 
 test('カテゴリ（C2）：順位が同じ・順位が無いタスクでも、カテゴリの順は安定（順位なしは最後・同順位は ID 順）', async ($, on) => {
-  const rows = [ct('T001', 'x', undefined, 'N案件'), ct('T002', 'y', 3, 'M案件'), ct('T003', 'z', 3, 'L案件')]
+  const rows = [ct('T003', 'z', 3, 'L案件'), ct('T002', 'y', 3, 'M案件'), ct('T001', 'x', undefined, 'N案件')] // わざと ID の逆順で入れる
   await setup($, on, { data: catData(rows) })
   await $.tool.call({ tool: AT })
   const ui = await mountAll($)
