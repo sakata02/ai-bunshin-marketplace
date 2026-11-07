@@ -1,13 +1,18 @@
-"""囲いのカナリア（scripts/sandbox_canary.py）のテスト。T119 G4a（決定 S05・S06・S15・S16）。
+"""囲いのカナリア（scripts/sandbox_canary.py）のテスト。T119 G4a・G4c（決定 S05・S06・S15・S16・S20〜S23）。
 作り物の本人のフォルダ・ユーザーのホーム・プラグインの元を一時フォルダに作り、本物の sandbox_settings.py で denyWrite を作る。
 そのうえで、macOS の sandbox-exec（Claude Code の囲いと同じ seatbelt）で、囲いの効き方を変えながらカナリアを動かす。
 キーチェーンは作り物の security（終了コードを返すだけ）。本物の claude・キーチェーン・本物の本人のフォルダは使わない。
+カナリアは import で動かす（設定のファイルは prepare で置く。security の場所・確かめ先の差し替えも import でだけ）。
+コマンドから動かすのは、引数を受け付けないことと、鍵が出ないことの確かめだけ。
 
 - ①〜⑥（write・parent_mv・case・network・keychain・env_url）のどれか1つが通ったとき、その項目名が結果と判定に出る
 - 囲いが全部効いているときだけ、全部 blocked と判定される
 - カナリア自身が実物を壊さない（守る先のファイルの中身は変わらず、名前も変わらず、消えず、増えるのは空の目印ファイル最大2つ）
 - 結果が無い・形が違う・別の実行のもの・error・skipped は「全部止まった」にならない
+- G4c：偽造（印なし・違う鍵・設定の sha256 違い・write の数が下限未満・印のあとの書き換え）は通らない／コマンドの引数（--security-bin など）は受け付けない／鍵が出力・結果・security の環境に出ない
+- G4c：network は EPERM・EACCES のときだけ blocked／keychain は名前が無い日は error／parent_mv は守っていない親の付け替えを試す
 実行：python3 tests/test_sandbox_canary.py（失敗があれば終了コード1）。CANARY_UNDER_TEST に別の版の sandbox_canary.py を指すと、その版で流せる"""
+import errno
 import importlib.util
 import json
 import os
@@ -24,6 +29,8 @@ CANARY = os.environ.get("CANARY_UNDER_TEST") or os.path.join(SCRIPTS, "sandbox_c
 SETTINGS_PY = os.path.join(SCRIPTS, "sandbox_settings.py")
 BASE = os.path.realpath(tempfile.mkdtemp(prefix="sbxcanary_"))
 SECRET = "KEYCHAINSECRET-5d2f"
+KEY = "ab" * 32              # 点検の鍵（64文字の16進）
+OTHER_KEY = "cd" * 32
 
 names, fails, skipped = [], 0, []
 
@@ -104,7 +111,7 @@ def make_env(name, git_dir=True):
     if git_dir:
         os.makedirs(os.path.join(home, ".git", "hooks"))
         open(os.path.join(home, ".git", "config"), "w").write("[core]\n")
-    os.makedirs(os.path.join(home, C.MARKER_DIR, C.MARKER_INNER))   # daily_cycle.sh が囲いの外で前もって作る目印フォルダ
+    os.makedirs(os.path.join(home, C.MARKER_DIR, C.GUARD_DIR))   # daily_cycle.sh が囲いの外で前もって作る目印フォルダ（親は守らない。守る先は中の guard）
     open(os.path.join(home, "CLAUDE.md"), "w").write("# 本人設定\n")
     open(os.path.join(home, "設定", "config.json"), "w", encoding="utf-8").write("{}")
     open(os.path.join(home, "scripts", "auto", "run.sh"), "w").write("#!/bin/sh\n")
@@ -117,21 +124,23 @@ def make_env(name, git_dir=True):
     assert r.returncode == 0, r.stderr
     open(sj, "w").write(r.stdout)
     deny = json.loads(r.stdout)["sandbox"]["filesystem"]["denyWrite"]
-    return dict(d=d, home=home, user=user, plugin=plugin, settings=sj, deny=deny, out=os.path.join(home, "00_タスク管理", "data", "canary.json"))
+    return dict(d=d, home=home, user=user, plugin=plugin, settings=sj, deny=deny, out=os.path.join(home, "00_タスク管理", "data", "canary.json"),
+                key=KEY, sha=None, minw=None)
 
 
 def snapshot(e):
     """守る先を含む全体の中身（ファイルの中身・フォルダの名前）。目印ファイル（.ai-bunshin-canary-*）と結果は除く"""
     snap = {}
+    cfg_dir = os.path.join(e["user"], ".ai-bunshin")   # 囲いの外で prepare が置く設定のファイル（点検の前に作られる）。比べない
     for root in (e["home"], e["user"], e["plugin"]):
         for dp, dn, fn in os.walk(root):
             for x in dn:
-                if C.PROBE_PREFIX in x:
+                if C.PROBE_PREFIX in x or os.path.join(dp, x) == cfg_dir or dp.startswith(cfg_dir):
                     continue
                 snap[os.path.join(dp, x)] = "DIR"
             for x in fn:
                 p = os.path.join(dp, x)
-                if C.PROBE_PREFIX in x or p == e["out"] or p.endswith(".tmp"):
+                if C.PROBE_PREFIX in x or p == e["out"] or p.endswith(".tmp") or p.startswith(cfg_dir + os.sep):
                     continue
                 snap[p] = open(p, "rb").read()
     return snap
@@ -180,13 +189,33 @@ def profile_for(e, mode="full", drop=None, network=True, extra=()):
     return path
 
 
-def run_canary(e, profile=None, env_extra=None, security=SEC_BLOCKED, nonce="N1", net=None):
-    env = {k: v for k, v in os.environ.items() if k != C.URL_ENV and k not in C.PROXY_ENVS}
+# 点検を import で動かす小さな実行ファイル（テスト用。本物の daily_cycle.sh が呼ぶ点検の道具とは別。security の場所の差し替えは import でだけできる）
+RUNNER = os.path.join(BASE, "runner.py")
+open(RUNNER, "w").write('''import importlib.util, os, sys
+spec = importlib.util.spec_from_file_location("sc", sys.argv[1])
+m = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(m)
+key = os.environ.pop("AI_BUNSHIN_CANARY_KEY")
+m.execute(sys.argv[2], sys.argv[3], key, sys.argv[4])
+''')
+
+
+def prepare_env(e, nonce="N1", net=None, services=("svc",)):
+    """囲いの外の作業（設定のファイルを置く・設定の sha256 と write の下限を決める）。e に sha・minw・nonce を覚えておく"""
+    host, _, port = (net or "127.0.0.1:%d" % LISTEN_PORT).rpartition(":")
+    sha, minw, cfg = C.prepare(e["home"], open(e["settings"], encoding="utf-8").read(), nonce, e["out"], list(services), [(host, int(port))], user_home=e["user"])
+    e.update(sha=sha, minw=minw, nonce=nonce, cfg=cfg)
+    return cfg
+
+
+def run_canary(e, profile=None, env_extra=None, security=SEC_BLOCKED, nonce="N1", net=None, services=("svc",), key=None):
+    env = {k: v for k, v in os.environ.items() if k != C.URL_ENV and k not in C.PROXY_ENVS and k != C.KEY_ENV}
     env.update(env_extra or {})
+    env[C.KEY_ENV] = key or e["key"]
     if os.path.exists(e["out"]):
         os.remove(e["out"])
-    cmd = [sys.executable, "-I", CANARY, "--home", e["home"], "--settings-file", e["settings"], "--nonce", nonce, "--out", e["out"],
-           "--net-target", net or "127.0.0.1:%d" % LISTEN_PORT, "--security-bin", security]
+    cfg = prepare_env(e, nonce, net, services)
+    cmd = [sys.executable, "-B", "-I", RUNNER, CANARY, cfg, nonce, security]
     if profile:
         cmd = ["sandbox-exec", "-f", profile] + cmd
     r = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=120, cwd=e["home"])
@@ -194,12 +223,38 @@ def run_canary(e, profile=None, env_extra=None, security=SEC_BLOCKED, nonce="N1"
     return r, res
 
 
-def judge(e, nonce="N1"):
-    r = subprocess.run([sys.executable, "-I", CANARY, "--judge", e["out"], "--nonce", nonce], capture_output=True, text=True)
+def J(e, nonce="N1", key=None):
+    """囲いの外の判定（run_canary のあと）"""
+    return C.judge(e["out"], nonce, key or e["key"], e["sha"], e["minw"])
+
+
+def judge_cli(e, nonce="N1", key=None, sha=None, minw=None):
+    env = {k: v for k, v in os.environ.items() if k != C.KEY_ENV}
+    if key is not False:
+        env[C.KEY_ENV] = key or e["key"]
+    r = subprocess.run([sys.executable, "-I", CANARY, "--judge", e["out"], "--nonce", nonce, "--config-sha256", sha or e["sha"],
+                        "--min-writes", str(minw if minw is not None else e["minw"])], capture_output=True, text=True, env=env)
     return r.returncode, r.stdout.strip()
 
 
+def signed(data, key=KEY):
+    d = dict(data)
+    d.pop("mac", None)
+    d["mac"] = C.sign(d, key)
+    return d
+
+
 # ---------- 判定（judge） ----------
+
+SHA, MINW = "a" * 64, 5
+
+
+def base_result(nonce="N", **kw):
+    d = {"v": C.VERSION, "nonce": nonce, "date": "2026-11-07", "checks": {k: "blocked" for k in C.CHECKS}, "counts": {"write": MINW},
+         "litter": None, "restore_failed": False, "config_sha256": SHA}
+    d.update(kw)
+    return d
+
 
 @case
 def j1_judge_accepts_only_all_blocked_for_this_run():
@@ -207,11 +262,11 @@ def j1_judge_accepts_only_all_blocked_for_this_run():
     os.makedirs(d)
     f = os.path.join(d, "r.json")
 
-    def put(checks=None, nonce="N", **kw):
-        base = {k: "blocked" for k in C.CHECKS}
-        base.update(checks or {})
-        json.dump(dict({"v": 1, "nonce": nonce, "checks": base}, **kw), open(f, "w"))
-        return C.judge(f, "N")
+    def put(checks=None, nonce="N", key=KEY, **kw):
+        data = base_result(nonce=nonce, **kw)
+        data["checks"] = dict(data["checks"], **(checks or {}))
+        json.dump(signed(data, key), open(f, "w"))
+        return C.judge(f, "N", KEY, SHA, MINW)
     assert put() == (True, "")
     for k in C.CHECKS:
         for bad in ("leaked", "error", "skipped", "ok", None, True):
@@ -221,36 +276,107 @@ def j1_judge_accepts_only_all_blocked_for_this_run():
     assert not ok and "今回のものではない" in why, why
     ok, why = put(restore_failed=True)
     assert not ok and "restore_failed" in why, why
-    # 項目が欠けている・余計な形
-    json.dump({"v": 1, "nonce": "N", "checks": {"write": "blocked"}}, open(f, "w"))
-    assert not C.judge(f, "N")[0]
-    json.dump({"v": 2, "nonce": "N", "checks": {k: "blocked" for k in C.CHECKS}}, open(f, "w"))
-    assert not C.judge(f, "N")[0]
+    # 項目が欠けている・版が違う
+    json.dump(signed(base_result(checks={"write": "blocked"})), open(f, "w"))
+    assert not C.judge(f, "N", KEY, SHA, MINW)[0]
+    json.dump(signed(base_result(v=1)), open(f, "w"))
+    ok, why = C.judge(f, "N", KEY, SHA, MINW)
+    assert not ok and "形が違う" in why, why
     for text in ("not json", "[]", "null", ""):
         open(f, "w").write(text)
-        ok, why = C.judge(f, "N")
+        ok, why = C.judge(f, "N", KEY, SHA, MINW)
         assert not ok and "形が違う" in why, (text, why)
     os.remove(f)
-    ok, why = C.judge(f, "N")
+    ok, why = C.judge(f, "N", KEY, SHA, MINW)
     assert not ok and "動かなかった" in why, why
     # 理由にパス・URL が入らない（項目名と状態だけ）
-    json.dump({"v": 1, "nonce": "N", "checks": {"write": "/Users/x/secret https://h.example/y", "network": "leaked"}}, open(f, "w"))
-    ok, why = C.judge(f, "N")
+    ok, why = put({"write": "/Users/x/secret https://h.example/y", "network": "leaked"})
     assert not ok and "/" not in why and "http" not in why, why
 
 
 @case
+def j3_judge_rejects_forged_or_tampered_results():
+    """S20②③：印の無い・違う鍵・印のあとの書き換え・設定の sha256 違い・write の数が下限未満は、全部 blocked でも通さない"""
+    d = os.path.join(BASE, "j3")
+    os.makedirs(d)
+    f = os.path.join(d, "r.json")
+
+    def judge_data(data, key=KEY, sha=SHA, minw=MINW):
+        json.dump(data, open(f, "w"))
+        return C.judge(f, "N", key, sha, minw)
+
+    def expect_fail(label, res, word):
+        ok, why = res
+        assert not ok and word in why, (label, ok, why)
+    assert judge_data(signed(base_result())) == (True, "")
+    # 印を外す・違う鍵で付ける・印が文字でない
+    d0 = signed(base_result())
+    d0.pop("mac")
+    expect_fail("nomac", judge_data(d0), "印")
+    expect_fail("otherkey", judge_data(signed(base_result(), OTHER_KEY)), "印")
+    for bad in (None, 123, ["x"], "", "0" * 64):
+        expect_fail("badmac %r" % (bad,), judge_data(dict(signed(base_result()), mac=bad)), "印")
+    # 印を付けたあとの書き換え（leaked → blocked・設定の sha256・数・nonce・日付・余計な項目）
+    leaked = signed(base_result(checks={k: ("leaked" if k == "write" else "blocked") for k in C.CHECKS}))
+    t = json.loads(json.dumps(leaked))
+    t["checks"]["write"] = "blocked"
+    expect_fail("flip", judge_data(t), "印")
+    t = json.loads(json.dumps(signed(base_result())))
+    t["config_sha256"] = "b" * 64
+    expect_fail("sha", judge_data(t, sha="b" * 64), "印")
+    t = json.loads(json.dumps(signed(base_result(counts={"write": 0}))))
+    t["counts"]["write"] = 99
+    expect_fail("count", judge_data(t), "印")
+    t = json.loads(json.dumps(signed(base_result())))
+    t["restore_failed"] = True
+    expect_fail("restore", judge_data(t), "印")
+    t = json.loads(json.dumps(signed(base_result())))
+    t["extra"] = 1
+    expect_fail("extra", judge_data(t), "印")
+    # 鍵が無い・短い（判定側）
+    for k in (None, "", "short", 123):
+        expect_fail("key %r" % (k,), judge_data(signed(base_result()), key=k), "鍵")
+    # 設定の中身の sha256 が、囲いの外の値と違う（印は正しい）
+    expect_fail("sha-mismatch", judge_data(signed(base_result(config_sha256="c" * 64))), "設定の中身")
+    for bad_sha in (None, "", 5):
+        expect_fail("expected-sha %r" % (bad_sha,), judge_data(signed(base_result()), sha=bad_sha), "設定の中身")
+    d1 = base_result()
+    d1.pop("config_sha256")
+    expect_fail("no-sha", judge_data(signed(d1)), "設定の中身")
+    # write で確かめた数が、囲いの外で数えた下限より少ない・数でない・無い（印は正しい）
+    expect_fail("low", judge_data(signed(base_result(counts={"write": MINW - 1}))), "足りない")
+    for bad in ({}, {"write": True}, {"write": "9"}, {"write": None}, {"write": 5.0}):
+        expect_fail("count %r" % (bad,), judge_data(signed(base_result(counts=bad))), "足りない")
+    expect_fail("nocounts", judge_data(signed(base_result(counts=None))), "足りない")
+    assert judge_data(signed(base_result(counts={"write": MINW + 3}))) == (True, "")
+    # 下限が0・数でない：確かめる守る先が1つも無い
+    for m in (0, -1, None, True, "5"):
+        expect_fail("minw %r" % (m,), judge_data(signed(base_result()), minw=m), "守る先")
+    # 項目が通らなかったときは、数が足りなくても項目名が出る（ログの案内に使う）
+    ok, why = judge_data(signed(base_result(counts={"write": 0}, checks={k: ("leaked" if k == "write" else "blocked") for k in C.CHECKS})))
+    assert not ok and why == "write=leaked", why
+
+
+@case
 def j2_cli_judge_exit_codes_and_output():
-    e = {"out": os.path.join(BASE, "j2.json")}
-    json.dump({"v": 1, "nonce": "N", "checks": {k: "blocked" for k in C.CHECKS}}, open(e["out"], "w"))
-    assert judge(e, "N") == (0, "")
-    assert judge(e, "M")[0] == 1
-    json.dump({"v": 1, "nonce": "N", "checks": dict({k: "blocked" for k in C.CHECKS}, network="leaked", keychain="error")}, open(e["out"], "w"))
-    assert judge(e, "N") == (1, "network=leaked,keychain=error")
-    r = subprocess.run([sys.executable, "-I", CANARY], capture_output=True, text=True)
-    assert r.returncode == 64, r.returncode
-    r = subprocess.run([sys.executable, "-I", CANARY, "--bogus"], capture_output=True, text=True)
-    assert r.returncode == 64, r.returncode
+    e = {"out": os.path.join(BASE, "j2.json"), "key": KEY, "sha": SHA, "minw": MINW}
+    json.dump(signed(base_result()), open(e["out"], "w"))
+    assert judge_cli(e, "N") == (0, "")
+    assert judge_cli(e, "M")[0] == 1
+    assert judge_cli(e, "N", key=OTHER_KEY) == (1, "結果の印が正しくない")
+    assert judge_cli(e, "N", key=False) == (1, "鍵が無い")   # 環境に鍵が無い
+    assert judge_cli(e, "N", sha="d" * 64) == (1, "設定の中身が違う")
+    assert judge_cli(e, "N", minw=MINW + 1) == (1, "write の確かめた数が足りない")
+    json.dump(signed(base_result(checks=dict({k: "blocked" for k in C.CHECKS}, network="leaked", keychain="error"))), open(e["out"], "w"))
+    assert judge_cli(e, "N") == (1, "network=leaked,keychain=error")
+    # 引数が足りない・形が違う：64（値は出さない）
+    base = [sys.executable, "-I", CANARY]
+    env = dict(os.environ, **{C.KEY_ENV: KEY})
+    for argv in ([], ["--bogus"], ["--judge", e["out"]], ["--judge", e["out"], "--nonce", "N"], ["--judge", e["out"], "--nonce", "N", "--config-sha256", SHA],
+                 ["--judge", e["out"], "--nonce", "N", "--config-sha256", SHA, "--min-writes", "x"],
+                 ["--judge", e["out"], "--nonce", "N", "--config-sha256", SHA, "--min-writes", "5", "--out", "/tmp/x"]):
+        r = subprocess.run(base + argv, capture_output=True, text=True, env=env)
+        assert r.returncode == 64 and r.stdout == "" and KEY not in r.stderr, (argv, r.returncode, r.stdout, r.stderr)
 
 
 # ---------- 囲いが無い日：全部通る。でも実物は壊さない ----------
@@ -265,7 +391,7 @@ def c1_no_fence_everything_leaks_but_nothing_is_damaged():
     assert res["checks"]["write"] == "leaked" and res["checks"]["network"] == "leaked", res
     assert res["checks"]["keychain"] == "leaked" and res["checks"]["env_url"] == "leaked", res
     assert res["checks"]["parent_mv"] == "skipped" and res["checks"]["case"] == "skipped", "write が通った日に名前を変えようとした: %s" % res
-    ok, why = C.judge(e["out"], "N1")
+    ok, why = J(e)
     assert not ok and "write=leaked" in why and "network=leaked" in why and "keychain=leaked" in why and "env_url=leaked" in why, why
     after = snapshot(e)
     assert before == after, "実物が変わった：%s" % sorted(set(before) ^ set(after))
@@ -285,8 +411,8 @@ def c2_parent_mv_renames_back_when_it_goes_through():
     state, restore_failed = C.check_parent_mv(e["home"], e["deny"], "X")
     assert (state, restore_failed) == ("leaked", False), (state, restore_failed)
     assert snapshot(e) == before, "名前が元に戻っていない"
-    assert not [x for x in os.listdir(e["home"]) if ".moved-" in x or x.startswith(C.MARKER_INNER)], os.listdir(e["home"])
-    assert os.path.isdir(os.path.join(e["home"], C.MARKER_DIR, C.MARKER_INNER))
+    assert not [x for x in os.listdir(e["home"]) if ".moved-" in x or x.startswith(C.GUARD_DIR)], os.listdir(e["home"])
+    assert os.path.isdir(os.path.join(e["home"], C.MARKER_DIR, C.GUARD_DIR))
     # 本物の scripts/・.git は付け替えない：囲いが無くて通る日でも、名前は一度も変わらない
     real_rename = os.rename
     renamed = []
@@ -317,14 +443,14 @@ def c2_parent_mv_renames_back_when_it_goes_through():
     real_rename(os.path.join(e["home"], C.MARKER_DIR + ".moved-Y"), os.path.join(e["home"], C.MARKER_DIR))   # 後始末（一時フォルダ）
     # 目印フォルダが無い・中の inner が無いとき：確かめられない（error）
     e2 = make_env("c2b")
-    real_rename(os.path.join(e2["home"], C.MARKER_DIR, C.MARKER_INNER), os.path.join(e2["home"], "elsewhere"))
+    real_rename(os.path.join(e2["home"], C.MARKER_DIR, C.GUARD_DIR), os.path.join(e2["home"], "elsewhere"))
     assert C.check_parent_mv(e2["home"], e2["deny"], "Z") == ("error", False)
     e3 = make_env("c2c")
     real_rename(os.path.join(e3["home"], C.MARKER_DIR), os.path.join(e3["home"], "elsewhere"))
     assert C.check_parent_mv(e3["home"], e3["deny"], "Z") == ("error", False)
     r, res = run_canary(e3)
     assert res["checks"]["parent_mv"] in ("error", "skipped"), res
-    assert not C.judge(e3["out"], "N1")[0]
+    assert not J(e3)[0]
 
 
 @case
@@ -367,8 +493,8 @@ def s1_full_fence_all_blocked():
     r, res = run_canary(e, profile=profile_for(e))
     assert r.returncode == 0, (r.returncode, r.stderr[-300:])
     assert res and res["checks"] == {k: "blocked" for k in C.CHECKS}, res
-    assert C.judge(e["out"], "N1") == (True, ""), C.judge(e["out"], "N1")
-    assert judge(e) == (0, "")
+    assert J(e) == (True, ""), J(e)
+    assert judge_cli(e) == (0, "")
     assert snapshot(e) == before and litter(e) == [], "囲いの中で何かが変わった／目印が残った"
     assert res["counts"]["write"] >= 8, res["counts"]   # 守る先を数か所以上確かめている（NFC・NFD・realpath の形も数える）
 
@@ -385,7 +511,7 @@ def s2_write_leak_when_a_protected_path_is_not_fenced():
     target = os.path.join(e["home"], "設定")
     r, res = run_canary(e, profile=profile_for(e, drop=target))
     assert res["checks"]["write"] == "leaked", res
-    ok, why = C.judge(e["out"], "N1")
+    ok, why = J(e)
     assert not ok and "write=leaked" in why, why
     assert any(C.PROBE_PREFIX in x for x in os.listdir(target)), "設定に目印が残っていない（記録して残す）"
     assert open(os.path.join(target, "config.json"), encoding="utf-8").read() == "{}"
@@ -402,7 +528,7 @@ def s3_parent_mv_leak_when_rename_is_not_blocked():
     before = snapshot(e)
     r, res = run_canary(e, profile=profile_for(e, mode="no_rename"))
     assert res["checks"]["write"] == "blocked" and res["checks"]["parent_mv"] == "leaked", res
-    ok, why = C.judge(e["out"], "N1")
+    ok, why = J(e)
     assert not ok and "parent_mv=leaked" in why, why
     assert snapshot(e) == before, "名前を戻せていない"
     assert not res["restore_failed"]
@@ -414,9 +540,9 @@ def s3a_marker_dir_rename_alone_is_detected():
     # 目印フォルダごとの付け替えだけが通る囲い（中の inner の付け替えは止まる）：(a) の確かめが無いと見逃す
     e = make_env("s3a")
     m = marker_path(e)
-    r, res = run_canary(e, profile=profile_for(e, mode="no_rename", extra=['(deny file-write-unlink (literal "%s/%s"))' % (m, C.MARKER_INNER)]))
+    r, res = run_canary(e, profile=profile_for(e, mode="no_rename", extra=['(deny file-write-unlink (literal "%s/%s"))' % (m, C.GUARD_DIR)]))
     assert res["checks"]["write"] == "blocked" and res["checks"]["parent_mv"] == "leaked", res
-    assert os.path.isdir(os.path.join(m, C.MARKER_INNER)), "名前が戻っていない"
+    assert os.path.isdir(os.path.join(m, C.GUARD_DIR)), "名前が戻っていない"
 
 
 @case
@@ -425,18 +551,19 @@ def s3i_inner_rename_alone_is_detected():
     # 中の inner を外へ出す付け替えだけが通る囲い（目印フォルダごとの付け替えは止まる）：(b) の確かめが無いと見逃す
     e = make_env("s3i")
     m = marker_path(e)
-    r, res = run_canary(e, profile=profile_for(e, mode="no_rename", extra=['(deny file-write-unlink (literal "%s"))' % m, '(allow file-write-create (literal "%s/%s"))' % (m, C.MARKER_INNER)]))   # 戻す先（inner）への作成は通す（戻せる囲い）
+    r, res = run_canary(e, profile=profile_for(e, mode="no_rename", extra=['(deny file-write-unlink (literal "%s"))' % m, '(allow file-write-create (literal "%s/%s"))' % (m, C.GUARD_DIR)]))   # 戻す先（inner）への作成は通す（戻せる囲い）
     assert res["checks"]["write"] == "blocked" and res["checks"]["parent_mv"] == "leaked", res
-    assert os.path.isdir(os.path.join(m, C.MARKER_INNER)) and not os.path.exists(os.path.join(e["home"], C.MARKER_INNER + C.PROBE_PREFIX + "N1")), "名前が戻っていない"
+    assert os.path.isdir(os.path.join(m, C.GUARD_DIR)) and not os.path.exists(os.path.join(e["home"], C.GUARD_DIR + C.PROBE_PREFIX + "N1")), "名前が戻っていない"
 
 
 @case
 @need_sbx
 def s3b_parent_mv_that_cannot_be_restored_is_reported():
     e = make_env("s3b")
-    r, res = run_canary(e, profile=profile_for(e, mode="no_restore"))
+    # 守っていない親の付け替えは通り、元の名前に戻す（その名前への作成）が止まる囲い
+    r, res = run_canary(e, profile=profile_for(e, mode="no_restore", extra=['(deny file-write-create (literal "%s"))' % marker_path(e)]))
     assert res["checks"]["parent_mv"] == "leaked" and res["restore_failed"] is True, res
-    ok, why = C.judge(e["out"], "N1")
+    ok, why = J(e)
     assert not ok and "parent_mv=leaked" in why and "parent_mv_restore_failed" in why, why
     moved = marker_path(e) + ".moved-N1"
     assert os.path.isdir(moved), "名前が変わったまま残る（目印のフォルダ。次の日に daily_cycle.sh が作り直す）"
@@ -470,7 +597,7 @@ def s4_case_leak_when_fence_is_case_sensitive():
         print("(skip: 正規表現が大文字・小文字を区別しない)", end=" ")
         return
     only_leaks(res, "case")
-    ok, why = C.judge(e["out"], "N1")
+    ok, why = J(e)
     assert not ok and "case=leaked" in why, why
     assert open(os.path.join(e["home"], "CLAUDE.md")).read() == "# 本人設定\n"
 
@@ -481,7 +608,7 @@ def s5_network_leak_when_not_blocked():
     e = make_env("s5")
     r, res = run_canary(e, profile=profile_for(e, network=False))
     only_leaks(res, "network")
-    ok, why = C.judge(e["out"], "N1")
+    ok, why = J(e)
     assert not ok and why == "network=leaked", why
 
 
@@ -491,7 +618,7 @@ def s6_keychain_leak_when_found():
     e = make_env("s6")
     r, res = run_canary(e, profile=profile_for(e), security=SEC_FOUND)
     only_leaks(res, "keychain")
-    assert C.judge(e["out"], "N1") == (False, "keychain=leaked")
+    assert J(e) == (False, "keychain=leaked")
     assert SECRET not in json.dumps(res) + r.stdout + r.stderr
 
 
@@ -501,91 +628,11 @@ def s7_env_url_leak_when_present():
     e = make_env("s7")
     r, res = run_canary(e, profile=profile_for(e), env_extra={C.URL_ENV: "https://h.example/" + SECRET})
     only_leaks(res, "env_url")
-    assert C.judge(e["out"], "N1") == (False, "env_url=leaked")
+    assert J(e) == (False, "env_url=leaked")
     assert SECRET not in json.dumps(res) + r.stdout + r.stderr
 
 
 # ---------- 個別の確かめ ----------
-
-@case
-def n1_network_via_proxy():
-    def serve(reply):
-        s = socket.socket()
-        s.bind(("127.0.0.1", 0))
-        s.listen(4)
-        seen = []
-
-        def loop():
-            while True:
-                try:
-                    c, _ = s.accept()
-                except OSError:
-                    return
-                seen.append(c.recv(512))
-                c.sendall(reply)
-                c.close()
-        threading.Thread(target=loop, daemon=True).start()
-        return s, seen
-    dead = socket.socket()
-    dead.bind(("127.0.0.1", 0))
-    dead_port = dead.getsockname()[1]
-    dead.close()   # つながらない先
-    targets = [("127.0.0.1", dead_port)]
-    saved = {k: os.environ.pop(k) for k in C.PROXY_ENVS if k in os.environ}
-    try:
-        assert C.check_network(targets) == "blocked"
-        s, seen = serve(b"HTTP/1.1 200 Connection established\r\n\r\n")
-        os.environ["HTTPS_PROXY"] = "http://127.0.0.1:%d" % s.getsockname()[1]
-        assert C.check_network(targets) == "leaked", "プロキシが通した（200）のに blocked"
-        assert seen and seen[0].startswith(b"CONNECT example.com:443"), seen
-        assert C.check_network(targets, avoid_hosts=("example.com",)) == "leaked"
-        assert seen[-1].startswith(b"CONNECT example.net:443"), "許可している host を避けていない: %s" % seen[-1]
-        s.close()
-        s2, _ = serve(b"HTTP/1.1 403 Forbidden\r\n\r\n")
-        os.environ["HTTPS_PROXY"] = "http://127.0.0.1:%d" % s2.getsockname()[1]
-        assert C.check_network(targets) == "blocked", "プロキシが断った（403）のに leaked"
-        s2.close()
-        os.environ["HTTPS_PROXY"] = "http://127.0.0.1:%d" % dead_port   # プロキシにつながらない＝通っていない
-        assert C.check_network(targets) == "blocked"
-        os.environ["HTTPS_PROXY"] = "not a url"
-        assert C.check_network(targets) == "blocked"
-        # 直接つながる先があれば leaked
-        assert C.check_network([("127.0.0.1", dead_port), ("127.0.0.1", LISTEN_PORT)]) == "leaked"
-    finally:
-        for k in C.PROXY_ENVS:
-            os.environ.pop(k, None)
-        os.environ.update(saved)
-
-
-@case
-def n2_keychain_states():
-    assert C.check_keychain(SEC_BLOCKED, ["a", "b"]) == "blocked"
-    assert C.check_keychain(SEC_FOUND, ["a"]) == "leaked"
-    # 2つ目の名前で見つかっても leaked
-    p = os.path.join(BASE, "sec_second")
-    open(p, "w").write('#!/bin/sh\n[ "$3" = second ] && exit 0\nexit 44\n')
-    os.chmod(p, 0o755)
-    assert C.check_keychain(p, ["first", "second"]) == "leaked"
-    # 中身を頼む引数（-w・-g）を付けない
-    log = os.path.join(BASE, "sec_args.txt")
-    q = os.path.join(BASE, "sec_args")
-    open(q, "w").write('#!/bin/sh\necho "$@" >> "%s"\nexit 44\n' % log)
-    os.chmod(q, 0o755)
-    C.check_keychain(q, ["svc"])
-    args = open(log).read().split()
-    assert args == ["find-generic-password", "-s", "svc"] and "-w" not in args and "-g" not in args, args
-    # 固まったら error（blocked にしない）
-    h = os.path.join(BASE, "sec_hang")
-    open(h, "w").write("#!/bin/sh\nsleep 30\n")
-    os.chmod(h, 0o755)
-    saved = C.KEYCHAIN_TIMEOUT
-    C.KEYCHAIN_TIMEOUT = 0.5
-    try:
-        assert C.check_keychain(h, ["svc"]) == "error"
-    finally:
-        C.KEYCHAIN_TIMEOUT = saved
-    assert C.check_keychain(os.path.join(BASE, "no_such_security"), ["svc"]) == ("error" if sys.platform == "darwin" else "blocked")
-
 
 @case
 def n3_keychain_services_from_config():
@@ -600,16 +647,318 @@ def n3_keychain_services_from_config():
 
 
 @case
+def n1_network_states():
+    """S21：直接の接続が EPERM・EACCES（囲いが止めた）のときだけ blocked。拒否・時間切れ・届かないは error（囲いが止めたとは言えない）"""
+    real_cc = socket.create_connection
+    saved = {k: os.environ.pop(k) for k in C.PROXY_ENVS if k in os.environ}
+
+    def raising(exc):
+        def f(*a, **k):
+            raise exc
+        return f
+    T = [("127.0.0.1", 1)]
+    try:
+        for exc, want in ((OSError(errno.EPERM, "x"), "blocked"), (OSError(errno.EACCES, "x"), "blocked"),
+                          (ConnectionRefusedError(errno.ECONNREFUSED, "x"), "error"), (socket.timeout("t"), "error"),
+                          (OSError(errno.ENETUNREACH, "x"), "error"), (OSError(errno.EHOSTUNREACH, "x"), "error"),
+                          (OSError(errno.EROFS, "x"), "error"), (OSError("no errno"), "error")):
+            socket.create_connection = raising(exc)
+            assert C.check_network(T) == want, (repr(exc), want)
+        # 確かめ先が複数：全部が止めた（EPERM・EACCES）ときだけ blocked。1つでも拒否・届かないなら error
+        calls_ = iter([OSError(errno.EPERM, "x"), OSError(errno.ECONNREFUSED, "x")])
+
+        def mixed(*a, **k):
+            raise next(calls_)
+        socket.create_connection = mixed
+        assert C.check_network([("127.0.0.1", 1), ("127.0.0.1", 2)]) == "error"
+        socket.create_connection = raising(OSError(errno.EPERM, "x"))
+        assert C.check_network([("127.0.0.1", 1), ("127.0.0.1", 2)]) == "blocked"
+        assert C.check_network([]) == "error", "確かめ先が無いのに blocked"
+        # プロキシ：許可していないドメインへの CONNECT が通れば leaked（直接が止まっていても）。断られても、直接が EPERM でなければ error
+        socket.create_connection = real_cc
+
+        def serve(reply):
+            s = socket.socket()
+            s.bind(("127.0.0.1", 0))
+            s.listen(4)
+            seen = []
+
+            def loop():
+                while True:
+                    try:
+                        c, _ = s.accept()
+                    except OSError:
+                        return
+                    seen.append(c.recv(512))
+                    c.sendall(reply)
+                    c.close()
+            threading.Thread(target=loop, daemon=True).start()
+            return s, seen
+
+        def eperm_for_target(host, port, *a, **k):   # 確かめ先だけ「囲いが止めた」形にし、プロキシへの接続は本物
+            if host == "203.0.113.9":
+                raise OSError(errno.EPERM, "x")
+            return real_cc((host, port), *a, **k)
+        socket.create_connection = lambda addr, *a, **k: eperm_for_target(addr[0], addr[1], *a, **k)
+        TD = [("203.0.113.9", 443)]
+        dead = socket.socket()
+        dead.bind(("127.0.0.1", 0))
+        dead_port = dead.getsockname()[1]
+        dead.close()
+        s, seen = serve(b"HTTP/1.1 200 Connection established\r\n\r\n")
+        os.environ["HTTPS_PROXY"] = "http://127.0.0.1:%d" % s.getsockname()[1]
+        assert C.check_network(TD) == "leaked", "プロキシが通した（200）のに blocked"
+        assert seen and seen[0].startswith(b"CONNECT example.com:443"), seen
+        assert C.check_network(TD, avoid_hosts=("example.com",)) == "leaked"
+        assert seen[-1].startswith(b"CONNECT example.net:443"), "許可している host を避けていない: %s" % seen[-1]
+        s.close()
+        s2, _ = serve(b"HTTP/1.1 403 Forbidden\r\n\r\n")
+        os.environ["HTTPS_PROXY"] = "http://127.0.0.1:%d" % s2.getsockname()[1]
+        assert C.check_network(TD) == "blocked", "プロキシが断った（403）・直接は EPERM なのに blocked でない"
+        assert C.check_network([("127.0.0.1", dead_port)]) == "error", "直接の接続が拒否（EPERM でない）なのに blocked"
+        s2.close()
+        os.environ["HTTPS_PROXY"] = "http://127.0.0.1:%d" % dead_port   # プロキシにつながらない＝通っていない
+        assert C.check_network(TD) == "blocked"
+        os.environ["HTTPS_PROXY"] = "not a url"
+        assert C.check_network(TD) == "blocked"
+        # 直接つながる先があれば leaked
+        os.environ.pop("HTTPS_PROXY")
+        socket.create_connection = real_cc
+        assert C.check_network([("127.0.0.1", dead_port), ("127.0.0.1", LISTEN_PORT)]) == "leaked"
+    finally:
+        socket.create_connection = real_cc
+        for k in C.PROXY_ENVS:
+            os.environ.pop(k, None)
+        os.environ.update(saved)
+
+
+@case
+@need_sbx
+def n1b_network_in_fence_is_blocked_and_refused_is_error():
+    """本物の seatbelt の下：囲いが通信を止めれば EPERM で blocked。囲いが無くて、つながらない先は error（blocked にしない）"""
+    e = make_env("n1b")
+    r, res = run_canary(e, profile=profile_for(e), net="127.0.0.1:%d" % LISTEN_PORT)
+    assert res["checks"]["network"] == "blocked", res
+    dead = socket.socket()
+    dead.bind(("127.0.0.1", 0))
+    dead_port = dead.getsockname()[1]
+    dead.close()
+    e2 = make_env("n1c")
+    r, res = run_canary(e2, profile=profile_for(e2, network=False), net="127.0.0.1:%d" % dead_port)
+    assert res["checks"]["network"] == "error", res
+    assert not J(e2)[0]
+
+
+@case
+def n2_keychain_states():
+    assert C.check_keychain(SEC_BLOCKED, ["a", "b"]) == "blocked"
+    assert C.check_keychain(SEC_FOUND, ["a"]) == "leaked"
+    # 確かめる項目が1つも無い日は error（0以外が「囲いに止められた」と言えない。S22）
+    assert C.check_keychain(SEC_BLOCKED, []) == "error"
+    assert C.check_keychain(SEC_BLOCKED, ["", None, 5]) == "error"
+    # 2つ目の名前で見つかっても leaked
+    p = os.path.join(BASE, "sec_second")
+    open(p, "w").write('#!/bin/sh\n[ "$3" = second ] && exit 0\nexit 44\n')
+    os.chmod(p, 0o755)
+    assert C.check_keychain(p, ["first", "second"]) == "leaked"
+    # 中身を頼む引数（-w・-g）を付けない。鍵（環境変数）を security に渡さない
+    log = os.path.join(BASE, "sec_args.txt")
+    q = os.path.join(BASE, "sec_args")
+    open(q, "w").write('#!/bin/sh\necho "$@" >> "%s"\nenv >> "%s"\nexit 44\n' % (log, log))
+    os.chmod(q, 0o755)
+    os.environ[C.KEY_ENV] = KEY
+    try:
+        C.check_keychain(q, ["svc"])
+    finally:
+        os.environ.pop(C.KEY_ENV, None)
+    text = open(log).read()
+    args = text.splitlines()[0].split()
+    assert args == ["find-generic-password", "-s", "svc"] and "-w" not in args and "-g" not in args, args
+    assert KEY not in text and C.KEY_ENV not in text, "鍵が security の環境に渡った"
+    # 固まったら error（blocked にしない）
+    h = os.path.join(BASE, "sec_hang")
+    open(h, "w").write("#!/bin/sh\nsleep 30\n")
+    os.chmod(h, 0o755)
+    saved = C.KEYCHAIN_TIMEOUT
+    C.KEYCHAIN_TIMEOUT = 0.5
+    try:
+        assert C.check_keychain(h, ["svc"]) == "error"
+    finally:
+        C.KEYCHAIN_TIMEOUT = saved
+    assert C.check_keychain(os.path.join(BASE, "no_such_security"), ["svc"]) == "error"   # security が無い・動かせない日は、blocked にしない
+
+
+@case
+def n2b_existing_keychain_services_outside():
+    """S22：囲いの外で先に項目があるかを確かめる。ある名前だけ（-w なし）"""
+    e = make_env("n2b")
+    json.dump({"calendar": {"type": "ics", "keychain": "my-cal"}}, open(os.path.join(e["home"], "設定", "config.json"), "w", encoding="utf-8"))
+    log = os.path.join(BASE, "sec_exist.txt")
+    p = os.path.join(BASE, "sec_exist")
+    open(p, "w").write('#!/bin/sh\necho "$@" >> "%s"\n[ "$3" = my-cal ] && exit 0\nexit 44\n' % log)
+    os.chmod(p, 0o755)
+    assert C.existing_keychain_services(e["home"], p) == ["my-cal"]
+    calls_ = open(log).read().splitlines()
+    assert calls_ == ["find-generic-password -s my-cal", "find-generic-password -s " + C.CLAUDE_CREDENTIAL_SERVICE], calls_
+    assert C.existing_keychain_services(e["home"], SEC_BLOCKED) == []
+    assert C.existing_keychain_services(e["home"], os.path.join(BASE, "no_such_security")) == []
+
+
+@case
+def a1_cli_accepts_only_nonce():
+    """S20③：点検の道具は nonce 以外の引数を受け付けない（0以外で終わる）。受け付けないときは何も書かず・何も確かめない。環境変数で確かめ先は変えられない"""
+    e = make_env("a1")
+    cfg = prepare_env(e, "A1")
+    env = {k: v for k, v in os.environ.items() if k not in C.PROXY_ENVS}
+    env.update({C.KEY_ENV: KEY, "HOME": e["user"]})
+    base = [sys.executable, "-I", CANARY]
+    extras = (["--out", os.path.join(BASE, "evil_out.json")], ["--home", e["home"]], ["--settings-file", e["settings"]],
+              ["--security-bin", SEC_BLOCKED], ["--net-target", "127.0.0.1:%d" % LISTEN_PORT], ["--net-target=127.0.0.1:1"],
+              ["--config-sha256", "a" * 64], ["--min-writes", "1"], ["--judge", e["out"]], ["--nonc", "A1"], ["extra"], ["-x"])
+    before = snapshot(e)
+    for ex in extras:
+        for order in (ex + ["--nonce", "A1"], ["--nonce", "A1"] + ex):
+            r = subprocess.run(base + order, capture_output=True, text=True, env=env, cwd=e["home"])
+            assert r.returncode == 64, (order, r.returncode)
+            assert KEY not in r.stdout + r.stderr, "引数エラーに鍵が出た"
+            assert not os.path.exists(e["out"]) and not os.path.exists(os.path.join(BASE, "evil_out.json")), "引数が拒否されたのに結果を書いた：%s" % order
+    assert snapshot(e) == before and litter(e) == [], "引数が拒否されたのに、確かめて実物を触った"
+    # nonce が無い・形が違う（パスの区切りなど）
+    for order in ([], ["--nonce"], ["--nonce", ""], ["--nonce", "../x"], ["--nonce", "a/b"], ["--nonce", "x" * 81], ["--nonce", "a b"]):
+        r = subprocess.run(base + order, capture_output=True, text=True, env=env, cwd=e["home"])
+        assert r.returncode == 64, (order, r.returncode)
+    # 鍵が渡されていない：2。設定のファイルが無い nonce：2（結果も書かない）
+    env2 = dict(env)
+    env2.pop(C.KEY_ENV)
+    r = subprocess.run(base + ["--nonce", "A1"], capture_output=True, text=True, env=env2, cwd=e["home"])
+    assert r.returncode == 2 and not os.path.exists(e["out"]), (r.returncode, r.stderr)
+    r = subprocess.run(base + ["--nonce", "NOCONFIG"], capture_output=True, text=True, env=env, cwd=e["home"])
+    assert r.returncode == 2 and not os.path.exists(e["out"]), r.returncode
+    # 短い鍵・16進でない短い値は受け付けない
+    env3 = dict(env, **{C.KEY_ENV: "short"})
+    r = subprocess.run(base + ["--nonce", "A1"], capture_output=True, text=True, env=env3, cwd=e["home"])
+    assert r.returncode == 2 and not os.path.exists(e["out"]), r.returncode
+    assert os.path.exists(cfg)
+
+
+@case
+@need_sbx
+def a2_cli_end_to_end_signed_result_and_no_key_leak():
+    """本番と同じ呼び方（--nonce だけ・鍵は環境変数）を seatbelt の下で：印つきの結果が書かれ、囲いの外の判定が同じ鍵・設定の sha256・下限で通る／違えば通らない。鍵は結果・出力に出ない。
+    キーチェーンは、無いはずの名前（本物の security に頼む。項目が無いので0以外）を使う"""
+    if sys.platform != "darwin" or not os.path.exists(C.DEFAULT_SECURITY):
+        skipped.append("a2（macOS の security が無い）")
+        print("(skip: macOS の security が無い)", end=" ")
+        return
+    e = make_env("a2")
+    cfg = prepare_env(e, "A2", services=["ai-bunshin-canary-test-no-such-item-7c1d9e"])
+    prof = profile_for(e)
+    env = {k: v for k, v in os.environ.items() if k not in C.PROXY_ENVS and k != C.URL_ENV}
+    env.update({C.KEY_ENV: KEY, "HOME": e["user"]})
+    for name in ("AI_BUNSHIN_SECURITY_BIN", "AI_BUNSHIN_SECURITY", "SECURITY_BIN", "CANARY_SECURITY_BIN", "AI_BUNSHIN_CANARY_SECURITY"):
+        env[name] = SEC_FOUND   # 環境変数で security を差し替えようとしても、点検は使わない（全部 blocked のまま）
+    for name in ("AI_BUNSHIN_NET_TARGET", "AI_BUNSHIN_CANARY_NET", "AI_BUNSHIN_CANARY_OUT", "AI_BUNSHIN_CANARY_HOME"):
+        env[name] = "127.0.0.1:%d" % LISTEN_PORT
+    cmd = ["sandbox-exec", "-f", prof, sys.executable, "-B", "-I", CANARY, "--nonce", "A2"]
+    r = subprocess.run(cmd, capture_output=True, text=True, env=env, cwd=e["home"], timeout=120)
+    assert r.returncode == 0, (r.returncode, r.stderr[-300:])
+    raw = open(e["out"], encoding="utf-8").read()
+    res = json.loads(raw)
+    assert KEY not in raw + r.stdout + r.stderr, "鍵が結果・出力に出た"
+    assert res["mac"] == C.sign(res, KEY) and res["nonce"] == "A2" and res["v"] == C.VERSION
+    assert res["config_sha256"] == e["sha"] and res["counts"]["write"] >= e["minw"], (res["counts"], e["minw"])
+    assert res["checks"] == {k: "blocked" for k in C.CHECKS}, res
+    assert judge_cli(e, "A2") == (0, "")
+    assert judge_cli(e, "A2", key=OTHER_KEY) == (1, "結果の印が正しくない")
+    assert judge_cli(e, "A2", sha="e" * 64) == (1, "設定の中身が違う")
+    assert judge_cli(e, "A2", minw=e["minw"] + 50) == (1, "write の確かめた数が足りない")
+    # 結果を書き換える（印はそのまま）・印を外す
+    res2 = dict(res, checks=dict(res["checks"], write="leaked"))
+    res2b = dict(res2, checks={k: "blocked" for k in C.CHECKS}, counts={"write": 1})
+    json.dump(res2b, open(e["out"], "w"))
+    assert judge_cli(e, "A2") == (1, "結果の印が正しくない")
+    res3 = {k: v for k, v in res.items() if k != "mac"}
+    json.dump(res3, open(e["out"], "w"))
+    assert judge_cli(e, "A2") == (1, "結果の印が正しくない")
+    # 設定のファイルの中身を差し替える（点検の claude が書けたとして）→ 結果の sha256 が、囲いの外の値と合わない
+    evil = json.loads(open(cfg, "rb").read().decode("utf-8"))
+    evil["net_targets"] = []
+    open(cfg, "wb").write((json.dumps(evil, ensure_ascii=False, sort_keys=True) + "\n").encode("utf-8"))
+    r = subprocess.run(cmd, capture_output=True, text=True, env=env, cwd=e["home"], timeout=120)
+    assert r.returncode == 0, (r.returncode, r.stderr[-300:])
+    res4 = json.load(open(e["out"], encoding="utf-8"))
+    assert res4["mac"] == C.sign(res4, KEY) and res4["config_sha256"] != e["sha"]
+    assert judge_cli(e, "A2") == (1, "設定の中身が違う"), judge_cli(e, "A2")
+    # 項目0件の日は、同じ呼び方でも error（blocked にならない）
+    e2 = make_env("a2b")
+    prepare_env(e2, "A2", services=[])
+    e2.update(key=KEY)
+    r = subprocess.run(["sandbox-exec", "-f", profile_for(e2), sys.executable, "-B", "-I", CANARY, "--nonce", "A2"], capture_output=True, text=True, env=dict(env, HOME=e2["user"]), cwd=e2["home"], timeout=120)
+    res5 = json.load(open(e2["out"], encoding="utf-8"))
+    assert res5["checks"]["keychain"] == "error" and not C.judge(e2["out"], "A2", KEY, e2["sha"], e2["minw"])[0], res5
+
+
+@case
+def a3_source_reads_only_known_environment_names():
+    """S20③：環境変数で確かめ先・security・書き先を変えられない（読む名前は、鍵・カレンダーの URL・プロキシだけ）"""
+    src = open(CANARY, encoding="utf-8").read()
+    import re
+    names_ = set(re.findall(r'os\.environ(?:\.get|\.pop)?\(\s*([A-Za-z_"\']+)', src)) | set(re.findall(r'os\.environ\[\s*([A-Za-z_"\']+)', src))
+    allowed = {"KEY_ENV", "name", "URL_ENV"}   # name は PROXY_ENVS の繰り返しの変数
+    assert names_ <= allowed, "知らない環境変数を読んでいる：%s" % sorted(names_ - allowed)
+    assert "os.environ.items()" in src   # 鍵を外した環境を security に渡す
+    assert "add_argument" in src and src.count("add_argument(") == 4, "引数の数が増えた（--nonce・--judge・--config-sha256・--min-writes だけ）"
+
+
+@case
+def a4_prepare_places_config_outside_and_returns_outside_values():
+    """S20③：設定のファイルを <ホーム>/.ai-bunshin/canary/<nonce>.json に置く（0600）。中身の sha256・write の下限を返す。nonce の形が悪ければ置かない"""
+    e = make_env("a4")
+    settings_text = open(e["settings"], encoding="utf-8").read()
+    sha, minw, path = C.prepare(e["home"], settings_text, "P1", e["out"], ["svc", "", None], [("127.0.0.1", 9)], user_home=e["user"])
+    assert path == os.path.join(e["user"], ".ai-bunshin", "canary", "P1.json") == C.config_path("P1", e["user"]), path
+    body = open(path, "rb").read()
+    import hashlib
+    assert hashlib.sha256(body).hexdigest() == sha
+    assert (os.stat(path).st_mode & 0o777) == 0o600
+    cfg = json.loads(body.decode("utf-8"))
+    assert cfg["keychain_services"] == ["svc"] and cfg["net_targets"] == [["127.0.0.1", 9]] and cfg["home"] == e["home"] and cfg["out"] == e["out"]
+    expect = sum(1 for p in C.unique_paths(e["deny"]) if os.path.isdir(p) or os.path.isfile(p))
+    assert minw == min(expect, C.MAX_PROBES) and minw >= 8, (minw, expect)
+    for bad in ("../x", "a/b", "", "x" * 81, "a b", "a\nb"):
+        try:
+            C.prepare(e["home"], settings_text, bad, e["out"], [], user_home=e["user"])
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("nonce %r を受け付けた" % bad)
+    # 守る先が1つも無い日は、下限が0（呼ぶ側が点検に進まない）
+    empty = json.dumps({"sandbox": {"filesystem": {"denyWrite": [os.path.join(e["d"], "nowhere")]}, "network": {}}})
+    assert C.prepare(e["home"], empty, "P2", e["out"], [], user_home=e["user"])[1] == 0
+    # execute は nonce が合わない・版が違う設定を使わない
+    try:
+        C.execute(path, "OTHER", KEY, SEC_BLOCKED)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("別の nonce の設定を使った")
+
+
+@case
 def n4_unreadable_settings_gives_errors_not_blocked():
     e = make_env("n4")
-    open(e["settings"], "w").write("not json")
-    r, res = run_canary(e)
-    assert r.returncode == 0 and res, (r.returncode, r.stderr)
+    cfg = prepare_env(e, "N4")
+    body = json.load(open(cfg, encoding="utf-8"))
+    body["settings"] = "not a dict"
+    open(cfg, "w", encoding="utf-8").write(json.dumps(body, ensure_ascii=False))
+    res = C.execute(cfg, "N4", KEY, SEC_BLOCKED)
     for k in ("write", "parent_mv", "case"):
         assert res["checks"][k] == "error", res
-    assert not C.judge(e["out"], "N1")[0]
-    open(e["settings"], "w").write(json.dumps({"sandbox": {"filesystem": {"denyWrite": []}, "network": {}}}))
-    r, res = run_canary(e)
+    assert res["mac"] == C.sign(res, KEY)
+    assert not C.judge(e["out"], "N4", KEY, e["sha"], e["minw"])[0]
+    body["settings"] = {"sandbox": {"filesystem": {"denyWrite": []}, "network": {}}}
+    open(cfg, "w", encoding="utf-8").write(json.dumps(body, ensure_ascii=False))
+    res = C.execute(cfg, "N4", KEY, SEC_BLOCKED)
     assert res["checks"]["write"] == "error", "守る先が空なのに blocked"
     assert litter(e) == []
 
@@ -642,12 +991,16 @@ def n7_case_probe_leaks_without_a_fence_and_leaves_at_most_the_budget():
 
 
 @case
-def n8_marker_dir_is_in_the_protected_list():
+def n8_guard_is_protected_and_marker_parent_is_not():
+    """S23：守る先は .ai-bunshin-canary-dir/guard だけ。守っていない親 .ai-bunshin-canary-dir は守る先の一覧に入れない。設定のファイルの置き場（ユーザーのホームの .ai-bunshin）は守る"""
     spec = json.load(open(os.path.join(SCRIPTS, "protected_paths.json"), encoding="utf-8"))
-    ent = [x for x in spec["entries"] if x["path"] == C.MARKER_DIR]
-    assert len(ent) == 1 and ent[0]["base"] == "home" and ent[0]["kind"] == "dir", "目印フォルダが一覧にない（または名前が違う）: %s" % ent
+    ent = [x for x in spec["entries"] if x["path"] == C.MARKER_DIR + "/" + C.GUARD_DIR]
+    assert len(ent) == 1 and ent[0]["base"] == "home" and ent[0]["kind"] == "dir", "guard が一覧にない（または名前が違う）: %s" % ent
+    assert not [x for x in spec["entries"] if x["path"] == C.MARKER_DIR], "守っていないはずの親が一覧に入っている"
     e = make_env("n8")
-    assert os.path.join(e["home"], C.MARKER_DIR) in e["deny"], "本物の sandbox_settings.py の denyWrite に目印フォルダが入っていない"
+    assert os.path.join(e["home"], C.MARKER_DIR, C.GUARD_DIR) in e["deny"], "本物の sandbox_settings.py の denyWrite に guard が入っていない"
+    assert os.path.join(e["home"], C.MARKER_DIR) not in e["deny"], "守っていないはずの親が denyWrite に入っている"
+    assert os.path.join(e["user"], C.CONFIG_PARTS[0]) in e["deny"], "設定のファイルを置く場所が守られていない（点検の claude が設定を書き換えられる）"
 
 
 @case
@@ -657,7 +1010,7 @@ def n6_out_is_written_atomically_and_has_no_paths_or_urls():
     assert not os.path.exists(e["out"] + ".tmp")
     text = open(e["out"], encoding="utf-8").read()
     assert SECRET not in text and "secret.example" not in text and e["home"] not in text and e["user"] not in text, text
-    assert set(res["checks"]) == set(C.CHECKS) and res["nonce"] == "N1" and res["v"] == 1
+    assert set(res["checks"]) == set(C.CHECKS) and res["nonce"] == "N1" and res["v"] == C.VERSION and len(res["mac"]) == 64
 
 
 print(f"\n{len(names) - fails}/{len(names)} passed" + (f"（スキップの中身：{', '.join(skipped)}）" if skipped else ""))

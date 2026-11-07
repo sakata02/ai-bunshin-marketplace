@@ -184,7 +184,7 @@ esac
 # Bash は update_dashboard.py・lock_check.py の完全なパス（ワイルドカードなし。T062）。スキルは "${CLAUDE_PLUGIN_ROOT}/scripts/…" を引用符つきで呼ぶので、引用符なし・ありの両方
 # 実行の段で囲いが作れたときだけ足す Python（SANDBOX_TOOLS）と、リンク経由の同じ道具の許可（LINK_TOOLS）は、run_claude の中で足す（ここには書かない）
 TOOLS="Read,Write,Edit,Glob,Grep,Agent,SendMessage,Skill,Bash(python3 $DASH:*),Bash(python3 \"$DASH\":*),Bash(python3 $PLUGIN_ROOT/scripts/lock_check.py:*),Bash(python3 \"$PLUGIN_ROOT/scripts/lock_check.py\":*)"
-DENY="Bash(rm:*),Bash(curl:*),Edit(.claude/settings.json),Edit(scripts/**),Edit(/$PLUGIN_ROOT/**),Edit(設定/**),Edit(CLAUDE.md),Edit(.claude/**)"
+DENY="Bash(rm:*),Bash(curl:*),Edit(.claude/settings.json),Edit(scripts/**),Edit(/$PLUGIN_ROOT/**),Edit(設定/**),Edit(CLAUDE.md),Edit(.claude/**),Edit(CLAUDE.local.md)"
 if [ "$PHASE" = "do" ]; then
   TOOLS="$TOOLS,WebSearch,WebFetch"   # 実行では調査のためにネットを読むことだけ許可
 else
@@ -272,38 +272,74 @@ except BaseException:
 PY
 }
 
-# 囲いのカナリア（T119 G4a。決定 S05・S06・S15・S16）：Python を許す前に、囲いが本当に効いているかを1回確かめる。
+# 囲いのカナリア（T119 G4a・G4c。決定 S05・S06・S15・S16・S20〜S23）：Python を許す前に、囲いが本当に効いているかを1回確かめる。
 # 囲いは claude の中の Bash に掛かるもので、外から同じ囲いは作れない。そこで本番と同じ --settings と、点検の道具（sandbox_canary.py）だけを許す --allowedTools で、
 # 短い claude -p を1回動かし、その中で点検の道具を動かす。結果は本人のフォルダの tasks.json と同じフォルダに JSON で残る（点検の道具が書く）。
-# 囲いの外のここで、道具に --judge を付けて読む。全部止まった（6つの項目がすべて blocked）ときだけ戻り値 0。
-# 通った・確かめられなかった・結果が無い・claude が失敗・時間切れ・道具が無い、のどれでも戻り値 1（呼ぶ側は Python を許さず、今の許可に退く）。
-# 理由は CANARY_WHY（項目名と状態だけ。パス・URL を入れない）。run_claude と同じく、背景で動かして wait する（シグナルを受けたら on_stop が止める）
+# 点検の claude が結果を偽造・左右できないようにする作り（G4c）：
+#  - 点検の claude は --permission-mode default。書く・調べる・人を呼ぶ道具（Write・Edit・NotebookEdit・Agent・Task・WebFetch・WebSearch）を止め、使えるのは点検の道具だけ（S20①）
+#  - 鍵はここで毎回ランダムに作り、点検の claude を起動する1行の環境変数 AI_BUNSHIN_CANARY_KEY にだけ渡す。引数・プロンプト・ログには出さない。
+#    結果の印（HMAC）を、囲いの外のここで、同じ鍵（判定の1行の環境変数）で確かめる（S20②）
+#  - 点検の道具は nonce 以外の引数を受けない。設定（--settings と同じ JSON）・確かめ先・結果の書き先・キーチェーンの名前は、ここで囲いの外から
+#    <ユーザーのホーム>/.ai-bunshin/canary/<nonce>.json に置く（囲いの守る先）。置いた中身の sha256 と、write で確かめる数の下限は、ここで持っておき、判定のときに結果と比べる（S20③）
+#  - キーチェーンは、囲いの外で先に項目があるかを確かめ（-w なし）、ある名前だけを点検に渡す（S22）
+# 通った・確かめられなかった・結果が無い・印が違う・claude が失敗・時間切れ・道具が無い、のどれでも戻り値 1（呼ぶ側は Python を許さず、今の許可に退く。通知は呼ぶ側で1行。S20④）。
+# 理由は CANARY_WHY（項目名と状態だけ。パス・URL・鍵を入れない）。run_claude と同じく、背景で動かして wait する（シグナルを受けたら on_stop が止める）
 sandbox_canary() {
-  local sjson="$1" nonce="$RUN_ID.canary" sec="${AI_BUNSHIN_CANARY_SEC:-180}" min cstatus jrc cprompt
-  local sfile="$LOG_DIR/.out.canary_settings.$$" cres="$ROOT/00_タスク管理/data/.sandbox_canary.$$.json" cout="$LOG_DIR/.out.canary.$$"
+  local sjson="$1" nonce="$RUN_ID.canary" sec="${AI_BUNSHIN_CANARY_SEC:-180}" min cstatus jrc cprompt key prep psha pmin
+  local cres="$ROOT/00_タスク管理/data/.sandbox_canary.$$.json" cout="$LOG_DIR/.out.canary.$$"
+  local ccfg="$HOME/.ai-bunshin/canary/$nonce.json"   # sandbox_canary.py の config_path と同じ場所
   CANARY_WHY=""
   case "$sec" in (''|*[!0-9]*|0) sec=180 ;; esac
   min=$((sec / 60.0))
   if [ ! -f "$CANARY" ]; then CANARY_WHY="点検の道具が無い"; return 1; fi
-  # 名前の付け替えの点検に使う目印フォルダ（中に空のフォルダ inner を1つ）。囲いの外のここで前もって作る（無ければ作る。守る先の一覧に入っている。本物の scripts/・.git は付け替えない）
-  if ! mkdir -p "$ROOT/.ai-bunshin-canary-dir/inner" 2>/dev/null; then CANARY_WHY="点検の目印フォルダを作れなかった"; return 1; fi
-  CUR_TMPS=("$sfile" "$cres" "$cres.tmp" "$cout")   # CUR_OUT は run_claude の出力ファイル用に空けておく（上書きすると、シグナルのときに残る）
-  if ! printf '%s\n' "$sjson" > "$sfile" 2>/dev/null || ! : > "$cout" 2>/dev/null; then
+  # 名前の付け替えの点検に使う目印フォルダ。守る先は中の guard だけで、親（.ai-bunshin-canary-dir）は守らない（S23）。囲いの外のここで前もって作る
+  # （無ければ作る。守る先の一覧に guard が入っている。本物の scripts/・.git は付け替えない）
+  if ! mkdir -p "$ROOT/.ai-bunshin-canary-dir/guard" 2>/dev/null; then CANARY_WHY="点検の目印フォルダを作れなかった"; return 1; fi
+  # 一時ファイル（結果・設定のファイル）。名前を決めたら、作る前に控える（CUR_OUT は run_claude の出力ファイル用に空けておく。上書きすると、シグナルのときに残る）
+  CUR_TMPS=("$cres" "$cres.tmp" "$cout" "$ccfg" "$ccfg.tmp")
+  # 鍵（毎回ランダムな64文字の16進）。変数にだけ入れる。export しない・ログに書かない
+  key=$(python3 -I -c 'import secrets,sys; sys.stdout.write(secrets.token_hex(32))' 2>/dev/null)
+  case "$key" in (''|*[!0-9a-f]*) key="" ;; esac
+  if [ ${#key} -ne 64 ]; then CANARY_WHY="点検の鍵を作れなかった"; CUR_TMPS=(); return 1; fi
+  # 設定のファイルを囲いの外で置く。標準出力は3行（設定の中身の sha256・write で確かめる数の下限・置いた場所）。失敗の理由は出さない（パスを出さない）
+  prep=$(python3 -I - "$PLUGIN_ROOT/scripts" "$ROOT" "$nonce" "$cres" "$1" 2>/dev/null <<'PY'
+import sys
+try:
+    sys.path.insert(0, sys.argv[1])
+    import sandbox_canary as C
+    home, nonce, out, sjson = sys.argv[2:6]
+    names = C.existing_keychain_services(home)
+    sha, minw, path = C.prepare(home, sjson, nonce, out, names)
+    sys.stdout.write("%s\n%d\n%s\n" % (sha, minw, path))
+except BaseException:
+    sys.exit(1)
+PY
+)
+  psha=$(printf '%s\n' "$prep" | sed -n 1p)
+  pmin=$(printf '%s\n' "$prep" | sed -n 2p)
+  case "$psha" in (''|*[!0-9a-f]*) psha="" ;; esac
+  case "$pmin" in (''|*[!0-9]*|0) pmin="" ;; esac
+  if [ ${#psha} -ne 64 ] || [ -z "$pmin" ]; then
+    CANARY_WHY="点検の設定を置けなかった（守る先が1つも無い場合も含む）"
+    key=""; rm -f "$ccfg" "$ccfg.tmp"; CUR_TMPS=()
+    return 1
+  fi
+  if ! : > "$cout" 2>/dev/null; then
     CANARY_WHY="点検の一時ファイルを作れなかった"
-    rm -f "$sfile" "$cout"; CUR_TMPS=()
+    key=""; rm -f "$cout" "$ccfg" "$ccfg.tmp"; CUR_TMPS=()
     return 1
   fi
   rm -f "$cres" "$cres.tmp"
   cprompt="これは自動実行の囲いの点検です。次の Bash コマンドを、1回だけ、そのままの形で実行してください。ほかのコマンドの実行・ファイルの読み書き・調べものはしないでください。終わったら「完了」とだけ答えてください。
-python3 -I \"$CANARY\" --home \"$ROOT\" --settings-file \"$sfile\" --nonce \"$nonce\" --out \"$cres\""
+python3 -I \"$CANARY\" --nonce \"$nonce\""
   BG_BEFORE=$!   # （囲いの点検の起動。run_claude と同じ控え方。test_long_run_watch の目印が1つに決まるよう、行末に注を付けてある）
   LAUNCHING=1    # （同上）
-  python3 "$LIMITED" --minutes "$min" --stdout "$cout" -- claude -p "$cprompt" \
-    --permission-mode acceptEdits \
+  AI_BUNSHIN_CANARY_KEY="$key" python3 "$LIMITED" --minutes "$min" --stdout "$cout" -- claude -p "$cprompt" \
+    --permission-mode default \
     --model sonnet \
     --max-turns 6 \
     --allowedTools "Bash(python3 -I \"$CANARY\":*),Bash(python3 -I $CANARY:*)" \
-    --disallowedTools "$DENY" \
+    --disallowedTools "$DENY,Write,Edit,NotebookEdit,Agent,Task,WebFetch,WebSearch" \
     --settings "$sjson" \
     "${ADD_DIR_ARGS[@]}" \
     < /dev/null 2>> "$LOG" &
@@ -317,12 +353,13 @@ python3 -I \"$CANARY\" --home \"$ROOT\" --settings-file \"$sfile\" --nonce \"$no
   elif [ $cstatus -ne 0 ]; then
     CANARY_WHY="claude が失敗した（終了コード $cstatus）"
   else
-    CANARY_WHY=$(python3 -I "$CANARY" --judge "$cres" --nonce "$nonce" 2>/dev/null)
+    CANARY_WHY=$(AI_BUNSHIN_CANARY_KEY="$key" python3 -I "$CANARY" --judge "$cres" --nonce "$nonce" --config-sha256 "$psha" --min-writes "$pmin" 2>/dev/null)
     jrc=$?
     [ $jrc -ne 0 ] && [ -z "$CANARY_WHY" ] && CANARY_WHY="判定できなかった"
     [ $jrc -eq 0 ] && CANARY_WHY=""
   fi
-  rm -f "$sfile" "$cres" "$cres.tmp" "$cout"
+  key=""
+  rm -f "$cres" "$cres.tmp" "$cout" "$ccfg" "$ccfg.tmp"
   CUR_TMPS=()
   [ -z "$CANARY_WHY" ]
 }
@@ -385,7 +422,7 @@ sys.exit(0 if isinstance(d, dict) and d.get("sandbox", {}).get("enabled") is Tru
           *write=leaked*|*case=leaked*) log "囲いの点検：守る先に、名前が .ai-bunshin-canary- で始まる空のファイルが残っているかもしれません（消さずに残しています。確かめてください）" ;;
         esac
         case "$CANARY_WHY" in
-          *parent_mv=leaked*) log "囲いの点検：点検用の目印フォルダ（.ai-bunshin-canary-dir）の名前を一時的に変えました。名前が .ai-bunshin-canary-dir.moved-… や inner.ai-bunshin-canary-… のフォルダが残っていたら、元の名前に戻してください（本物の scripts/・.git は変えていません）" ;;
+          *parent_mv=leaked*) log "囲いの点検：点検用の目印フォルダ（.ai-bunshin-canary-dir）の名前を一時的に変えました。名前が .ai-bunshin-canary-dir.moved-… や guard.ai-bunshin-canary-… のフォルダが残っていたら、元の名前に戻してください（本物の scripts/・.git は変えていません）" ;;
         esac
         notify "今日は囲いの点検が通らなかったので、Python を使わずに動かしました（ログを見てください）"
       fi

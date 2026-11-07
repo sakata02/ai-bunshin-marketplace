@@ -11,6 +11,8 @@ osascript・security（キーチェーンの代わり）で通して動かす。
 - W3：許可はワイルドカードなし（完全なパス。リンク経由で呼ばれたときは両方の名前）
 - W5：TOOLS・DENY は T141 の白リストが読める形のまま（update_dashboard.py --plan-context の節が「読めませんでした」にならない）
 - G4a：囲いのカナリア（k1〜k11。Python を許すのは、点検が6項目すべて止まったと返した日だけ）
+- G4c：点検の結果を偽造・左右できない形（k14〜k18。印・設定の sha256・write の数・鍵が出ない・キーチェーンは囲いの外で先に確かめる・設定のファイルは囲いの外で置いて消す・計画と振り返りの DENY に Edit(CLAUDE.local.md)）。
+  点検の claude は作り物なので、鍵・設定のファイルは実物の daily_cycle.sh と点検の道具（import）から読み、本物の claude の中で鍵が環境変数として届くことは確かめていない
 - G4a の直し：目印フォルダ（.ai-bunshin-canary-dir）を囲いの外で前もって作る（k13）・点検が通らない日は通知を1行（k12）
 - W7：--add-dir は囲いの守る先と同じ判定（sandbox_settings.py --print-add-dirs）
 実行：python3 tests/test_sandbox_wiring.py（失敗があれば終了コード1）。CYCLE_UNDER_TEST に別の版の daily_cycle.sh を指すと、その版で流せる"""
@@ -82,34 +84,76 @@ env = dict(os.environ)
 args = sys.argv[1:]
 prompt = args[args.index("-p") + 1] if "-p" in args else ""
 info = {
-    "marker_ready": os.path.isdir(os.path.join(os.environ["AI_BUNSHIN_HOME"], ".ai-bunshin-canary-dir", "inner")),
+    "marker_ready": os.path.isdir(os.path.join(os.environ["AI_BUNSHIN_HOME"], ".ai-bunshin-canary-dir", "guard")),
     "args": args,
+    "main_has_key_var": "AI_BUNSHIN_CANARY_KEY" in env,
     "has_url_var": "AI_BUNSHIN_CALENDAR_URL" in env,
     "secret_in_env": any("__SECRET__" in v for v in env.values()),
     "secret_in_args": any("__SECRET__" in a for a in args),
 }
 CHECKS = ["write", "parent_mv", "case", "network", "keychain", "env_url"]
 if "囲いの点検" in prompt:
-    # 囲いの点検の呼び出し（calls.jsonl には入れない）。FAKE_CANARY で、点検の結果を作り物にする
-    with open(os.path.join(rec, "canary_calls.jsonl"), "a", encoding="utf-8") as f:
-        f.write(json.dumps(info, ensure_ascii=False) + "\\n")
+    # 囲いの点検の呼び出し（calls.jsonl には入れない）。FAKE_CANARY で、点検の結果を作り物にする（印は、環境の鍵で付ける）
     mode = os.environ.get("FAKE_CANARY", "pass")
-    m = re.search(r'--nonce "([^"]+)" --out "([^"]+)"', prompt)
-    nonce, out = m.group(1), m.group(2)
-    def put(checks, nonce=nonce, **kw):
-        d = {"v": 1, "nonce": nonce, "checks": checks}
+    import hashlib, importlib.util
+    argv = shlex.split(prompt.splitlines()[1])   # python3 -I <点検の道具> --nonce <ID>（引数はこれだけ）
+    canary_path = argv[2]
+    nonce = argv[argv.index("--nonce") + 1]
+    spec = importlib.util.spec_from_file_location("sc", canary_path)
+    C = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(C)
+    key = env.get("AI_BUNSHIN_CANARY_KEY", "")
+    body = open(C.config_path(nonce), "rb").read()   # 囲いの外の daily_cycle.sh が置いた設定のファイル
+    cfg = json.loads(body.decode("utf-8"))
+    out = cfg["out"]
+    minw = C.expected_write_count(cfg["settings"]["sandbox"]["filesystem"]["denyWrite"])
+    with open(os.path.join(rec, "canary_calls.jsonl"), "a", encoding="utf-8") as f:
+        info2 = dict(info, argv=argv, key=key, has_key_var=bool(key), key_in_args=bool(key) and any(key in a for a in args),
+                     key_in_prompt=bool(key) and key in prompt, cfg_keychain=cfg["keychain_services"], cfg_home=cfg["home"],
+                     cfg_net=cfg["net_targets"], cfg_has_settings=bool(cfg["settings"]), cfg_nonce=cfg["nonce"],
+                     cfg_sha=hashlib.sha256(body).hexdigest(), minw=minw)
+        f.write(json.dumps(info2, ensure_ascii=False) + "\\n")
+    def put(checks, nonce=nonce, key=key, sha=None, writes=minw, sign_it=True, **kw):
+        d = {"v": C.VERSION, "nonce": nonce, "date": "2026-11-07", "checks": checks, "counts": {"write": writes}, "litter": None,
+             "restore_failed": False, "config_sha256": sha or hashlib.sha256(body).hexdigest()}
         d.update(kw)
+        if sign_it:
+            d["mac"] = C.sign(d, key)
         json.dump(d, open(out, "w"))
+        return d
+    ok_checks = {k: "blocked" for k in CHECKS}
+    if not cfg["keychain_services"]:
+        ok_checks["keychain"] = "error"   # 確かめる項目が1つも無い日は error（S22）
     if mode == "pass":
-        put({k: "blocked" for k in CHECKS})
+        put(ok_checks)
     elif mode.startswith(("leak:", "error:", "skipped:")):
         state, _, items = mode.partition(":")
         state = {"leak": "leaked"}.get(state, state)
         put({k: (state if k in items.split(",") else "blocked") for k in CHECKS})
     elif mode == "stale":
-        put({k: "blocked" for k in CHECKS}, nonce="OLD")
+        put(ok_checks, nonce="OLD")   # 鍵で正しく印を付けた、前の実行の結果
     elif mode == "restore_failed":
-        put({k: "blocked" for k in CHECKS}, restore_failed=True)
+        put(ok_checks, restore_failed=True)
+    elif mode == "nomac":
+        put(ok_checks, sign_it=False)
+    elif mode == "wrongkey":
+        put(ok_checks, key="ef" * 32)
+    elif mode == "badsha":
+        put(ok_checks, sha="0" * 64)
+    elif mode == "lowcount":
+        put(ok_checks, writes=minw - 1)
+    elif mode.startswith("tamper:"):   # 印を付けたあとで書き換える（印は付け直さない）
+        what = mode.split(":", 1)[1]
+        d = put(dict(ok_checks, write="leaked", network="leaked"))
+        if what == "checks":
+            d["checks"] = dict(ok_checks)
+        elif what == "sha":
+            d["config_sha256"] = "1" * 64
+        elif what == "count":
+            d["counts"] = {"write": 999}
+        elif what == "nonce":
+            d["nonce"] = "OLD"
+        json.dump(d, open(out, "w"))
     elif mode == "garbage":
         open(out, "w").write("not json")
     elif mode == "hang":
@@ -117,14 +161,27 @@ if "囲いの点検" in prompt:
     elif mode == "fail":
         sys.exit(1)
     elif mode in ("fence", "nofence"):
-        # 本物の点検の道具を、プロンプトのコマンドのまま動かす（テスト用に、キーチェーンの代わりと通信の確かめ先だけ足す）。fence は seatbelt の下で
-        cmd = shlex.split(prompt.splitlines()[1]) + json.loads(os.environ["FAKE_CANARY_EXTRA"])
+        # 本物の点検の道具を import で動かす（コマンドの引数では security の場所を変えられないため、テストだけ import で security を差し替える）。fence は seatbelt の下で
+        runner = os.path.join(rec, "runner.py")
+        nl = chr(10)
+        open(runner, "w").write("import importlib.util, os, sys" + nl + "spec = importlib.util.spec_from_file_location('sc', sys.argv[1])" + nl
+                                + "m = importlib.util.module_from_spec(spec)" + nl + "spec.loader.exec_module(m)" + nl
+                                + "key = os.environ.pop('AI_BUNSHIN_CANARY_KEY')" + nl + "m.execute(m.config_path(sys.argv[2]), sys.argv[2], key, sys.argv[3])" + nl)
+        cmd = [sys.executable, "-I", runner, canary_path, nonce, os.environ["FAKE_CANARY_SEC"]]
         if mode == "fence":
             sj = json.loads(args[args.index("--settings") + 1])
             lines = ["(version 1)", "(allow default)", "(deny network*)"]
             lines += ['(deny file-write* (subpath "%s"))' % p for p in sj["sandbox"]["filesystem"]["denyWrite"]]
+            top = os.path.dirname(rec)   # 守る先の親（このテストの一時フォルダの中）の名前の付け替えも止める（Claude Code の囲いが守る先の親を止める作りに合わせる）
+            anc = set()
+            for p in sj["sandbox"]["filesystem"]["denyWrite"]:
+                q = os.path.dirname(p)
+                while q.startswith(top) and q != top:
+                    anc.add(q)
+                    q = os.path.dirname(q)
+            lines += ['(deny file-write-unlink (literal "%s"))' % a for a in sorted(anc)]
             prof = os.path.join(rec, "fence.sb")
-            open(prof, "w").write("\\n".join(lines) + "\\n")
+            open(prof, "w").write(nl.join(lines) + nl)
             cmd = ["sandbox-exec", "-f", prof] + cmd
         subprocess.run(cmd, stdin=subprocess.DEVNULL, timeout=100)
     print("完了")
@@ -140,9 +197,19 @@ print("done")
 
 # security（キーチェーン）の代わり：rec/keychain_url ファイルに URL があればそれを出す（環境変数には置かない。claude の環境を汚さないため）。呼ばれた回数を記録する
 FAKE_SECURITY = '''#!/bin/sh
-echo x >> "$FAKE_RECORD/security_calls"
-if [ -s "$FAKE_RECORD/keychain_url" ]; then cat "$FAKE_RECORD/keychain_url"; exit 0; fi
-exit 44
+echo "$*" >> "$FAKE_RECORD/security_calls"
+case " $* " in
+  *" -w "*)
+    # 中身を頼む呼び出し（カレンダーの URL を読む）
+    echo x >> "$FAKE_RECORD/security_reads"
+    if [ -s "$FAKE_RECORD/keychain_url" ]; then cat "$FAKE_RECORD/keychain_url"; exit 0; fi
+    exit 44 ;;
+  *)
+    # 項目があるかだけ（点検の前に、囲いの外で確かめる）。no_items があれば、どの項目も無い
+    if [ -e "$FAKE_RECORD/no_items" ]; then exit 44; fi
+    if [ -s "$FAKE_RECORD/only_items" ] && ! grep -qx "$3" "$FAKE_RECORD/only_items"; then exit 44; fi
+    exit 0 ;;
+esac
 '''
 
 CAL_CFG = {"calendar": {"type": "ics", "keychain": "ai-bunshin-calendar", "show": "title"}}
@@ -351,7 +418,7 @@ def t5_calendar_url_not_in_claude_env():
     assert cs[0]["secret_in_env"] is False and cs[0]["secret_in_args"] is False, "claude の環境・引数に URL が入っている"
     s = good_settings(c, cs[0])
     assert s["sandbox"]["network"]["allowedDomains"] == ["calendar.example.org"], "キーチェーンの URL の host が渡っていない（親の環境の値は使わない）: %s" % s["sandbox"]["network"]
-    assert os.path.exists(os.path.join(c["rec"], "security_calls")), "キーチェーンの代わり（security）を呼んでいない"
+    assert os.path.exists(os.path.join(c["rec"], "security_reads")), "キーチェーンの代わり（security）で URL を読んでいない"
     # キーチェーンから取れないときは、URL を付けずに作る（通信は全部止まる）
     c = make("t5b")
     r = run(c, "do", stub_phase="do", keychain_url="")
@@ -364,7 +431,7 @@ def t5_calendar_url_not_in_claude_env():
     r = run(c, "do", stub_phase="do")
     cs = calls(c)
     assert r.returncode == 0 and len(cs) == 1 and has_settings(cs[0]), (r.returncode, cs)
-    assert not os.path.exists(os.path.join(c["rec"], "security_calls")), "カレンダーをつないでいないのにキーチェーンを読んだ"
+    assert not os.path.exists(os.path.join(c["rec"], "security_reads")), "カレンダーをつないでいないのにキーチェーンの中身を読んだ"
     assert json.loads(opt(cs[0], "--settings"))["sandbox"]["network"]["allowedDomains"] == []
 
 
@@ -531,8 +598,18 @@ def k2_all_blocked_is_the_only_way_python_is_allowed():
     canary_path = os.path.join(os.path.realpath(c["plugin"]), "scripts", "sandbox_canary.py")
     assert tools == ['Bash(python3 -I "%s":*)' % canary_path, "Bash(python3 -I %s:*)" % canary_path], tools
     assert "Bash(python3:*)" not in tools and not any("WebFetch" in t for t in tools)
-    assert opt(k, "--disallowedTools") == opt(cs[0], "--disallowedTools")
-    assert int(opt(k, "--max-turns")) <= 6 and opt(k, "--model") == "sonnet" and opt(k, "--permission-mode") == "acceptEdits"
+    # S20①：点検の claude は default。書く・調べる・人を呼ぶ道具を止める（本番の DENY に足して）
+    dis = opt(k, "--disallowedTools").split(",")
+    for t in ("Write", "Edit", "NotebookEdit", "Agent", "Task", "WebFetch", "WebSearch"):
+        assert t in dis, (t, dis)
+    assert all(x in dis for x in opt(cs[0], "--disallowedTools").split(",")), "本番の DENY が点検で外れている"
+    # S20②：鍵は点検の claude の環境にだけある（本番の claude の環境には無い）。引数・プロンプトには出ない
+    assert k["has_key_var"] is True and len(k["key"]) == 64 and cs[0]["main_has_key_var"] is False
+    assert k["key_in_args"] is False and k["key_in_prompt"] is False
+    # S20③：点検の道具の呼び方は nonce だけ（引数に --out・--home などが無い）。設定は囲いの外で置いた設定のファイルにある
+    assert k["argv"][:3] == ["python3", "-I", canary_path] and k["argv"][3] == "--nonce" and len(k["argv"]) == 5, k["argv"]
+    assert k["cfg_has_settings"] and k["cfg_nonce"] == k["argv"][4] and os.path.realpath(k["cfg_home"]) == os.path.realpath(c["home"])
+    assert int(opt(k, "--max-turns")) <= 6 and opt(k, "--model") == "sonnet" and opt(k, "--permission-mode") == "default"
     ka, ca_ = k["args"], cs[0]["args"]
     assert [ka[i + 1] for i, x in enumerate(ka) if x == "--add-dir"] == [ca_[i + 1] for i, x in enumerate(ca_) if x == "--add-dir"]
     # 点検は claude の中の環境にも URL を置かない
@@ -631,7 +708,7 @@ def k7_end_to_end_with_real_canary_script():
     sec = os.path.join(BASE, "k7_sec")
     open(sec, "w").write("#!/bin/sh\nexit 44\n")
     os.chmod(sec, 0o755)
-    extra = json.dumps(["--security-bin", sec, "--net-target", "127.0.0.1:%d" % ls.getsockname()[1]])
+    extra = sec   # 点検の道具の中で呼ぶ security の代わり（import でだけ差し替える。コマンドの引数では変えられない）
 
     def tree(c):
         out = {}
@@ -645,7 +722,7 @@ def k7_end_to_end_with_real_canary_script():
     c = make("k7a")
     open(os.path.join(c["home"], "CLAUDE.md"), "w").write("# 本人設定\n")
     before = tree(c)
-    r = run(c, "do", stub_phase="do", extra_env={"FAKE_CANARY": "fence", "FAKE_CANARY_EXTRA": extra})
+    r = run(c, "do", stub_phase="do", extra_env={"FAKE_CANARY": "fence", "FAKE_CANARY_SEC": extra})
     assert r.returncode == 0, (r.returncode, log_of(c)[-600:])
     cs = calls(c)
     assert len(cs) == 1 and has_settings(cs[0]) and has_python(cs[0]), (cs, log_of(c)[-600:], r.stderr[-300:])
@@ -655,9 +732,9 @@ def k7_end_to_end_with_real_canary_script():
     c = make("k7b")
     open(os.path.join(c["home"], "CLAUDE.md"), "w").write("# 本人設定\n")
     before = tree(c)
-    r = run(c, "do", stub_phase="do", extra_env={"FAKE_CANARY": "nofence", "FAKE_CANARY_EXTRA": extra})
+    r = run(c, "do", stub_phase="do", extra_env={"FAKE_CANARY": "nofence", "FAKE_CANARY_SEC": extra})
     lg = fell_back(c, r)
-    assert "network=leaked" in lg and "write=leaked" in lg, lg
+    assert "write=leaked" in lg and "network=" in lg, lg   # 通信は、つながれば leaked・届かなければ error（どちらも blocked ではない。S21）
     after = tree(c)
     assert after == before, "囲いが無い日に、点検の道具が実物を変えた：%s" % (sorted(set(before) ^ set(after)) + [k for k in before if k in after and before[k] != after[k]])
     lit = [os.path.join(dp, x) for dp, dn, fn in os.walk(c["home"]) for x in dn + fn if ".ai-bunshin-canary-" in x and x != ".ai-bunshin-canary-dir"]
@@ -784,14 +861,14 @@ def k12_notify_when_canary_fails_without_items_or_paths():
 
 @case
 def k13_marker_dir_made_outside_the_fence_before_the_canary():
-    # A1：目印フォルダ（.ai-bunshin-canary-dir／inner）は daily_cycle.sh が囲いの外で前もって作る（無ければ作る）。点検の claude が動く時点で、もうある
+    # A1：目印フォルダ（.ai-bunshin-canary-dir／guard）は daily_cycle.sh が囲いの外で前もって作る（無ければ作る）。点検の claude が動く時点で、もうある
     c = make("k13")
     r = run(c, "do", stub_phase="do")
     assert r.returncode == 0 and canary_calls(c) and canary_calls(c)[0]["marker_ready"] is True, (canary_calls(c), log_of(c)[-300:])
-    assert os.path.isdir(os.path.join(c["home"], ".ai-bunshin-canary-dir", "inner"))
+    assert os.path.isdir(os.path.join(c["home"], ".ai-bunshin-canary-dir", "guard"))
     # すでにあるときもそのまま（中の目印を壊さない）。2回目の実行でも通る
     r = run(c, "do", stub_phase="do")
-    assert r.returncode == 0 and os.path.isdir(os.path.join(c["home"], ".ai-bunshin-canary-dir", "inner")) and len(canary_calls(c)) == 2
+    assert r.returncode == 0 and os.path.isdir(os.path.join(c["home"], ".ai-bunshin-canary-dir", "guard")) and len(canary_calls(c)) == 2
     # 計画・振り返りの段、囲いの設定を作れない日、点検の道具が無い日は、作らない
     for tag, phase, kw in (("p", "plan", {"extra_env": {"STUB_NO_PLAN": "1"}}), ("r", "review", {"stub_phase": "review"})):
         c2 = make("k13" + tag)
@@ -809,6 +886,104 @@ def k13_marker_dir_made_outside_the_fence_before_the_canary():
     r = run(c5, "do", stub_phase="do")
     fell_back(c5, r, "点検の目印フォルダを作れなかった")
     assert canary_calls(c5) == []
+
+
+# ---------- G4c：点検の結果を偽造・左右できない形にする（決定 S20〜S24） ----------
+
+@case
+def k14_forged_or_tampered_results_do_not_pass():
+    """S20②③：印の無い・違う鍵の・印のあとで書き換えた・設定の sha256 が違う・write の数が下限未満の結果は、どれも「通らなかった」"""
+    for tag, mode, why in (("nomac", "nomac", "結果の印が正しくない"), ("wrongkey", "wrongkey", "結果の印が正しくない"),
+                           ("t_checks", "tamper:checks", "結果の印が正しくない"), ("t_sha", "tamper:sha", "結果の印が正しくない"),
+                           ("t_count", "tamper:count", "結果の印が正しくない"), ("t_nonce", "tamper:nonce", "結果の印が正しくない"),
+                           ("badsha", "badsha", "設定の中身が違う"), ("lowcount", "lowcount", "write の確かめた数が足りない"),
+                           ("stale", "stale", "結果が今回のものではない")):
+        c = make("k14_" + tag)
+        r = run(c, "do", stub_phase="do", extra_env={"FAKE_CANARY": mode})
+        fell_back(c, r, why)
+    c = make("k14_ok")   # 同じ作りで、正しく印を付けた結果は通る（上の確かめが「全部落とす」だけの壊れた判定でないこと）
+    r = run(c, "do", stub_phase="do")
+    cs = calls(c)
+    assert r.returncode == 0 and len(cs) == 1 and has_settings(cs[0]) and has_python(cs[0]), (cs, log_of(c)[-400:])
+
+
+@case
+def k15_key_never_in_args_prompt_log_or_output():
+    """S20②：鍵は引数・プロンプト・ログ・通知・標準出力・どのファイルにも出ない。毎回違う鍵。本番の claude の環境には無い"""
+    keys = []
+    for tag, mode in (("pass", "pass"), ("leak", "leak:write,network"), ("nomac", "nomac"), ("fail", "fail")):
+        c = make("k15_" + tag)
+        r = run(c, "do", stub_phase="do", extra_env={"FAKE_CANARY": mode})
+        cc = canary_calls(c)
+        assert len(cc) == 1, cc
+        key = cc[0]["key"]
+        assert len(key) == 64 and cc[0]["key_in_args"] is False and cc[0]["key_in_prompt"] is False, cc[0]
+        keys.append(key)
+        text = r.stdout + r.stderr + log_of(c) + "\n".join(notices(c)) + json.dumps(calls(c), ensure_ascii=False)
+        assert key not in text, "%s: 鍵がログ・出力・通知・本体の呼び出しに出た" % tag
+        assert all(x["main_has_key_var"] is False for x in calls(c)), "本番の claude の環境に鍵がある"
+        for root in (c["home"], c["plugin"], FAKE_HOME):
+            for dp, dn, fn in os.walk(root):
+                for f in fn:
+                    pth = os.path.join(dp, f)
+                    try:
+                        assert key.encode() not in open(pth, "rb").read(), "鍵がファイルに残った：" + pth
+                    except OSError:
+                        pass
+    assert len(set(keys)) == len(keys), "鍵が毎回違わない"
+
+
+@case
+def k16_keychain_names_are_checked_outside_first():
+    """S22：囲いの外で先に項目があるかを確かめ（-w なし）、ある名前だけを点検に渡す。1つも無い日は error（Python を許さない）"""
+    c = make("k16a")
+    open(os.path.join(c["rec"], "only_items"), "w").write("Claude Code-credentials\n")   # カレンダーの名前の項目は無い
+    r = run(c, "do", stub_phase="do")
+    cc = canary_calls(c)
+    assert r.returncode == 0 and len(cc) == 1 and cc[0]["cfg_keychain"] == ["Claude Code-credentials"], (cc, log_of(c)[-300:])
+    sec = open(os.path.join(c["rec"], "security_calls")).read().splitlines()
+    exist = [x for x in sec if "-w" not in x.split()]
+    assert exist and all(x.startswith("find-generic-password -s ") and " -w" not in x and " -g" not in x for x in exist), "確かめの呼び方が違う（-w・-g を付けない）：%s" % exist
+    assert has_python(calls(c)[0])
+    c = make("k16b")
+    open(os.path.join(c["rec"], "no_items"), "w").write("x")
+    r = run(c, "do", stub_phase="do")
+    cc = canary_calls(c)
+    assert len(cc) == 1 and cc[0]["cfg_keychain"] == [], cc
+    fell_back(c, r, "keychain=error")
+
+
+@case
+def k17_config_file_is_placed_outside_and_removed():
+    """S20③：設定のファイルは囲いの外で <ホーム>/.ai-bunshin/canary/<nonce>.json に置き、点検が終われば消す。写す中身の sha256・数の下限は呼び出しの前に決まる"""
+    c = make("k17")
+    r = run(c, "do", stub_phase="do")
+    cc = canary_calls(c)
+    assert r.returncode == 0 and len(cc) == 1, (r.returncode, log_of(c)[-300:])
+    k = cc[0]
+    assert len(k["cfg_sha"]) == 64 and k["minw"] >= 1 and k["cfg_net"] == [["1.1.1.1", 443]], k
+    d = os.path.join(FAKE_HOME, ".ai-bunshin", "canary")
+    left = [f for f in os.listdir(d) if f.startswith(k["cfg_nonce"])] if os.path.isdir(d) else []
+    assert not left, left
+    # 守る先が1つも無い（確かめられない）日は、点検の claude を起動しない
+    zero = open(os.path.join(SCRIPTS, "sandbox_canary.py"), encoding="utf-8").read() + "\n\ndef expected_write_count(deny_write):\n    return 0\n"   # 確かめる守る先が0件の日
+    c = make("k17b", plugin_files={"sandbox_canary.py": zero})
+    r = run(c, "do", stub_phase="do")
+    assert r.returncode == 0, (r.returncode, log_of(c)[-300:])
+    assert canary_calls(c) == [], "守る先が無いのに点検の claude を起動した"
+
+
+@case
+def k18_plan_and_review_deny_editing_claude_local_md():
+    """S24：計画・振り返りの段の DENY に Edit(CLAUDE.local.md) がある"""
+    c = make("k18p")
+    run(c, "plan", extra_env={"STUB_NO_PLAN": "1"})
+    cs = calls(c)
+    assert cs and "Edit(CLAUDE.local.md)" in opt(cs[0], "--disallowedTools").split(","), cs
+    c = make("k18r")
+    run(c, "review", stub_phase="review")
+    cs = calls(c)
+    assert cs and "Edit(CLAUDE.local.md)" in opt(cs[0], "--disallowedTools").split(","), cs
 
 print(f"\n{len(names) - fails}/{len(names)} passed")
 sys.exit(1 if fails else 0)
