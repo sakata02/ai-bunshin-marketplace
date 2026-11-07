@@ -2009,6 +2009,17 @@ def _unreadable(st):
     return f"（読めませんでした：daily_cycle.sh{_nos(st['bad'])}）"
 
 
+def _sandbox_python_no(cycle_path):
+    """daily_cycle.sh の SANDBOX_TOOLS=",Bash(python3:*)" の行番号。見つからない・読めないときは None（落ちない）"""
+    try:
+        for n, l in enumerate(Path(cycle_path).read_text(encoding="utf-8").splitlines(), 1):
+            if re.match(r'\s*SANDBOX_TOOLS="[^"]*Bash\(python3:\*\)', l):
+                return n
+    except Exception:
+        pass
+    return None
+
+
 def auto_tools_lines(cycle_path=None):
     """--plan-context の最後の節。daily_cycle.sh が読めなくても落ちない"""
     cycle_path = Path(cycle_path) if cycle_path else PLUGIN_ROOT / "scripts" / "auto" / "daily_cycle.sh"
@@ -2058,6 +2069,9 @@ def auto_tools_lines(cycle_path=None):
         out.append(f"- daily_cycle.sh:{n} の行は読めませんでした。使う前に1回ためしてください")
     for t in res["notes"]:
         out.append(f"- {t}")
+    no = _sandbox_python_no(cycle_path)
+    where = f"（daily_cycle.sh:{no}）" if no else ""
+    out.append(f"- 実行の段は、囲いの設定が作れて点検（カナリア）が全部止まった日だけ `Bash(python3:*)` も使える{where}。その日も、囲いの守る先（sandbox_settings.py の denyWrite）には書けず、通信もできない。点検が通らない日は上の道具のまま。計画・振り返りの段では使えない")
     out += [
         "- 書けない場所の見方：Edit(…) の決まりは、ファイルを書く道具（Write など）に効く。Bash でファイルに書くことには効かないので、Bash で使えるのは上の「使える道具」の Bash(…) だけ。パターンは本人のフォルダから見たもの（`//` で始まるのは絶対パス）。指示書の書き先のパスを、このパターンと照らす",
         "- 次は定数では分からないので、計画で使う前に1回ためす：自動モードかどうかの判定、NG の見張り（ng_guard）が止めるか（`python3 <プラグイン>/scripts/ng_guard.py --explain \"<コマンド>\"`）",
