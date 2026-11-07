@@ -13,5 +13,9 @@
     "スクラム",
     "日本語",
     "subagents"
+  ],
+  "types": "./types/index.d.ts",
+  "hooks": [
+    "./hooks/modules.json"
   ]
 }
