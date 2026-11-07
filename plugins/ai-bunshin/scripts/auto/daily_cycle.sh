@@ -285,6 +285,8 @@ sandbox_canary() {
   case "$sec" in (''|*[!0-9]*|0) sec=180 ;; esac
   min=$((sec / 60.0))
   if [ ! -f "$CANARY" ]; then CANARY_WHY="点検の道具が無い"; return 1; fi
+  # 名前の付け替えの点検に使う目印フォルダ（中に空のフォルダ inner を1つ）。囲いの外のここで前もって作る（無ければ作る。守る先の一覧に入っている。本物の scripts/・.git は付け替えない）
+  if ! mkdir -p "$ROOT/.ai-bunshin-canary-dir/inner" 2>/dev/null; then CANARY_WHY="点検の目印フォルダを作れなかった"; return 1; fi
   CUR_TMPS=("$sfile" "$cres" "$cres.tmp" "$cout")   # CUR_OUT は run_claude の出力ファイル用に空けておく（上書きすると、シグナルのときに残る）
   if ! printf '%s\n' "$sjson" > "$sfile" 2>/dev/null || ! : > "$cout" 2>/dev/null; then
     CANARY_WHY="点検の一時ファイルを作れなかった"
@@ -383,8 +385,9 @@ sys.exit(0 if isinstance(d, dict) and d.get("sandbox", {}).get("enabled") is Tru
           *write=leaked*|*case=leaked*) log "囲いの点検：守る先に、名前が .ai-bunshin-canary- で始まる空のファイルが残っているかもしれません（消さずに残しています。確かめてください）" ;;
         esac
         case "$CANARY_WHY" in
-          *parent_mv=leaked*) log "囲いの点検：本人のフォルダ直下のフォルダの名前を一時的に変えました。名前に .ai-bunshin-canary- が付いたフォルダが残っていたら、元の名前に戻してください" ;;
+          *parent_mv=leaked*) log "囲いの点検：点検用の目印フォルダ（.ai-bunshin-canary-dir）の名前を一時的に変えました。名前が .ai-bunshin-canary-dir.moved-… や inner.ai-bunshin-canary-… のフォルダが残っていたら、元の名前に戻してください（本物の scripts/・.git は変えていません）" ;;
         esac
+        notify "今日は囲いの点検が通らなかったので、Python を使わずに動かしました（ログを見てください）"
       fi
     else
       # 理由は囲いの設定を作る道具の1行。パス・URL らしきものが入っていたら出さない（ログに残さない）

@@ -128,6 +128,7 @@ def expected(fx):
         (uh / ".claude/plugins", "dir", "S02 プラグイン（コピー）"),
         (pl, "dir", "S02 プラグイン（元）"),
         (h / "scripts", "dir", "S04 scripts/ を丸ごと"),
+        (h / ".ai-bunshin-canary-dir", "dir", "S15 囲いの点検の目印フォルダ（A1）"),
         (fx["mkt"], "dir", "S12 マーケットプレイスのルート"),
         (fx["mkt2"], "dir", "S12 directory の2つ目"),
         (h / "CLAUDE.local.md", "file", "S13 CLAUDE.local.md"),
@@ -625,7 +626,7 @@ def test_paths_json_shape():
     spec = json.loads(PATHS_JSON.read_text(encoding="utf-8"))
     ids = {e["id"] for e in spec["entries"]}
     want = {"A-settings", "A-claude-md", "A-claude-local-md", "A-ai-bunshin-dir", "B-input", "C-claude", "C-git",
-            "D-plugin-cache", "D-plugin-source", "S04-scripts", "S13-launchagents", "S13-user-settings", "S13-user-claude-md",
+            "D-plugin-cache", "D-plugin-source", "S04-scripts", "S15-canary-dir", "S13-launchagents", "S13-user-settings", "S13-user-claude-md",
             "S13-user-skills", "S13-user-agents", "S13-user-commands"}
     check(ids == want, "一覧の id が決定どおり：差 %s" % (ids ^ want))
     check(spec["add_dir_git"] == [{"path": ".git", "kind": "git"}], "S17 add_dir_git は .git を丸ごと（kind=git）")

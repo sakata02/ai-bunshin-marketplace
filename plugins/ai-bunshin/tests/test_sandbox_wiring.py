@@ -11,6 +11,7 @@ osascript・security（キーチェーンの代わり）で通して動かす。
 - W3：許可はワイルドカードなし（完全なパス。リンク経由で呼ばれたときは両方の名前）
 - W5：TOOLS・DENY は T141 の白リストが読める形のまま（update_dashboard.py --plan-context の節が「読めませんでした」にならない）
 - G4a：囲いのカナリア（k1〜k11。Python を許すのは、点検が6項目すべて止まったと返した日だけ）
+- G4a の直し：目印フォルダ（.ai-bunshin-canary-dir）を囲いの外で前もって作る（k13）・点検が通らない日は通知を1行（k12）
 - W7：--add-dir は囲いの守る先と同じ判定（sandbox_settings.py --print-add-dirs）
 実行：python3 tests/test_sandbox_wiring.py（失敗があれば終了コード1）。CYCLE_UNDER_TEST に別の版の daily_cycle.sh を指すと、その版で流せる"""
 import json
@@ -81,6 +82,7 @@ env = dict(os.environ)
 args = sys.argv[1:]
 prompt = args[args.index("-p") + 1] if "-p" in args else ""
 info = {
+    "marker_ready": os.path.isdir(os.path.join(os.environ["AI_BUNSHIN_HOME"], ".ai-bunshin-canary-dir", "inner")),
     "args": args,
     "has_url_var": "AI_BUNSHIN_CALENDAR_URL" in env,
     "secret_in_env": any("__SECRET__" in v for v in env.values()),
@@ -176,7 +178,7 @@ def make(name, cfg=None, plugin_files=None, repo=None):
     os.makedirs(bindir)
     os.makedirs(rec)
     open(os.path.join(bindir, "claude"), "w").write(FAKE_CLAUDE.replace("__PY__", sys.executable).replace("__SECRET__", SECRET))
-    open(os.path.join(bindir, "osascript"), "w").write("#!/bin/sh\nexit 0\n")
+    open(os.path.join(bindir, "osascript"), "w").write('#!/bin/sh\necho "$*" >> "$FAKE_RECORD/notify.txt"\nexit 0\n')   # 通知の文面を記録する
     open(os.path.join(bindir, "security"), "w").write(FAKE_SECURITY)
     for f in ("claude", "osascript", "security"):
         os.chmod(os.path.join(bindir, f), 0o755)
@@ -658,7 +660,7 @@ def k7_end_to_end_with_real_canary_script():
     assert "network=leaked" in lg and "write=leaked" in lg, lg
     after = tree(c)
     assert after == before, "囲いが無い日に、点検の道具が実物を変えた：%s" % (sorted(set(before) ^ set(after)) + [k for k in before if k in after and before[k] != after[k]])
-    lit = [os.path.join(dp, x) for dp, dn, fn in os.walk(c["home"]) for x in dn + fn if ".ai-bunshin-canary-" in x]
+    lit = [os.path.join(dp, x) for dp, dn, fn in os.walk(c["home"]) for x in dn + fn if ".ai-bunshin-canary-" in x and x != ".ai-bunshin-canary-dir"]
     assert 1 <= len(lit) <= 2, lit
     assert os.path.isdir(os.path.join(c["home"], "scripts")) and os.path.isdir(os.path.join(c["home"], "設定"))
     ls.close()
@@ -739,6 +741,74 @@ def k11_signal_during_canary_leaves_no_temp_files():
     assert not left, left
     assert not os.path.exists(os.path.join(c["home"], "scripts", "auto", ".lock"))
     assert calls(c) == [], "止められたのに本体を起動した"
+
+
+def notices(c):
+    p = os.path.join(c["rec"], "notify.txt")
+    return open(p, encoding="utf-8").read().splitlines() if os.path.exists(p) else []
+
+
+CANARY_NOTICE = "今日は囲いの点検が通らなかったので、Python を使わずに動かしました（ログを見てください）"
+
+
+@case
+def k12_notify_when_canary_fails_without_items_or_paths():
+    # A2：点検が通らなかった日は、ログに加えて通知を1行。項目名・パスは通知に出さない
+    for tag, mode, extra in (("leak", "leak:write,network,keychain", {}), ("none", "none", {}), ("fail", "fail", {}),
+                             ("hang", "hang", {"AI_BUNSHIN_CANARY_SEC": "1"}), ("stale", "stale", {})):
+        c = make("k12_" + tag)
+        r = run(c, "do", stub_phase="do", extra_env=dict({"FAKE_CANARY": mode}, **extra), timeout=90)
+        assert r.returncode == 0, (tag, r.returncode, log_of(c)[-300:])
+        ns = [n for n in notices(c) if "囲いの点検" in n]
+        assert len(ns) == 1 and CANARY_NOTICE in ns[0], (tag, notices(c))
+        for bad in ("write", "network", "keychain", "leaked", "error", "=", c["home"], "/Users/", "http", SECRET):
+            assert bad not in ns[0], (tag, bad, ns[0])
+    # 全部止まった日・囲いの設定を作れない日（S05）・計画・振り返りの段は、点検の通知を出さない
+    c = make("k12_pass")
+    run(c, "do", stub_phase="do")
+    assert not [n for n in notices(c) if "囲いの点検" in n], notices(c)
+    c = make("k12_nosettings", plugin_files={"sandbox_settings.py": None})
+    run(c, "do", stub_phase="do")
+    assert not [n for n in notices(c) if "囲いの点検" in n], notices(c)
+    c = make("k12_plan")
+    run(c, "plan", extra_env={"STUB_NO_PLAN": "1", "FAKE_CANARY": "leak:write"})
+    assert not [n for n in notices(c) if "囲いの点検" in n], notices(c)
+    # 計画から続けて実行に入る日・plan:SKIP から実行に入る日も、点検が通らなければ1回だけ通知する
+    c = make("k12_plando")
+    run(c, "plan", extra_env={"FAKE_CANARY": "leak:env_url"})
+    assert len([n for n in notices(c) if "囲いの点検" in n]) == 1, notices(c)
+    c = make("k12_skip")
+    run(c, "plan", extra_env={"STUB_SKIP_PLANNED": "1", "FAKE_CANARY": "leak:env_url"})
+    assert len([n for n in notices(c) if "囲いの点検" in n]) == 1, notices(c)
+
+
+@case
+def k13_marker_dir_made_outside_the_fence_before_the_canary():
+    # A1：目印フォルダ（.ai-bunshin-canary-dir／inner）は daily_cycle.sh が囲いの外で前もって作る（無ければ作る）。点検の claude が動く時点で、もうある
+    c = make("k13")
+    r = run(c, "do", stub_phase="do")
+    assert r.returncode == 0 and canary_calls(c) and canary_calls(c)[0]["marker_ready"] is True, (canary_calls(c), log_of(c)[-300:])
+    assert os.path.isdir(os.path.join(c["home"], ".ai-bunshin-canary-dir", "inner"))
+    # すでにあるときもそのまま（中の目印を壊さない）。2回目の実行でも通る
+    r = run(c, "do", stub_phase="do")
+    assert r.returncode == 0 and os.path.isdir(os.path.join(c["home"], ".ai-bunshin-canary-dir", "inner")) and len(canary_calls(c)) == 2
+    # 計画・振り返りの段、囲いの設定を作れない日、点検の道具が無い日は、作らない
+    for tag, phase, kw in (("p", "plan", {"extra_env": {"STUB_NO_PLAN": "1"}}), ("r", "review", {"stub_phase": "review"})):
+        c2 = make("k13" + tag)
+        run(c2, phase, **kw)
+        assert not os.path.exists(os.path.join(c2["home"], ".ai-bunshin-canary-dir")), phase
+    c3 = make("k13s", plugin_files={"sandbox_settings.py": None})
+    run(c3, "do", stub_phase="do")
+    assert not os.path.exists(os.path.join(c3["home"], ".ai-bunshin-canary-dir"))
+    c4 = make("k13c", plugin_files={"sandbox_canary.py": None})
+    run(c4, "do", stub_phase="do")
+    assert not os.path.exists(os.path.join(c4["home"], ".ai-bunshin-canary-dir"))
+    # 同じ名前のファイルがあって作れないときは、点検できないので Python を許さない（claude も起動しない）
+    c5 = make("k13f")
+    open(os.path.join(c5["home"], ".ai-bunshin-canary-dir"), "w").write("x")
+    r = run(c5, "do", stub_phase="do")
+    fell_back(c5, r, "点検の目印フォルダを作れなかった")
+    assert canary_calls(c5) == []
 
 print(f"\n{len(names) - fails}/{len(names)} passed")
 sys.exit(1 if fails else 0)

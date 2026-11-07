@@ -12,6 +12,7 @@
     {"id": "D-plugin-cache",    "base": "user_home",   "path": ".claude/plugins",      "kind": "dir",  "why": "S02 プラグイン（Claude Code が読み込むコピー）"},
     {"id": "D-plugin-source",   "base": "plugin_root", "path": ".",                    "kind": "dir",  "why": "S02 プラグイン（--plugin-root で渡した場所）。T097 X6・X12"},
     {"id": "S04-scripts",       "base": "home",        "path": "scripts",              "kind": "dir",  "why": "S04 本人の scripts/ は丸ごと（run.sh・hooks・mods は囲いの外で動く。親を mv してリンクに替える破られ方を防ぐ）"},
+    {"id": "S15-canary-dir",    "base": "home",        "path": ".ai-bunshin-canary-dir", "kind": "dir", "why": "S15 囲いの点検の目印フォルダ（中に空のフォルダを1つ。daily_cycle.sh が囲いの外で前もって作る）。名前の付け替えと中への書き込みが止まるかを点検（sandbox_canary.py）で確かめる。本物の scripts/・.git は付け替えない（A1）"},
     {"id": "S13-launchagents",  "base": "user_home",   "path": "Library/LaunchAgents", "kind": "dir",  "why": "S13 自動実行の登録（launchd）"},
     {"id": "S13-user-settings", "base": "user_home",   "path": ".claude/settings.json","kind": "file", "why": "S13 利用者の設定（hook を含む）"},
     {"id": "S13-user-claude-md","base": "user_home",   "path": ".claude/CLAUDE.md",    "kind": "file", "why": "S13 利用者の指示"},

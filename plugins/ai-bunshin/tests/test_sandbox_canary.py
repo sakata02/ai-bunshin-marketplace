@@ -104,6 +104,7 @@ def make_env(name, git_dir=True):
     if git_dir:
         os.makedirs(os.path.join(home, ".git", "hooks"))
         open(os.path.join(home, ".git", "config"), "w").write("[core]\n")
+    os.makedirs(os.path.join(home, C.MARKER_DIR, C.MARKER_INNER))   # daily_cycle.sh が囲いの外で前もって作る目印フォルダ
     open(os.path.join(home, "CLAUDE.md"), "w").write("# 本人設定\n")
     open(os.path.join(home, "設定", "config.json"), "w", encoding="utf-8").write("{}")
     open(os.path.join(home, "scripts", "auto", "run.sh"), "w").write("#!/bin/sh\n")
@@ -140,11 +141,11 @@ def litter(e):
     out = []
     for root in (e["home"], e["user"], e["plugin"]):
         for dp, dn, fn in os.walk(root):
-            out += [os.path.join(dp, x) for x in dn + fn if C.PROBE_PREFIX in x]
+            out += [os.path.join(dp, x) for x in dn + fn if C.PROBE_PREFIX in x and x != C.MARKER_DIR]
     return out
 
 
-def profile_for(e, mode="full", drop=None, network=True):
+def profile_for(e, mode="full", drop=None, network=True, extra=()):
     """seatbelt の設定を作る。mode：full＝守る先への書き込み・名前の変更を止める／no_rename＝書き込みは止めるが、名前の変更は止めない／case_sensitive＝大文字・小文字を区別する書き方（正規表現）。
     drop＝この守る先だけ止めない"""
     lines = ["(version 1)", "(allow default)"]
@@ -171,6 +172,7 @@ def profile_for(e, mode="full", drop=None, network=True):
                 q = os.path.dirname(q)
     for a in sorted(ancestors):
         lines.append('(deny file-write-unlink (literal "%s"))' % a)
+    lines += list(extra)
     if network:
         lines.append("(deny network*)")
     path = os.path.join(e["d"], "profile_%s_%s.sb" % (mode, "drop" if drop else "x"))
@@ -283,9 +285,22 @@ def c2_parent_mv_renames_back_when_it_goes_through():
     state, restore_failed = C.check_parent_mv(e["home"], e["deny"], "X")
     assert (state, restore_failed) == ("leaked", False), (state, restore_failed)
     assert snapshot(e) == before, "名前が元に戻っていない"
-    assert not [x for x in os.listdir(e["home"]) if C.PROBE_PREFIX in x], os.listdir(e["home"])
-    # 戻せないとき（戻す先がふさがれた）は restore_failed を返して止まる
+    assert not [x for x in os.listdir(e["home"]) if ".moved-" in x or x.startswith(C.MARKER_INNER)], os.listdir(e["home"])
+    assert os.path.isdir(os.path.join(e["home"], C.MARKER_DIR, C.MARKER_INNER))
+    # 本物の scripts/・.git は付け替えない：囲いが無くて通る日でも、名前は一度も変わらない
     real_rename = os.rename
+    renamed = []
+
+    def spy(a, b):
+        renamed.append(a)
+        return real_rename(a, b)
+    os.rename = spy
+    try:
+        C.check_parent_mv(e["home"], e["deny"], "W")
+    finally:
+        os.rename = real_rename
+    assert renamed and all(C.MARKER_DIR in x for x in renamed), "目印フォルダ以外の名前を変えた：%s" % renamed
+    # 戻せないとき（戻す先がふさがれた）は restore_failed を返して止まる
     calls = []
 
     def flaky(a, b):
@@ -299,9 +314,17 @@ def c2_parent_mv_renames_back_when_it_goes_through():
     finally:
         os.rename = real_rename
     assert (state, restore_failed) == ("leaked", True), (state, restore_failed)
-    for x in os.listdir(e["home"]):   # 後始末：テストの一時フォルダの名前を戻す（実物ではない）
-        if C.PROBE_PREFIX in x:
-            real_rename(os.path.join(e["home"], x), os.path.join(e["home"], x.split(C.PROBE_PREFIX)[0]))
+    real_rename(os.path.join(e["home"], C.MARKER_DIR + ".moved-Y"), os.path.join(e["home"], C.MARKER_DIR))   # 後始末（一時フォルダ）
+    # 目印フォルダが無い・中の inner が無いとき：確かめられない（error）
+    e2 = make_env("c2b")
+    real_rename(os.path.join(e2["home"], C.MARKER_DIR, C.MARKER_INNER), os.path.join(e2["home"], "elsewhere"))
+    assert C.check_parent_mv(e2["home"], e2["deny"], "Z") == ("error", False)
+    e3 = make_env("c2c")
+    real_rename(os.path.join(e3["home"], C.MARKER_DIR), os.path.join(e3["home"], "elsewhere"))
+    assert C.check_parent_mv(e3["home"], e3["deny"], "Z") == ("error", False)
+    r, res = run_canary(e3)
+    assert res["checks"]["parent_mv"] in ("error", "skipped"), res
+    assert not C.judge(e3["out"], "N1")[0]
 
 
 @case
@@ -368,6 +391,10 @@ def s2_write_leak_when_a_protected_path_is_not_fenced():
     assert open(os.path.join(target, "config.json"), encoding="utf-8").read() == "{}"
 
 
+def marker_path(e):
+    return os.path.join(e["home"], C.MARKER_DIR)
+
+
 @case
 @need_sbx
 def s3_parent_mv_leak_when_rename_is_not_blocked():
@@ -378,6 +405,29 @@ def s3_parent_mv_leak_when_rename_is_not_blocked():
     ok, why = C.judge(e["out"], "N1")
     assert not ok and "parent_mv=leaked" in why, why
     assert snapshot(e) == before, "名前を戻せていない"
+    assert not res["restore_failed"]
+
+
+@case
+@need_sbx
+def s3a_marker_dir_rename_alone_is_detected():
+    # 目印フォルダごとの付け替えだけが通る囲い（中の inner の付け替えは止まる）：(a) の確かめが無いと見逃す
+    e = make_env("s3a")
+    m = marker_path(e)
+    r, res = run_canary(e, profile=profile_for(e, mode="no_rename", extra=['(deny file-write-unlink (literal "%s/%s"))' % (m, C.MARKER_INNER)]))
+    assert res["checks"]["write"] == "blocked" and res["checks"]["parent_mv"] == "leaked", res
+    assert os.path.isdir(os.path.join(m, C.MARKER_INNER)), "名前が戻っていない"
+
+
+@case
+@need_sbx
+def s3i_inner_rename_alone_is_detected():
+    # 中の inner を外へ出す付け替えだけが通る囲い（目印フォルダごとの付け替えは止まる）：(b) の確かめが無いと見逃す
+    e = make_env("s3i")
+    m = marker_path(e)
+    r, res = run_canary(e, profile=profile_for(e, mode="no_rename", extra=['(deny file-write-unlink (literal "%s"))' % m, '(allow file-write-create (literal "%s/%s"))' % (m, C.MARKER_INNER)]))   # 戻す先（inner）への作成は通す（戻せる囲い）
+    assert res["checks"]["write"] == "blocked" and res["checks"]["parent_mv"] == "leaked", res
+    assert os.path.isdir(os.path.join(m, C.MARKER_INNER)) and not os.path.exists(os.path.join(e["home"], C.MARKER_INNER + C.PROBE_PREFIX + "N1")), "名前が戻っていない"
 
 
 @case
@@ -388,8 +438,21 @@ def s3b_parent_mv_that_cannot_be_restored_is_reported():
     assert res["checks"]["parent_mv"] == "leaked" and res["restore_failed"] is True, res
     ok, why = C.judge(e["out"], "N1")
     assert not ok and "parent_mv=leaked" in why and "parent_mv_restore_failed" in why, why
-    assert os.path.isdir(os.path.join(e["home"], "scripts" + C.PROBE_PREFIX + "N1")), "名前が変わったまま残る（本人が戻す）"
-    os.rename(os.path.join(e["home"], "scripts" + C.PROBE_PREFIX + "N1"), os.path.join(e["home"], "scripts"))   # 後始末（一時フォルダ）
+    moved = marker_path(e) + ".moved-N1"
+    assert os.path.isdir(moved), "名前が変わったまま残る（目印のフォルダ。次の日に daily_cycle.sh が作り直す）"
+    os.rename(moved, marker_path(e))   # 後始末（一時フォルダ）
+
+
+@case
+@need_sbx
+def s3c_real_scripts_and_git_are_never_renamed():
+    # 名前の付け替えが通る囲いでも、本物の scripts/・.git の名前は変わらない
+    e = make_env("s3c")
+    before = snapshot(e)
+    r, res = run_canary(e, profile=profile_for(e, mode="no_rename"))
+    assert res["checks"]["parent_mv"] == "leaked", res
+    assert os.path.isdir(os.path.join(e["home"], "scripts")) and os.path.isdir(os.path.join(e["home"], ".git")), "本物のフォルダの名前が変わった"
+    assert snapshot(e) == before
 
 
 @case
@@ -576,6 +639,15 @@ def n7_case_probe_leaks_without_a_fence_and_leaves_at_most_the_budget():
     before = snapshot(e)
     assert C.check_case(e["deny"], "Q", C.Budget(C.LITTER_BUDGET)) == "leaked"
     assert snapshot(e) == before and 1 <= len(litter(e)) <= C.LITTER_BUDGET, litter(e)
+
+
+@case
+def n8_marker_dir_is_in_the_protected_list():
+    spec = json.load(open(os.path.join(SCRIPTS, "protected_paths.json"), encoding="utf-8"))
+    ent = [x for x in spec["entries"] if x["path"] == C.MARKER_DIR]
+    assert len(ent) == 1 and ent[0]["base"] == "home" and ent[0]["kind"] == "dir", "目印フォルダが一覧にない（または名前が違う）: %s" % ent
+    e = make_env("n8")
+    assert os.path.join(e["home"], C.MARKER_DIR) in e["deny"], "本物の sandbox_settings.py の denyWrite に目印フォルダが入っていない"
 
 
 @case

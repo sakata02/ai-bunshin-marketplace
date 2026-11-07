@@ -15,7 +15,8 @@
 確かめる6つ（どれも、実物を壊さない形。止まれば blocked、通ってしまえば leaked、確かめられなければ error、前の確かめで通ったためやらなければ skipped）：
   write      守る先（settings の denyWrite）への書き込み。フォルダには新しい空のファイルを作ろうとし、ファイルには書き込み用に開くだけ（1バイトも書かない）。
              通ってしまったら消さずに残して記録する（消すのは NG。残すのは最大2つ。名前は .ai-bunshin-canary-<nonce>-<番号>）
-  parent_mv  本人のフォルダ直下の、守る先そのもの・守る先を含むフォルダ（scripts・.git など）の名前の変更。
+  parent_mv  目印フォルダ（<本人のフォルダ>/.ai-bunshin-canary-dir。中に空のフォルダ inner を1つ。daily_cycle.sh が囲いの外で前もって作る）の
+             名前の付け替えと、中の inner を外へ出す付け替え。本物の scripts/・.git は付け替えない。
              通ってしまったら、すぐ元の名前に戻す（戻せなければ restore_failed を記録）
   case       大文字・小文字を変えたパス（CLAUDE.md → claude.md）への書き込み。write と同じ形で確かめる。大文字・小文字を区別するディスクでは別のファイルなので blocked
   network    外への通信：直接つなぐ（1.1.1.1:443）と、環境のプロキシに CONNECT を頼む（許可していないドメイン宛て）。どちらも通らなければ blocked
@@ -37,7 +38,8 @@ CHECKS = ("write", "parent_mv", "case", "network", "keychain", "env_url")
 PROBE_PREFIX = ".ai-bunshin-canary-"
 MAX_PROBES = 80            # write の確かめる先の上限
 LITTER_BUDGET = 2          # 囲いが効いていないときに作ってしまう空のファイルの上限（write と case を合わせて）
-MAX_RENAMES = 3            # parent_mv で名前を変えてみるフォルダの上限
+MARKER_DIR = ".ai-bunshin-canary-dir"   # 点検用の目印フォルダ（守る先の一覧 protected_paths.json の S15-canary-dir と同じ名前）
+MARKER_INNER = "inner"
 NET_TIMEOUT = 3
 KEYCHAIN_TIMEOUT = 10
 DEFAULT_NET_TARGETS = [("1.1.1.1", 443)]
@@ -109,50 +111,49 @@ def check_write(deny, nonce, budget):
     return _summarize(results), len(results)
 
 
-def _rename_candidates(home, deny):
-    """本人のフォルダ直下にあるフォルダのうち、守る先そのもの・守る先を含むもの（scripts・.git などを先に）"""
-    home_c = os.path.realpath(home)
-    names = []
-    for p in deny:
-        rp = os.path.realpath(p)
-        if rp.startswith(home_c.rstrip("/") + "/"):
-            first = rp[len(home_c.rstrip("/")) + 1:].split("/")[0]
-            if first and first not in names:
-                names.append(first)
-    pref = [n for n in ("scripts", ".git") if n in names]
-    rest = sorted(n for n in names if n not in pref)
-    out = []
-    for n in pref + rest:
-        full = os.path.join(home_c, n)
-        if os.path.isdir(full) and not os.path.islink(full):
-            out.append(n)
-    return home_c, out[:MAX_RENAMES]
+def _try_rename(old, new):
+    """名前を付け替えてみる。返り値：blocked（止まった）／error／moved（通った）"""
+    if os.path.lexists(new):
+        return "error"
+    try:
+        os.rename(old, new)
+    except OSError as e:
+        return "blocked" if _is_denied(e) else "error"
+    return "moved"
 
 
 def check_parent_mv(home, deny, nonce):
-    """returns (状態, 戻せなかったか)"""
-    home_c, names = _rename_candidates(home, deny)
-    if not names:
+    """目印フォルダ（<本人のフォルダ>/.ai-bunshin-canary-dir。中に空のフォルダ inner が1つ。daily_cycle.sh が囲いの外で前もって作る）の
+    (a) 名前の付け替え（フォルダごと別名に）と (b) 中のフォルダ（inner）を目印フォルダの外へ出す付け替えが止まるかを確かめる。
+    本物の scripts/・.git などは付け替えない（囲いが効いていない日に、戻せない危険を作らないため）。
+    通ってしまったら、すぐ元の名前に戻す（目印の空のフォルダなので、戻せなくても害は小さい。戻せなければ restore_failed）。
+    返り値：(状態, 戻せなかったか)。目印フォルダが無い・守る先の一覧に入っていない（一覧に無ければ付け替えが通る＝leaked）"""
+    home_c = os.path.realpath(home)
+    marker = os.path.join(home_c, MARKER_DIR)
+    inner = os.path.join(marker, MARKER_INNER)
+    if not os.path.isdir(marker) or os.path.islink(marker) or not os.path.isdir(inner) or os.path.islink(inner):
         return "error", False
     results = []
-    for n in names:
-        old = os.path.join(home_c, n)
-        new = os.path.join(home_c, "%s%s%s" % (n, PROBE_PREFIX, nonce))
-        if os.path.lexists(new):
-            results.append("error")
-            continue
+    # (a) 目印フォルダごと
+    moved = marker + ".moved-" + nonce
+    r = _try_rename(marker, moved)
+    if r == "moved":
         try:
-            os.rename(old, new)
-        except OSError as e:
-            results.append("blocked" if _is_denied(e) else "error")
-            continue
-        # 通ってしまった：すぐ戻す。戻せなければ記録して止める
-        try:
-            os.rename(new, old)
+            os.rename(moved, marker)
         except OSError:
             return "leaked", True
-        results.append("leaked")
-        break
+        return "leaked", False
+    results.append(r)
+    # (b) 中の inner を目印フォルダの外（本人のフォルダの直下）へ
+    out = os.path.join(home_c, MARKER_INNER + PROBE_PREFIX + nonce)
+    r = _try_rename(inner, out)
+    if r == "moved":
+        try:
+            os.rename(out, inner)
+        except OSError:
+            return "leaked", True
+        return "leaked", False
+    results.append(r)
     return _summarize(results), False
 
 
