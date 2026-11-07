@@ -1331,3 +1331,11 @@ test('承認待ち（T5）：全部の一覧では印を [承認] にするだ�
   expect(((await ui.findAll({ type: 'Text' })) as any[]).some(t => t.props.color === 'red')).toBe(false)
   await ui.unmount()
 })
+
+test('Try（T3）：open_task の説明に、Y で始まる Try の ID も渡せると書いてある（Y の依頼でこの道具を選べるように）', async ($, on) => {
+  const { tools } = await setup($, on, { data: catData([ct('T001', '仕事', 1)]), log: logOf(), cal: CAL_OK })
+  const t = tools.find(x => x.name === 'open_task')
+  expect(t?.description).toContain('T013 開いて')
+  expect(t?.description).toContain('Y20261106-2')
+  expect(t?.description).toContain('Y で始まる')
+})

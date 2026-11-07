@@ -576,10 +576,10 @@ export const register: Register = on => {
       .register({
         name: 'open_task',
         description:
-          'あなたの右のパネルに、指定したタスク（tasks.json の ID。例 T013）の詳細を開く。「T013 開いて」と言われたときに使う。id を空にすると一覧に戻る',
+          'あなたの右のパネルに、指定したタスク（tasks.json の ID。例 T013）の詳細を開く。「T013 開いて」と言われたときに使う。試し中の Try の ID（Y で始まる。例 Y20261106-2）も渡せる（「Y20261106-2 開いて」）。id を空にすると一覧に戻る',
         inputSchema: {
           type: 'object',
-          properties: { id: { type: 'string', description: 'タスクID（例 T013）。空なら一覧に戻る' } },
+          properties: { id: { type: 'string', description: 'タスクID（例 T013）か、試し中の Try の ID（例 Y20261106-2）。空なら一覧に戻る' } },
         },
         isDeferred: false,
       })
