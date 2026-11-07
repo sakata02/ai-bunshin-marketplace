@@ -12,6 +12,10 @@
   python3 sandbox_settings.py --home <本人のフォルダ> --print-read-rules --plugin-root <プラグインの元> [--plugin-root <もう1つ>]
   → 自動実行で読めるようにするプラグインの元の読み取りの規則 Read(//…/**) を1行に1つ出す（NFC・NFD・実体。T193 K3）。
     規則に使えない場所は出さず、標準エラーに1行（パスなし）。終了コードは0
+  python3 sandbox_settings.py --home <本人のフォルダ> --print-memory-deny [--user-home <ホーム>]
+  → Claude Code の自動記憶（<ホーム>/.claude/projects/*/memory/）への書き込みを止める deny の規則
+    Edit(//…/projects/*/memory/**) を1行に1つ出す（NFC・NFD・実体。環境変数 CLAUDE_CONFIG_DIR があればそちらも。T193）。
+    読み込みは止めない。規則に使えない場所は出さず、標準エラーに1行（パスなし）。終了コードは0
   → 標準出力に JSON を1行（そのまま claude -p --settings "$(…)" に渡せる）
   → 作れないときは、標準エラーに日本語1行・終了コード1（呼ぶ側は Python を許さず、今の許可に退く。T119 S05）
 
@@ -352,6 +356,33 @@ def print_read_rules(plugin_roots):
     return 0
 
 
+def print_memory_deny(user_home=None):
+    """自動記憶のフォルダ（<設定の置き場>/projects/*/memory/）への書き込みを止める deny の規則。Edit(//…/projects/*/memory/**) を1行に1つ（T193）。
+    Edit の規則は Write・NotebookEdit にも効く。規則に使えない場所は出さず、標準エラーに1行（パスは出さない）"""
+    cands = [os.path.join(user_home or os.path.expanduser("~"), ".claude")]
+    cfg = os.environ.get("CLAUDE_CONFIG_DIR")
+    if cfg:
+        cands.append(cfg)
+    rules, bad = [], 0
+    for c in cands:
+        p = os.path.normpath(c)
+        if not os.path.isabs(p) or p == "/" or any(ch in BAD_PATH_CHARS for ch in p) or READ_BAD_RE.search(p):
+            bad += 1
+            continue
+        for v in forms(p):   # 置き場が無くても、規則は作る（あとで作られても止まるように）
+            if any(ch in BAD_PATH_CHARS for ch in v) or READ_BAD_RE.search(v):
+                bad += 1
+                continue
+            r = "Edit(/%s/projects/*/memory/**)" % v   # 権限の規則は // で始まる絶対パス。* は1つ分のフォルダ名（gitignore の書き方）
+            if r not in rules:
+                rules.append(r)
+    for r in rules:
+        sys.stdout.write(r + "\n")
+    if bad:
+        sys.stderr.buffer.write(("sandbox_settings: 自動記憶の書き込みを止める規則に使えない文字があります（規則を作れなかった先 %d 件）\n" % bad).encode("utf-8"))
+    return 0
+
+
 class JaParser(argparse.ArgumentParser):
     def error(self, message):   # 既定は終了コード2・英語。呼ぶ側が見るのは「1」なので日本語1行に揃える
         raise Fail("引数が正しくありません（--home と --plugin-root が要ります）")
@@ -367,6 +398,7 @@ def main(argv=None):
     ap.add_argument("--calendar-url-env", default=DEFAULT_URL_ENV)
     ap.add_argument("--print-add-dirs", action="store_true")
     ap.add_argument("--print-read-rules", action="store_true")
+    ap.add_argument("--print-memory-deny", action="store_true")
     try:
         a = ap.parse_args(argv)
         config = a.config or str(Path(a.home) / "設定" / "config.json")
@@ -374,6 +406,8 @@ def main(argv=None):
             return print_add_dirs(config, a.home, a.user_home)
         if a.print_read_rules:
             return print_read_rules(a.plugin_root)
+        if a.print_memory_deny:
+            return print_memory_deny(a.user_home)
         url = os.environ.get(a.calendar_url_env, "")
         out = build_settings(a.home, a.plugin_root, config, a.user_home, url, a.paths_file)
         sys.stdout.write(json.dumps(out, ensure_ascii=True, separators=(",", ":")) + "\n")

@@ -363,7 +363,7 @@ python3 -I \"$CANARY\" --nonce \"$nonce\""
     --model sonnet \
     --max-turns 6 \
     --allowedTools "Bash(python3 -I \"$CANARY\":*),Bash(python3 -I $CANARY:*)" \
-    --disallowedTools "$DENY,Write,Edit,NotebookEdit,Agent,Task,WebFetch,WebSearch" \
+    --disallowedTools "$DENY$MEM_DENY,Write,Edit,NotebookEdit,Agent,Task,WebFetch,WebSearch" \
     --settings "$sjson" \
     "${ADD_DIR_ARGS[@]}" \
     < /dev/null 2>> "$LOG" &
@@ -429,6 +429,20 @@ run_claude() {
     esac
   done
   [ $rr_rc -ne 0 ] && log "プラグインの中を読む規則を作れませんでした（プラグインの中は読めない可能性があります）"
+  # Claude Code の自動記憶（~/.claude/projects/*/memory/）への書き込みだけを止める（T193。読み込みは残す）。
+  # 環境変数 CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 は読み込みも止めるので使わない。止める規則（Edit の deny。Write にも効く）は sandbox_settings.py が作り、
+  # ここでこの起動の分だけ DENY に足す（DENY= の行は変えない＝T141 が読める形のまま）。囲いの点検の claude の止める道具にも同じものを足す（点検は本番の DENY を全部含む決まり＝test_sandbox_wiring k2。点検は Write・Edit を丸ごと止めているので、許可は広がらない）。ログに残すのは、こちらで決めた文だけ
+  MEM_DENY=""
+  local md_out md_rc md_line
+  md_out=$(python3 -I "$SANDBOX" --home "$ROOT" --print-memory-deny 2>&1 < /dev/null)
+  md_rc=$?
+  for md_line in ${(f)md_out}; do
+    case "$md_line" in
+      "Edit(//"*"/projects/*/memory/**)") MEM_DENY="$MEM_DENY,$md_line" ;;
+      "sandbox_settings: 自動記憶の書き込みを止める規則に使えない文字があります"*) log "自動記憶の書き込みを止める規則に使えない文字があります（規則を作れなかった先があります）" ;;
+    esac
+  done
+  [ $md_rc -ne 0 ] && log "自動記憶の書き込みを止める規則を作れませんでした（自動記憶に書ける可能性があります）"
   if [ "$PHASE" = "do" ]; then
     local cal_url sbx_out sbx_rc sbx_json sbx_why
     cal_url=$(calendar_url_for_sandbox)   # 取れなければ空。変数にだけ入れ、export しない・ログに書かない
@@ -487,14 +501,12 @@ sys.stdout.buffer.write(((t[0] if t else "")[:120]).encode("utf-8"))' 2>/dev/nul
   # 受けたときは on_stop が run_limited を止めて終わるので、ここに戻るのは run_limited が自分で終わったときだけ（STATUS はその終了コード）
   BG_BEFORE=$!
   LAUNCHING=1
-  # Claude Code の自動記憶（~/.claude/projects/…/memory/）を、この起動だけ止める（T193。公式：CLAUDE_CODE_DISABLE_AUTO_MEMORY=1）。
-  # 自動実行で読んだ資料・予定の中の指示が、記憶に書き込まれて次の対話に残るのを防ぐ。囲いの点検の claude には付けない（点検は書き込みをしない）
-  CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 python3 "$LIMITED" --minutes "$LIMIT_MIN" --stdout "$out" -- claude -p "$skill" \
+  python3 "$LIMITED" --minutes "$LIMIT_MIN" --stdout "$out" -- claude -p "$skill" \
     --permission-mode acceptEdits \
     --model opus \
     --max-turns "$MAX_TURNS" \
     --allowedTools "$TOOLS$LINK_TOOLS$READ_TOOLS$SANDBOX_TOOLS" \
-    --disallowedTools "$DENY" \
+    --disallowedTools "$DENY$MEM_DENY" \
     "${SANDBOX_ARGS[@]}" \
     "${ADD_DIR_ARGS[@]}" \
     < /dev/null 2>> "$LOG" &

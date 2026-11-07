@@ -8,6 +8,7 @@ osascript で通して動かす。本物の launchd・claude・本物の本人�
   daily_cycle.sh は外したことをログに1行写す
 - T4：--print-read-rules が、プラグインの元（と違うときはリンクの名前）の NFC・NFD・実体の形で Read(//…/**) を出す。末尾の / が無く、
   使えない文字を含むときは出さずに標準エラーに1行。daily_cycle.sh は --allowedTools に足し、足せないときはログに1行
+- T7・T8：自動記憶は書くのだけ止める（Edit の deny を run_claude の起動にだけ足す。読み込みを止める環境変数は使わない）。T8 は --print-memory-deny の形
 - T5：--plan-context の道具の節に、ファイルを読む・書く・直すの範囲の1行が「書けない場所の見方」の行の直後に出る
 実行：python3 tests/test_auto_paths.py（失敗があれば終了コード1）。CYCLE_UNDER_TEST・SANDBOX_UNDER_TEST・DASH_UNDER_TEST で別の版を指せる"""
 import json
@@ -67,7 +68,7 @@ if "囲いの点検" not in prompt:
         f.write(json.dumps({"args": args, "auto_memory_off": os.environ.get("CLAUDE_CODE_DISABLE_AUTO_MEMORY")}, ensure_ascii=False) + "\\n")
 else:
     with open(os.path.join(os.environ["FAKE_RECORD"], "canary_env.jsonl"), "a", encoding="utf-8") as f:
-        f.write(json.dumps({"auto_memory_off": os.environ.get("CLAUDE_CODE_DISABLE_AUTO_MEMORY")}) + "\\n")
+        f.write(json.dumps({"auto_memory_off": os.environ.get("CLAUDE_CODE_DISABLE_AUTO_MEMORY"), "args": args}) + "\\n")
 print("done")
 '''
 
@@ -317,7 +318,7 @@ def t5_plan_context_has_read_write_range_line():
     assert use and not any(" Read," in x or " Write," in x or "Read," in x for x in use), use
     # 一覧に Glob・Grep が無いことと、1行が「Glob・Grep は使えない」と言うことは組（どちらかだけ変わったら落ちる）
     assert not any("Glob" in x or "Grep" in x for x in use) and "Glob・Grep は使えない" in j, (use, j)
-    assert "自動記憶（~/.claude の下）は、自動実行では止めている" in j, j
+    assert "自動記憶（~/.claude の下）は、自動実行では読むだけ（書くのは止めている）" in j, j
     assert "ls・cat・find・grep など読むだけの命令は、下の範囲の中だけ動く" in lines[i], lines[i]
 
 
@@ -328,19 +329,30 @@ def t6_log_does_not_copy_tool_output():
     repo = os.path.join(BASE, "t6", "repos", "hp")
     os.makedirs(repo)
     c = make("t6", repo=repo)
-    body = "import sys\nsys.stderr.write('sandbox_settings: 広すぎる開発の置き場所 /Users/x/%s https://h.example/%s\\n')\nsys.stderr.write('sandbox_settings: プラグインの置き場所に規則に使えない文字があります /Users/x/%s\\n')\nsys.exit(1)\n" % (secret, secret, secret)
+    body = "import sys\nsys.stderr.write('sandbox_settings: 広すぎる開発の置き場所 /Users/x/%s https://h.example/%s\\n')\nsys.stderr.write('sandbox_settings: プラグインの置き場所に規則に使えない文字があります /Users/x/%s\\n')\nsys.stderr.write('sandbox_settings: 自動記憶の書き込みを止める規則に使えない文字があります /Users/x/%s\\n')\nsys.exit(1)\n" % (secret, secret, secret, secret)
     open(os.path.join(c["real"], "scripts", "sandbox_settings.py"), "w", encoding="utf-8").write(body)
     r = run(c, "plan")
     assert calls(c), (r.returncode, r.stderr[-300:], log_of(c)[-400:])   # 道具が壊れても claude は動く（規則を足さないだけ）
     text = r.stdout + r.stderr + log_of(c)
     assert secret not in text and "/Users/x" not in text and "h.example" not in text, text[-600:]
     assert "広すぎる開発の置き場所（/・ホーム" in log_of(c) and "規則に使えない文字があります（読み取りの規則を作れなかった先があります）" in log_of(c), log_of(c)
+    assert "自動記憶の書き込みを止める規則に使えない文字があります（規則を作れなかった先があります）" in log_of(c) and "自動記憶の書き込みを止める規則を作れませんでした" in log_of(c), log_of(c)
     assert not [i for i in tool_items(calls(c)[0]) if i.startswith("Read(")], tool_items(calls(c)[0])
 
 
+def memory_rules(home, config_dir=None):
+    """home の自動記憶を止める deny の規則（NFC・NFD・実体の形）"""
+    out = set()
+    for base in [os.path.join(home, ".claude")] + ([config_dir] if config_dir else []):
+        for v in {unicodedata.normalize(f, x) for x in (base, os.path.realpath(base)) for f in ("NFC", "NFD")}:
+            out.add("Edit(/%s/projects/*/memory/**)" % v)
+    return out
+
+
 @case
-def t7_auto_memory_is_off_only_for_run_claude():
-    """自動記憶を止める：計画・続けた実行・実行・振り返りの起動に CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 が付く。囲いの点検の claude には付かない"""
+def t7_memory_write_deny_is_added_to_run_claude_only():
+    """自動記憶は、書くのだけ止める（読むのは残す）：計画・続けた実行・実行・振り返りの起動の --disallowedTools に、自動記憶のフォルダへの Edit の deny が付く。
+    囲いの点検の claude の止める道具にも、本番の DENY を全部含む決まりで同じ規則が入る（点検は Write・Edit を丸ごと止めるので許可は広がらない）。環境変数 CLAUDE_CODE_DISABLE_AUTO_MEMORY（読み込みも止める）は付かない。今の DENY は、そのまま先頭に残る"""
     c = make("t7")
     run(c, "plan")
     c2 = make("t7do")
@@ -348,10 +360,52 @@ def t7_auto_memory_is_off_only_for_run_claude():
     c3 = make("t7rev")
     run(c3, "review")
     got = calls(c) + calls(c2) + calls(c3)
-    assert len(got) == 4 and all(x["auto_memory_off"] == "1" for x in got), [x["auto_memory_off"] for x in got]
+    want = memory_rules(FAKE_HOME)
+    assert len(got) == 4, len(got)
+    for x in got:
+        items = (opt(x, "--disallowedTools") or "").split(",")
+        assert want <= set(items), (want - set(items), items)
+        assert x["auto_memory_off"] is None, "読み込みも止める環境変数が付いている"
+        assert items[0] == "Bash(rm:*)" and "Edit(.claude/**)" in items and "Edit(CLAUDE.md)" in items, items   # 今の DENY が残っている
+        assert not [i for i in items if "memory" in i and i not in want], items
+        assert not any(i.startswith("Read(") and "memory" in i for i in tool_items(x)), "読み込みを止める規則がある"
     p = os.path.join(c2["rec"], "canary_env.jsonl")
     assert os.path.exists(p), "点検の claude が呼ばれていない"
-    assert all(json.loads(ln)["auto_memory_off"] is None for ln in open(p, encoding="utf-8").read().splitlines()), "点検の claude に付いている"
+    for ln in open(p, encoding="utf-8").read().splitlines():
+        d = json.loads(ln)
+        dis = (opt(d, "--disallowedTools") or "").split(",")
+        assert d["auto_memory_off"] is None, "点検の claude に読み込みも止める環境変数が付いている"
+        assert want <= set(dis) and "Write" in dis and "Edit" in dis, dis   # 点検は本番の DENY を全部含み、Write・Edit も丸ごと止める（許可は広がらない）
+
+
+@case
+def t8_print_memory_deny_forms_and_bad_chars():
+    """--print-memory-deny：NFC・NFD・実体の形。CLAUDE_CONFIG_DIR があればそちらも。使えない文字は出さず標準エラーに1行（パスなし）"""
+    uh = os.path.join(BASE, "t8", "ホーム ダウンロード")   # 日本語・空白・濁点
+    os.makedirs(uh)
+    link = os.path.join(BASE, "t8", "リンクのホーム")
+    os.symlink(uh, link)
+    for h in (uh, link):
+        rc, out, err = cli("--home", FAKE_HOME, "--print-memory-deny", "--user-home", h)
+        assert rc == 0 and err == "" and set(rules_of(out)) == memory_rules(h) and len(rules_of(out)) == len(memory_rules(h)), (h, out, err)
+        assert all(r.startswith("Edit(//") and r.endswith("/projects/*/memory/**)") and "//**" not in r for r in rules_of(out)), out
+    # 置き場所が無くても規則は作る（あとで作られても止まる）
+    rc, out, err = cli("--home", FAKE_HOME, "--print-memory-deny", "--user-home", os.path.join(BASE, "t8", "まだ無い"))
+    assert rules_of(out) and err == "", (out, err)
+    # CLAUDE_CONFIG_DIR
+    cfg = os.path.join(BASE, "t8", "別の設定の置き場")
+    r = subprocess.run([sys.executable, "-I", SANDBOX, "--home", FAKE_HOME, "--print-memory-deny", "--user-home", uh], capture_output=True, text=True,
+                       env={"PATH": os.environ.get("PATH", ""), "HOME": FAKE_HOME, "CLAUDE_CONFIG_DIR": cfg})
+    assert set(rules_of(r.stdout)) == memory_rules(uh, cfg), r.stdout
+    # 使えない文字：規則を作らず、標準エラー1行・パスなし
+    for name in ("a,b", "a*b", "a !b", "#x"):
+        bad = os.path.join(BASE, "t8", name)
+        os.makedirs(bad, exist_ok=True)
+        rc, out, err = cli("--home", FAKE_HOME, "--print-memory-deny", "--user-home", bad)
+        assert rc == 0 and rules_of(out) == [] and err.count("\n") == 1 and "自動記憶の書き込みを止める規則に使えない文字があります" in err and "t8" not in err, (name, out, err)
+    # 相対パス
+    rc, out, err = cli("--home", FAKE_HOME, "--print-memory-deny", "--user-home", "relative/x")
+    assert rules_of(out) == [] and err.count("\n") == 1, (out, err)
 
 
 def main():
