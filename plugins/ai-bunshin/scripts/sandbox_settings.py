@@ -5,9 +5,13 @@
   python3 sandbox_settings.py --home <本人のフォルダの絶対パス> --plugin-root <プラグインの元の絶対パス>
         [--plugin-root <もう1つ>] [--config <config.json>] [--user-home <ホーム>] [--paths-file <一覧>]
         [--calendar-url-env <環境変数の名前>]
-  python3 sandbox_settings.py --home <本人のフォルダ> --print-add-dirs [--config <config.json>]
+  python3 sandbox_settings.py --home <本人のフォルダ> --print-add-dirs [--config <config.json>] [--user-home <ホーム>]
   → 本人のフォルダの外にある開発のリポジトリ（config の dev.projects）を1行に1つ出す。読めなければ何も出さず終了コード0
-    （daily_cycle.sh の --add-dir と、囲いの守る先を同じ判定にそろえる。T119 W7）
+    （daily_cycle.sh の --add-dir と、囲いの守る先を同じ判定にそろえる。T119 W7）。
+    広すぎる先（/・ホーム・ホームの祖先・本人のフォルダの祖先）は出さず、標準エラーに1行（パスなし。T193 K4）
+  python3 sandbox_settings.py --home <本人のフォルダ> --print-read-rules --plugin-root <プラグインの元> [--plugin-root <もう1つ>]
+  → 自動実行で読めるようにするプラグインの元の読み取りの規則 Read(//…/**) を1行に1つ出す（NFC・NFD・実体。T193 K3）。
+    規則に使えない場所は出さず、標準エラーに1行（パスなし）。終了コードは0
   → 標準出力に JSON を1行（そのまま claude -p --settings "$(…)" に渡せる）
   → 作れないときは、標準エラーに日本語1行・終了コード1（呼ぶ側は Python を許さず、今の許可に退く。T119 S05）
 
@@ -41,6 +45,7 @@ DEFAULT_PATHS_FILE = HERE / "protected_paths.json"
 DEFAULT_URL_ENV = "AI_BUNSHIN_CALENDAR_URL"
 BASES = ("home", "user_home", "plugin_root")
 BAD_PATH_CHARS = set("*?[]{}()\n\r\x00")   # 権限の規則・囲いのパスで別の意味になる文字
+READ_BAD_RE = re.compile(r"(^|/)#|,|(^|\s)!|!(\s|$)")   # 読み取りの規則だけ：--allowedTools は , で区切られ、名前の頭の # はコメント、空白の前後の ! は否定になりうる（T193 K3。少し広めに避ける）
 HOST_RE = re.compile(r"^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$")
 
 
@@ -285,16 +290,51 @@ def build_settings(home, plugin_roots, config_path, user_home, calendar_url, pat
     }
 
 
-def print_add_dirs(config, home):
-    """daily_cycle.sh の --add-dir に渡す先。読めない・無いときは何も出さない（前の daily_cycle.sh と同じ）"""
+def print_add_dirs(config, home, user_home=None):
+    """daily_cycle.sh の --add-dir に渡す先。読めない・無いときは何も出さない（前の daily_cycle.sh と同じ）。
+    広すぎる先（/・ホーム・ホームの祖先・本人のフォルダの祖先。T193 K4）は出さず、標準エラーに1行（パスは出さない）。
+    本人が config に書いた ~/.ssh・~/Library のようなホームの中の先は外さない（config.json は AI が書けないので本人の意思）"""
     try:
         cfg = load_json(config, "config.json")
         dirs = add_dir_repos(cfg, Path(home))
     except Exception:
         return 0
+    wide_of = [canon(home), canon(user_home or os.path.expanduser("~"))]
+    dropped = 0
     for d in dirs:
-        if not any(ch in str(d) for ch in "\n\r\x00"):   # 1行に1つで渡すので、改行を含む先は渡さない
-            sys.stdout.write(str(d) + "\n")
+        if any(ch in str(d) for ch in "\n\r\x00"):   # 1行に1つで渡すので、改行を含む先は渡さない
+            continue
+        cd = canon(d)
+        if cd == "/" or any(is_inside(w, cd) for w in wide_of):   # その先が、本人のフォルダかホームを含む（＝同じか祖先）
+            dropped += 1
+            continue
+        sys.stdout.write(str(d) + "\n")
+    if dropped:
+        sys.stderr.buffer.write(("sandbox_settings: 広すぎる開発の置き場所（/・ホーム・ホームや本人のフォルダを含む先）を %d 件、--add-dir から外しました\n" % dropped).encode("utf-8"))
+    return 0
+
+
+def print_read_rules(plugin_roots):
+    """自動実行で読めるようにする場所（プラグインの元）の読み取りの規則。Read(//…/**) を1行に1つ（T193 K3）。
+    規則に使えない場所（相対パス・/・無いフォルダ・BAD_PATH_CHARS・, ・行頭の # ・空白の前後の !）は出さず、標準エラーに1行（パスは出さない）"""
+    rules, bad = [], 0
+    for root in plugin_roots:
+        p = os.path.normpath(root) if isinstance(root, str) and root else ""   # 末尾の / はここで取る
+        if not os.path.isabs(p) or p == "/" or not os.path.isdir(p) \
+                or any(ch in BAD_PATH_CHARS for ch in p) or READ_BAD_RE.search(p):
+            bad += 1
+            continue
+        for v in forms(p):
+            if any(ch in BAD_PATH_CHARS for ch in v) or READ_BAD_RE.search(v):
+                bad += 1
+                continue
+            r = "Read(/%s/**)" % v   # 権限の規則は // で始まる絶対パス（v は / で始まる）
+            if r not in rules:
+                rules.append(r)
+    for r in rules:
+        sys.stdout.write(r + "\n")
+    if bad:
+        sys.stderr.buffer.write(("sandbox_settings: プラグインの置き場所に規則に使えない文字があります（読み取りの規則を作れなかった先 %d 件）\n" % bad).encode("utf-8"))
     return 0
 
 
@@ -312,11 +352,14 @@ def main(argv=None):
     ap.add_argument("--paths-file", default=str(DEFAULT_PATHS_FILE))
     ap.add_argument("--calendar-url-env", default=DEFAULT_URL_ENV)
     ap.add_argument("--print-add-dirs", action="store_true")
+    ap.add_argument("--print-read-rules", action="store_true")
     try:
         a = ap.parse_args(argv)
         config = a.config or str(Path(a.home) / "設定" / "config.json")
         if a.print_add_dirs:
-            return print_add_dirs(config, a.home)
+            return print_add_dirs(config, a.home, a.user_home)
+        if a.print_read_rules:
+            return print_read_rules(a.plugin_root)
         url = os.environ.get(a.calendar_url_env, "")
         out = build_settings(a.home, a.plugin_root, config, a.user_home, url, a.paths_file)
         sys.stdout.write(json.dumps(out, ensure_ascii=True, separators=(",", ":")) + "\n")
