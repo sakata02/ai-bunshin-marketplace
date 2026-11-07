@@ -2,10 +2,9 @@
   "name": "ai-bunshin-panel",
   "version": "1.0.0-beta.7",
   "displayName": "Shadow Desk コックピット",
-  "description": "Shadow Desk コックピット：右に今日のやること・予定・お願いを出す（本人のフォルダでだけ出る）",
+  "description": "Shadow Desk に入りました。このプラグインは外してください",
   "author": {
     "name": "オープラン株式会社"
   },
-  "license": "MIT",
-  "types": "./types/index.d.ts"
+  "license": "MIT"
 }
