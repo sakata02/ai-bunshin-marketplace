@@ -38,6 +38,6 @@ export type Gantt = { ok: boolean; message: string; today: string; days: Forecas
 
 declare module 'claude-code' {
   interface PluginState {
-    'ai-bunshin-panel': { board: Shaped<Board>; view: Shaped<View>; mtime: number; detail: Shaped<Detail>; cal: Shaped<Cal>; gantt: Shaped<Gantt> }
+    'ai-bunshin': { board: Shaped<Board>; view: Shaped<View>; mtime: number; detail: Shaped<Detail>; cal: Shaped<Cal>; gantt: Shaped<Gantt> }
   }
 }
