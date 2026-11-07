@@ -255,7 +255,7 @@ AI では実行できない作業を見つけたら、**必ず assignee を本�
 | `.claude/ai-bunshin-details/writing-style.md` | 記事やコラムの依頼・手直し・公開後の記録のとき |
 | `.claude/ai-bunshin-details/dev.md` | 開発の依頼は `/ai-bunshin:dev` が動くので、ふつうは不要 |
 | `.claude/ai-bunshin-details/backup.md` | コミットするとき、「戻して」と言われたとき |
-| `.claude/ai-bunshin-details/display.md` | 起動時のまとめに「[見せ方：シンプル」が出ているとき、「フルにして」など見せ方を変える言葉を言われたとき |
+| `.claude/ai-bunshin-details/display.md` | 起動時のまとめに「[見せ方：シンプル」「個別の設定（型より優先）」が出ているとき、「フルにして」など見せ方を変える言葉を言われたとき |
 
 - **1つの会話で1回**：一度読んだファイルは読み直さない
 - **迷ったら読む**：1ファイル1〜4KB（約300〜1,000トークン）なので、読み漏れより安い
