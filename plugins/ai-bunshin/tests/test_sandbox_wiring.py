@@ -1042,7 +1042,7 @@ def k19_settings_with_bash_allow_logs_one_line_and_does_not_stop():
 @case
 def k20_keychain_error_has_a_guidance_line():
     """G4e 中2：keychain=error の日は、ログに案内を1行（write・parent_mv と同じ形）。ほかの項目だけが通らない日には出さない"""
-    LINE = "キーチェーンに確かめる項目（ai-bunshin-calendar か Claude Code-credentials）が無いため、点検が通りません。Python なしで動いています"
+    LINE = "キーチェーンに確かめる項目（ai-bunshin-calendar か Claude Code-credentials）が無いか、確かめられなかったため、点検が通りません。Python なしで動いています"
     c = make("k20a")
     open(os.path.join(c["rec"], "no_items"), "w").write("x")
     r = run(c, "do", stub_phase="do")

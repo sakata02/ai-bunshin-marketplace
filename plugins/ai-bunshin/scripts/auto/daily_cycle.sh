@@ -441,7 +441,7 @@ sys.exit(0 if isinstance(d, dict) and d.get("sandbox", {}).get("enabled") is Tru
           "時間切れ") log "囲いの点検：時間切れのため、点検用の名前（.ai-bunshin-canary- で始まるもの）が残っているかもしれません。確かめてください" ;;
         esac
         case "$CANARY_WHY" in
-          *keychain=error*) log "囲いの点検：キーチェーンに確かめる項目（ai-bunshin-calendar か Claude Code-credentials）が無いため、点検が通りません。Python なしで動いています" ;;
+          *keychain=error*) log "囲いの点検：キーチェーンに確かめる項目（ai-bunshin-calendar か Claude Code-credentials）が無いか、確かめられなかったため、点検が通りません。Python なしで動いています" ;;
         esac
         case "$CANARY_WHY" in
           *parent_mv=leaked*) log "囲いの点検：点検用の目印フォルダ（.ai-bunshin-canary-dir）の名前を一時的に変えました。名前が .ai-bunshin-canary-dir.moved-… や guard.ai-bunshin-canary-… のフォルダが残っていたら、元の名前に戻してください（本物の scripts/・.git は変えていません）" ;;
