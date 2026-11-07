@@ -329,10 +329,10 @@ function ganttSplit(g: Gantt) {
 }
 
 // 画面に出す文字を作る（幅 cols・窓の高さ bodyRows）。タスク名の幅は残りの幅から、行の数は窓の高さから決める。
-// 棒の行のほかに使う行：見出し・凡例・日付・「ほか」・件数のまとめ・ボタンで 6 行、期限超過の行が折り返す分
+// 棒の行のほかに使う行：見出し・凡例・日付・「ほか」・件数のまとめ・ボタンで 6 行、期限超過の行（呼び方が長い人は折り返す分）
 function ganttLines(g: Gantt, cols: number, bodyRows: number, call: string): GanttShow {
   const { draw, overdue } = ganttSplit(g)
-  const overdueLine = overdue > 0 ? `期限超過の${call}のタスク ${overdue} 件（今日より前）` : ''
+  const overdueLine = overdue > 0 ? `期限超過 ${overdue} 件（${call}・今日より前）` : ''
   const overdueRows = overdueLine ? Math.ceil(cellWidth(overdueLine) / Math.max(1, cols)) : 0
   const rowsMax = Math.max(1, bodyRows - 6 - overdueRows)
   const shown = draw.slice(0, rowsMax)

@@ -758,7 +758,8 @@ test('ガント：期限を過ぎた本人のタスクは行にせず、凡例�
   // 凡例のすぐ下に、呼び方つきの 1 行
   const texts = ((await ui.findAll({ type: 'Text' })) as { text: string }[]).map(t => t.text)
   expect(texts[1]).toMatch(/^= AI/)
-  expect(texts[2]).toBe('期限超過の山田さんのタスク 2 件（今日より前）')
+  expect(texts[2]).toBe('期限超過 2 件（山田さん・今日より前）')
+  expect(wcols(texts[2])).toBeLessThanOrEqual(40) // 幅40で1行
   await ui.unmount()
   const r = await $.tool.call({ tool: GT })
   expect(JSON.stringify(r)).toContain('2件') // 行にできるのは T503・T504
@@ -793,12 +794,34 @@ test('ガント：凡例とまとめの行は幅40で1行。いちばん行が�
     const wait = texts.find(t => t.includes('（棒なし）'))!
     expect(wcols(legend)).toBeLessThanOrEqual(40)
     expect(wcols(wait)).toBeLessThanOrEqual(40)
+    const over = texts.find(t => t.startsWith('期限超過'))!
+    expect(wcols(over)).toBeLessThanOrEqual(40) // 期限超過の行も幅40で1行
     expect(wait).toBe('見積もり待ち 12・依存の輪 1（棒なし）')
     // 画面の行数：テキスト（40 列で折り返す分を数える）＋ボタン。窓の高さを超えない
     const lines = texts.reduce((n, t) => n + Math.max(1, Math.ceil(wcols(t) / 40)), 0) + buttons
     expect(lines).toBeLessThanOrEqual(bodyRows)
     // 窓が高いほど棒の行が増える（行の数は窓の高さで決まる）
-    if (bodyRows === 10) expect((await ganttRows(ui)).length).toBe(2) // 期限超過の行が折り返して 2 行 → 10 - 6 - 2 = 2 行
+    if (bodyRows === 10) expect((await ganttRows(ui)).length).toBe(3) // 期限超過の行は1行 → 10 - 6 - 1 = 3 行
     await ui.unmount()
   }
+})
+
+test('ガント：呼び方が長い人は期限超過の行が折り返す。その分を引いて、窓の高さに収まる', async ($, on) => {
+  const tasks = [
+    ...Array.from({ length: 6 }, (_, i) => ft(`T7${String(i).padStart(2, '0')}`, `件${i}`, 'AI', '2026-11-02', '2026-11-03')),
+    ft('T790', '期限切れ', '本人', null, '2026-10-30'),
+  ]
+  const call = '山田太郎先生ご担当者様'
+  await setup($, on, { data: open(1), forecast: fcFile(tasks), cfg: { owner: '山田', owner_call: call } })
+  await $.tool.call({ tool: GT })
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: { ...PANE.props, scroll: { offset: 0, bodyRows: 12 } } })
+  const texts = ((await ui.findAll({ type: 'Text' })) as { text: string }[]).map(t => t.text)
+  const over = texts.find(t => t.startsWith('期限超過'))!
+  expect(over).toBe(`期限超過 1 件（${call}・今日より前）`)
+  expect(wcols(over)).toBeGreaterThan(40) // 折り返す長さ
+  const buttons = ((await ui.findAll({ type: 'Button' })) as { text: string }[]).length
+  const lines = texts.reduce((n, t) => n + Math.max(1, Math.ceil(wcols(t) / 40)), 0) + buttons
+  expect(lines).toBeLessThanOrEqual(12)
+  expect((await ganttRows(ui)).length).toBe(4) // 12 - 6 - 折り返して 2 行 = 4 行
+  await ui.unmount()
 })
