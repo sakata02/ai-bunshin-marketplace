@@ -785,6 +785,7 @@ export const register: Register = on => {
             {page > 0 && <Button key="prev" label="← 前" onPress={() => go(page - 1)} />}
             {page < pages - 1 && <Button key="next" label="次 →" onPress={() => go(page + 1)} />}
             <Button key="home" label="短い画面へ" onPress={() => void home($)} />
+            <Button key="gantt" label="ガントへ" onPress={() => void showGantt($)} />
           </Box>
           {b.error !== '' && <Text color="red">{b.error}</Text>}
           {b.all.length === 0 && b.error === '' && <Text dimColor>なし</Text>}
@@ -886,7 +887,10 @@ export const register: Register = on => {
         {b.soon.map(r => line('soon', r, r.mark === APPROVAL_MARK ? 'red' : undefined))}
 
         <Text bold> </Text>
-        <Button key="open-all" label="全部のタスクを見る" onPress={() => void showAll($)} />
+        <Box flexDirection="row">
+          <Button key="gantt" label="ガントへ" onPress={() => void showGantt($)} />
+          <Button key="open-all" label="全部のタスクを見る" onPress={() => void showAll($)} />
+        </Box>
         <Text dimColor>お願い 残り {b.openRequests} 件 ／ 行を押すと詳細 ／ /task T013 でも開く</Text>
       </Box>
     )

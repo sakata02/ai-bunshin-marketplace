@@ -717,6 +717,60 @@ test('ガント：開いたあとも、ふつうの画面・全部の一覧・T0
   await ui.unmount()
 })
 
+// T190：短い画面と全部の一覧から、ガントに戻れる「ガントへ」ボタン
+test('T190 「ガントへ」：短い画面（全部のタスクを見るの隣）と全部の一覧（短い画面への隣）にあり、押すとガント（タイトル「これから2週間」）。書かない', async ($, on) => {
+  // 今日の forecast が無い → 最初は短い画面。その後ガント用の forecast を置いて押す
+  const { titles, n } = await setup($, on, { data: open(3), forecast: fcFile([ft('T001', '実装', 'AI', '2026-11-02', '2026-11-03')]) })
+  await $.tool.call({ tool: 'mcp__ai-bunshin-panel__open_task', id: '' }) // 最初はガントで開くので、短い画面に戻す
+  let ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /今日の予定/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Button', text: /ガントへ/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Button', text: /全部のタスクを見る/ })).toBeTruthy()
+  await ui.press({ key: 'gantt' })
+  expect(titles.at(-1)).toBe('これから2週間')
+  expect((await ui.find({ type: 'Text', text: /これから2週間/ }))?.text).toBe('これから2週間（11/2〜11/15）')
+  expect((await ganttRows(ui)).length).toBe(1)
+  await ui.unmount()
+
+  // 全部の一覧 → ガントへ
+  await $.tool.call({ tool: 'mcp__ai-bunshin-panel__show_all_tasks' })
+  ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /全部のタスク/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Button', text: /短い画面へ/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Button', text: /ガントへ/ })).toBeTruthy()
+  await ui.press({ key: 'gantt' })
+  expect(titles.at(-1)).toBe('これから2週間')
+  expect(await ui.find({ type: 'Text', text: /全部のタスク/ })).toBeFalsy()
+  // ガントの画面には「ガントへ」は出ない（ボタンは今までどおり「短い画面へ」だけ）
+  expect(await ui.find({ type: 'Button', text: /ガントへ/ })).toBeFalsy()
+  expect(await ui.find({ type: 'Button', text: /短い画面へ/ })).toBeTruthy()
+  await ui.unmount()
+  expect(n.writes).toBe(0)
+})
+
+test('T190 「ガントへ」：forecast.json が無いときは、show_gantt と同じ案内の1行が出る画面になる（落ちない・書かない）', async ($, on) => {
+  const { titles, n } = await setup($, on, { data: open(2) })
+  let ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: 'gantt' })
+  expect(titles.at(-1)).toBe('これから2週間')
+  expect(await ui.find({ type: 'Text', text: /まだありません.*update_dashboard\.py を動かすと出ます/ })).toBeTruthy()
+  expect((await ganttRows(ui)).length).toBe(0)
+  await ui.unmount()
+  expect(n.writes).toBe(0)
+})
+
+test('T190 「ガントへ」で開いたガントから詳細を開いて戻ると、ガントに戻る（戻るの動きは変わらない）', async ($, on) => {
+  const { titles } = await setup($, on, { data: open(3), forecast: fcFile([ft('T001', '実装', 'AI', '2026-11-02', '2026-11-03')]) })
+  await $.tool.call({ tool: 'mcp__ai-bunshin-panel__open_task', id: '' })
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: 'gantt' })
+  await $.tool.call({ tool: 'mcp__ai-bunshin-panel__open_task', id: 'T001' })
+  expect(titles.at(-1)).toBe('T001 の詳細')
+  await ui.press({ key: 'back' })
+  expect(titles.at(-1)).toBe('これから2週間')
+  await ui.unmount()
+})
+
 test('ガント：本人のフォルダの外では道具を登録せず、呼ばれても何も読まない', async ($, on) => {
   const { n } = await setup($, on, { data: open(3), cwd: '/work/other', forecast: fcFile([]) })
   expect(n.tool).toBe(0)
