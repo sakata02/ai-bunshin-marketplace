@@ -96,8 +96,11 @@ Bash は `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/update_dashboard.py" …` だ�
 
 1. `daily_sprints` の今日の行の `status` を `実行済み` にする。終わらなかったタスクは `carried_over` に入れる
 2. `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/update_dashboard.py"` を実行して、約束 pt と完了 pt を確かめる
+<!-- 出力 -->
 3. 最後の出力は次の3行だけにする（Mac の通知に使われる）：
    - 実行結果：N件中M件完了・Xpt／約束Ypt
    - 止まったもの：T0XX（理由）…（なければ「なし」）
    - 本人へ：新しいお願い（なければ「なし」）
 4. 会話の中で実行したときは、成果物のパスと 📌 お願いの行も付ける
+5. 見せ方がシンプルのとき（会話の中の一番新しい「[見せ方：…]」の行。個別の設定が先。決まりは `.claude/ai-bunshin-details/display.md`）：自動実行の3行は型で変えない。会話の中で本人に見せるときだけ、言葉は `terms`、お願いの件数は `requests_max`、止まったときは `stop_notice`（「◯◯で止まっています。△△をしてもらえれば続けます」の1文と、打つもの）のとおりにする。実行結果のポイントの数字は出さず、終わったタスク名で伝える。止まった原因・ログの場所・戻し方は、聞かれたら出す。`blockers`・do_log・tasks.json の中身は型で変えずに同じに書く
+<!-- /出力 -->
