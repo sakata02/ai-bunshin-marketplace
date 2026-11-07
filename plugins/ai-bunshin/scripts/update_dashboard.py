@@ -2071,7 +2071,7 @@ def auto_tools_lines(cycle_path=None):
         out.append(f"- {t}")
     no = _sandbox_python_no(cycle_path)
     where = f"（daily_cycle.sh:{no}）" if no else ""
-    out.append(f"- 実行の段は、囲いの設定が作れて点検（カナリア）が全部止まった日だけ `Bash(python3:*)` も使える{where}。その日も、囲いの守る先（sandbox_settings.py の denyWrite）には書けず、通信もできない。点検が通らない日は上の道具のまま。計画・振り返りの段では使えない")
+    out.append(f"- 実行の段は、囲いの設定が作れて点検（カナリア）が全部止まった日だけ `Bash(python3:*)` も使える{where}。その日も、囲いの守る先（sandbox_settings.py の denyWrite）には書けず、カレンダーの取得先以外へは通信もできない。囲いが作れない日や点検が通らない日は上の道具のまま。計画・振り返りの段では使えない")
     out += [
         "- 書けない場所の見方：Edit(…) の決まりは、ファイルを書く道具（Write など）に効く。Bash でファイルに書くことには効かないので、Bash で使えるのは上の「使える道具」の Bash(…) だけ。パターンは本人のフォルダから見たもの（`//` で始まるのは絶対パス）。指示書の書き先のパスを、このパターンと照らす",
         "- 次は定数では分からないので、計画で使う前に1回ためす：自動モードかどうかの判定、NG の見張り（ng_guard）が止めるか（`python3 <プラグイン>/scripts/ng_guard.py --explain \"<コマンド>\"`）",

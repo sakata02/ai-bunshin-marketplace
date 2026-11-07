@@ -385,7 +385,7 @@ def sandbox_python_line_is_in_the_section_with_real_line_number():
     """T119 G5b（S18）：実行の段の Python の1行が出る。行番号は実物の SANDBOX_TOOLS=",Bash(python3:*)" の行。上の使える道具の一覧は変わらない"""
     sec = section(plan_context())
     l = find(sec, "- 実行の段は、囲いの設定が作れて点検（カナリア）が全部止まった日だけ `Bash(python3:*)` も使える")
-    for want in ("囲いの守る先（sandbox_settings.py の denyWrite）には書けず、通信もできない", "点検が通らない日は上の道具のまま", "計画・振り返りの段では使えない"):
+    for want in ("囲いの守る先（sandbox_settings.py の denyWrite）には書けず、カレンダーの取得先以外へは通信もできない", "囲いが作れない日や点検が通らない日は上の道具のまま", "計画・振り返りの段では使えない"):
         assert want in l, f"{want} が無い: {l}"
     cyc = real_cycle_lines()
     want_no = [n for n, x in enumerate(cyc, 1) if x.strip() == 'SANDBOX_TOOLS=",Bash(python3:*)"']
