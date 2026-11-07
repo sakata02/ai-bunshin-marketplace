@@ -847,14 +847,17 @@ export const register: Register = on => {
     )
 
     // 区切りの中を「 ◇ カテゴリ」の小見出しで分ける。カテゴリの間に空行 1 行（最初の小見出しの前には入れない）
+    // 区切りの中が全部「未分類」なら、小見出しは出さず今までどおり行だけ（category を使っていない人の画面を変えない）
     const grouped = (sec: string, rows: Row[], one: (r: Row) => any) =>
-      groupByCat(rows).flatMap((g, gi) => [
-        ...(gi > 0 ? [<Text key={`${sec}-gap-${gi}`}> </Text>] : []),
-        <Text key={`${sec}-cat-${gi}`} bold wrap="truncate-end">
-          {` ◇ ${g.cat}`}
-        </Text>,
-        ...g.rows.map(one),
-      ])
+      rows.every(r => r.category === UNCAT)
+        ? rows.map(one)
+        : groupByCat(rows).flatMap((g, gi) => [
+            ...(gi > 0 ? [<Text key={`${sec}-gap-${gi}`}> </Text>] : []),
+            <Text key={`${sec}-cat-${gi}`} bold wrap="truncate-end">
+              {` ◇ ${g.cat}`}
+            </Text>,
+            ...g.rows.map(one),
+          ])
 
     return (
       <Box flexDirection="column">

@@ -1691,13 +1691,50 @@ test('T191 短い画面：行の形・色・[済] の薄い表示・「ほか N 
   await ui.unmount()
 })
 
-test('T191 短い画面：「なし」「計画なし」は小見出しなしのまま。カテゴリが 1 つだけなら小見出し 1 つで空行は入らない。分類なしだけなら「◇ 未分類」', async ($, on) => {
-  await setup($, on, { data: { tasks: [gx('T001', '分類なし', { assignee: 'dev-a' })], daily_sprints: [] }, cal: CAL_OK })
+test('T191 短い画面：「なし」「計画なし」は小見出しなしのまま。カテゴリが 1 つだけなら小見出し 1 つで空行は入らない', async ($, on) => {
+  const d = { tasks: [gx('T001', 'A のみ', { assignee: 'dev-a', category: 'A案件' })], daily_sprints: [] }
+  await setup($, on, { data: d, cal: CAL_OK })
   const ui = await mountAll($, 60, 60)
   const ts = await texts(ui)
   expect(shape(ts, '山田さん（今日まで）')).toEqual(['なし'])
   expect(shape(ts, 'AI（今日の計画）')).toEqual(['計画なし'])
-  expect(shape(ts, 'AI（これから）')).toEqual([' ◇ 未分類', 'T001'])
+  expect(shape(ts, 'AI（これから）')).toEqual([' ◇ A案件', 'T001'])
   expect(shape(ts, '近いうちに')).toEqual(['なし'])
+  await ui.unmount()
+})
+
+test('T191 短い画面：区切りの中が全部「未分類」なら小見出しも空行も出さず、今までどおり行だけ。1 つでもカテゴリがあればその区切りだけ小見出し付き（未分類も最後に小見出し付き）', async ($, on) => {
+  // カテゴリを使っていない：どの区切りも「◇」が出ず、行は期日・計画・順位の並びのまま
+  const plain = {
+    tasks: [
+      gx('T001', '本人 1', { due: '2026-11-02' }),
+      gx('T002', '本人 2', { due: '2026-11-01' }),
+      gx('T011', '計画 1', { assignee: 'dev-a' }),
+      gx('T012', '計画 2', { assignee: 'dev-a' }),
+      gx('T021', '次 1', { assignee: 'dev-a' }),
+      gx('T022', '次 2', { assignee: 'dev-a' }),
+      gx('T031', '近 1', { due: '2026-11-03' }),
+      gx('T032', '近 2', { due: '2026-11-04', category: '  ' }), // 空白だけも未分類
+    ],
+    daily_sprints: [{ date: '2026-11-02', planned: ['T011', 'T012'] }],
+  }
+  const { s } = await setup($, on, { data: plain, cal: CAL_OK })
+  let ui = await mountAll($, 60, 60)
+  let ts = await texts(ui)
+  expect(ts.some(t => t.includes('◇'))).toBe(false)
+  expect(shape(ts, '山田さん（今日まで）')).toEqual(['T002', 'T001'])
+  expect(shape(ts, 'AI（今日の計画）')).toEqual(['T011', 'T012'])
+  expect(shape(ts, 'AI（これから）')).toEqual(['T021', 'T022'])
+  expect(shape(ts, '近いうちに')).toEqual(['T031', 'T032'])
+  await ui.unmount()
+  // 1 つの区切りだけにカテゴリがある：その区切りは小見出し付き（未分類は最後）、ほかの区切りは今までどおり
+  plain.tasks[3] = gx('T012', '計画 2', { assignee: 'dev-a', category: 'A案件' })
+  s.data = plain
+  s.mtime = 2 // tasks.json の更新時刻が変わったら読み直す
+  ui = await mountAll($, 60, 60)
+  ts = await texts(ui)
+  expect(shape(ts, 'AI（今日の計画）')).toEqual([' ◇ A案件', 'T012', '_', ' ◇ 未分類', 'T011'])
+  expect(shape(ts, '山田さん（今日まで）')).toEqual(['T002', 'T001'])
+  expect(shape(ts, 'AI（これから）')).toEqual(['T021', 'T022'])
   await ui.unmount()
 })
