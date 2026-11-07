@@ -1,24 +1,27 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { AllRow, Board, Cal, CalEvent, Detail, Row, View } from '../types'
+import type { AllRow, Board, Cal, CalEvent, Detail, ForecastDay, ForecastTask, Gantt, Row, View } from '../types'
 
 // 共通のパネル。本人のフォルダ（設定/config.json と 00_タスク管理/data/tasks.json がある所）でだけ出る。
 // tasks.json と予定のキャッシュは読むだけ。名前・呼び方は config.json の owner・owner_call から
 const PANE = 'ai-bunshin-panel'
 const TITLE = '今日のやること'
 const ALL_TITLE = '全部のタスク'
+const GANTT_TITLE = 'これから2週間'
 
 const EMPTY: Board = { today: '', mine: [], ai: [], aiNext: [], aiNextMore: 0, all: [], soon: [], openRequests: 0, error: '' }
 // 形を変えたら shape の札も変える（前の版がしまった値を読まないように）
 const board = atom({ plugin: 'ai-bunshin-panel', key: 'board' } as const, EMPTY, { shape: 'board-3' })
 const HOME: View = { mode: 'home', page: 0 }
-const view = atom({ plugin: 'ai-bunshin-panel', key: 'view' } as const, HOME, { shape: 'view-1' })
+const view = atom({ plugin: 'ai-bunshin-panel', key: 'view' } as const, HOME, { shape: 'view-2' })
 const mtime = atom({ plugin: 'ai-bunshin-panel', key: 'mtime' } as const, 0)
 const NONE: Detail = { id: '', title: '', lines: [], steps: [], error: '' }
 const detail = atom({ plugin: 'ai-bunshin-panel', key: 'detail' } as const, NONE, { shape: 'detail-1' })
 const NO_CAL: Cal = { fetched: '', events: [], nowMin: 0, error: '' }
 const cal = atom({ plugin: 'ai-bunshin-panel', key: 'cal' } as const, NO_CAL, { shape: 'cal-1' })
+const NO_GANTT: Gantt = { ok: false, message: '', today: '', days: [], tasks: [], waiting: 0 }
+const gantt = atom({ plugin: 'ai-bunshin-panel', key: 'gantt' } as const, NO_GANTT, { shape: 'gantt-1' })
 
 type Task = {
   id: string
@@ -31,7 +34,7 @@ type Task = {
 }
 
 // 本人のフォルダ（見つかったときだけ入る。session.start のたびに探し直す）
-type Me = { home: string; owner: string; call: string; hasCal: boolean; file: string; calFile: string }
+type Me = { home: string; owner: string; call: string; hasCal: boolean; file: string; calFile: string; forecastFile: string }
 let me: Me | undefined
 const NO_HOME = '本人のフォルダ（設定/config.json と 00_タスク管理/data/tasks.json がある所）の中ではないので、使えません。'
 
@@ -73,7 +76,7 @@ async function findMe($: EngineInterface): Promise<Me | undefined> {
         const owner = typeof c.owner === 'string' && c.owner.trim() ? c.owner.trim() : '本人'
         const call = typeof c.owner_call === 'string' && c.owner_call.trim() ? c.owner_call.trim() : `${owner}さん`
         // 予定は update_dashboard.py が起動時・自動実行のときに書く（config に calendar があるときだけ）
-        return { home: dir, owner, call, hasCal: !!c.calendar, file, calFile: at(dir, '00_タスク管理/data/calendar_cache.json') }
+        return { home: dir, owner, call, hasCal: !!c.calendar, file, calFile: at(dir, '00_タスク管理/data/calendar_cache.json'), forecastFile: at(dir, '00_タスク管理/data/forecast.json') }
       } catch {
         return undefined
       }
@@ -182,7 +185,7 @@ async function back($: EngineInterface) {
   await update($, detail, () => NONE)
   await refresh($, true)
   const v = await read($, view)
-  await $.ui.open({ id: PANE, title: v.mode === 'all' ? ALL_TITLE : TITLE })
+  await $.ui.open({ id: PANE, title: v.mode === 'all' ? ALL_TITLE : v.mode === 'gantt' ? GANTT_TITLE : TITLE })
 }
 
 // 短い画面に戻す
@@ -198,6 +201,154 @@ async function showAll($: EngineInterface): Promise<{ isPlaced: boolean; count: 
   await update($, view, () => ({ mode: 'all', page: 0 }))
   const { isPlaced } = await $.ui.open({ id: PANE, title: ALL_TITLE })
   return { isPlaced, count: (await read($, board)).all.length }
+}
+
+// ---------- これから2週間のガントチャート（forecast.json を読むだけ。計算し直さない） ----------
+const GANTT_COLS = 14
+const ISO = /^\d{4}-\d{2}-\d{2}$/
+const STATE_WAIT = '見積もり待ち'
+const STATE_LOOP = '依存の輪'
+
+// 画面で占める幅。全角（かな・漢字・全角記号・絵文字など）は 2、結合する印・異体字セレクタは 0、それ以外は 1
+const cellWidth = (s: string) => {
+  let w = 0
+  for (const ch of s) {
+    const c = ch.codePointAt(0)!
+    if ((c >= 0x300 && c <= 0x36f) || c === 0x3099 || c === 0x309a || c === 0xfe0f || c === 0x200d) continue
+    const wide =
+      c > 0xffff ||
+      (c >= 0x1100 && c <= 0x115f) ||
+      (c >= 0x2e80 && c <= 0xa4cf) ||
+      (c >= 0xac00 && c <= 0xd7a3) ||
+      (c >= 0xf900 && c <= 0xfaff) ||
+      (c >= 0xfe30 && c <= 0xfe6f) ||
+      (c >= 0xff00 && c <= 0xff60) ||
+      (c >= 0xffe0 && c <= 0xffe6)
+    w += wide ? 2 : 1
+  }
+  return w
+}
+
+// 幅 w にちょうど収める（長ければ切って「…」（幅2として数える）、短ければ空白で埋める）。列がずれないように
+const fitCells = (s: string, w: number) => {
+  let out = ''
+  let used = 0
+  if (cellWidth(s) <= w) {
+    out = s
+    used = cellWidth(s)
+  } else {
+    for (const ch of s) {
+      const cw = cellWidth(ch)
+      if (used + cw > w - 2) break
+      out += ch
+      used += cw
+    }
+    out += '…'
+    used += 2
+  }
+  return out + ' '.repeat(Math.max(0, w - used))
+}
+
+const isoOrNull = (v: any): string | null => (typeof v === 'string' && ISO.test(v) ? v : null)
+
+// forecast.json を読む。無い・壊れている・古い（今日の日付でない）ときは、ok=false と1行の案内にする
+async function loadGantt($: EngineInterface, now: number): Promise<Gantt> {
+  if (!me) return { ...NO_GANTT, message: NO_HOME }
+  const today = dayOf(now)
+  let raw: any
+  try {
+    raw = await $.fs.read(me.forecastFile)
+  } catch {
+    return { ...NO_GANTT, message: 'forecast.json がまだありません（読めませんでした）。update_dashboard.py を動かすと出ます' }
+  }
+  try {
+    const f = JSON.parse(raw)
+    const days: ForecastDay[] = (Array.isArray(f.days) ? f.days : [])
+      .filter((d: any) => d && isoOrNull(d.date))
+      .map((d: any) => ({ date: d.date as string, off: d.off === true }))
+    const made = isoOrNull(f.today)
+    if (!made || days.length === 0 || !Array.isArray(f.tasks)) throw new Error('shape')
+    if (made !== today) {
+      return { ...NO_GANTT, message: `forecast.json が古いです（${md(made)} 作成）。update_dashboard.py を動かすと出ます` }
+    }
+    const tasks: ForecastTask[] = f.tasks
+      .filter((t: any) => t && typeof t.id === 'string')
+      .map((t: any) => ({
+        id: t.id,
+        title: String(t.title ?? ''),
+        who: String(t.who ?? ''),
+        start: isoOrNull(t.start),
+        end: isoOrNull(t.end),
+        state: String(t.state ?? ''),
+      }))
+    const waiting = typeof f.waiting === 'number' && f.waiting >= 0 ? f.waiting : tasks.filter(t => t.state === STATE_WAIT).length
+    return { ok: true, message: '', today: made, days, tasks, waiting }
+  } catch {
+    return { ...NO_GANTT, message: 'forecast.json を読めませんでした（壊れています）。update_dashboard.py を動かし直すと出ます' }
+  }
+}
+
+async function refreshGantt($: EngineInterface) {
+  const next = await loadGantt($, await $.clock.now())
+  const cur = await read($, gantt)
+  if (JSON.stringify(cur) !== JSON.stringify(next)) await update($, gantt, () => next)
+}
+
+// 1行ぶんの「列」。AI は 着手見込み〜完了予定を棒（= 、休みの日は .）、本人は期日の日に印（*）。
+// 2週間より先に終わる（または先から始まる）ものは、右端に →。日付の前後は文字の並びで比べる（暦は計算しない）
+function ganttCells(t: ForecastTask, days: ForecastDay[]): { cells: string; beyond: boolean } {
+  const last = days.length - 1
+  const own = t.who === '本人'
+  const end = t.end ?? ''
+  const beyond = end > days[last].date
+  const mark: string[] = days.map(d => (d.off ? '.' : ' '))
+  if (own) {
+    if (!beyond) {
+      const at = Math.max(0, days.findIndex(d => d.date >= end))
+      mark[at] = '*'
+    }
+  } else {
+    const s = days.findIndex(d => d.date >= (t.start ?? end))
+    if (s >= 0) {
+      let e = last
+      if (!beyond) e = Math.max(s, days.map(d => d.date <= end).lastIndexOf(true))
+      for (let i = s; i <= e; i++) if (!days[i].off) mark[i] = '='
+    }
+  }
+  return { cells: mark.join(''), beyond }
+}
+
+type GanttShow = { head: string; axis: string; rows: string[]; waitLine: string; more: number }
+
+// 画面に出す文字を作る（幅 cols・行の高さ rowsMax）。タスク名の幅は、残りの幅から決める
+function ganttLines(g: Gantt, cols: number, rowsMax: number): GanttShow {
+  const draw = g.tasks.filter(t => t.end && t.state !== STATE_WAIT && t.state !== STATE_LOOP && (t.who === '本人' || t.start))
+  const shown = draw.slice(0, Math.max(1, rowsMax))
+  const idW = Math.max(4, ...shown.map(t => cellWidth(t.id)))
+  const titleW = Math.max(6, Math.min(24, cols - idW - 1 - 1 - g.days.length - 2))
+  const lead = ' '.repeat(idW + 1 + titleW + 1)
+  const rows = shown.map(t => {
+    const { cells, beyond } = ganttCells(t, g.days)
+    return `${fitCells(t.id, idW)} ${fitCells(t.title, titleW)} ${cells}${beyond ? '→' : ''}`
+  })
+  const loops = g.tasks.filter(t => t.state === STATE_LOOP).length
+  const parts = [g.waiting > 0 ? `${STATE_WAIT} ${g.waiting} 件` : '', loops > 0 ? `${STATE_LOOP} ${loops} 件` : ''].filter(Boolean)
+  return {
+    head: `これから2週間（${md(g.days[0].date)}〜${md(g.days[g.days.length - 1].date)}）`,
+    axis: lead + g.days.map(d => d.date.slice(-1)).join(''),
+    rows,
+    waitLine: parts.length ? `${parts.join('・')}は、棒にしていません` : '',
+    more: draw.length - shown.length,
+  }
+}
+
+// これから2週間のガントチャートに切り替える
+async function showGantt($: EngineInterface): Promise<{ isPlaced: boolean; g: Gantt }> {
+  await refreshGantt($)
+  await update($, detail, () => NONE)
+  await update($, view, () => ({ mode: 'gantt', page: 0 }))
+  const { isPlaced } = await $.ui.open({ id: PANE, title: GANTT_TITLE })
+  return { isPlaced, g: await read($, gantt) }
 }
 
 // 日本時間の「何分目」（今の予定・終わった予定の色分けに使う）
@@ -233,6 +384,8 @@ async function refresh($: EngineInterface, force = false) {
   const now = await $.clock.now()
   const today = dayOf(now)
   if (hasCal) await refreshCal($, now, calFile).catch(() => undefined)
+  // ガントチャートを開いているあいだは、forecast.json が作り直されたら読み直す
+  if ((await read($, view)).mode === 'gantt') await refreshGantt($).catch(() => undefined)
   const stat = await $.fs.stat(FILE).catch(() => undefined)
   if (!stat) {
     await update($, board, () => ({ ...EMPTY, today, error: 'tasks.json が見つかりません' }))
@@ -276,6 +429,15 @@ export const register: Register = on => {
         name: 'show_all_tasks',
         description:
           'あなたの右のパネルを、全部のタスクの一覧（未完了→完了の順、ページ送りあり）に切り替える。「タスク全部見せて」と言われたときに使う。短い画面に戻すのは open_task（id を空にする）',
+        inputSchema: { type: 'object', properties: {} },
+        isDeferred: false,
+      })
+      .catch(() => undefined)
+    await $.tool
+      .register({
+        name: 'show_gantt',
+        description:
+          '右のパネルを、これから2週間のガントチャートに切り替える。「ガント見せて」と言われたときに使う。短い画面に戻すのは open_task（id を空にする）',
         inputSchema: { type: 'object', properties: {} },
         isDeferred: false,
       })
@@ -330,6 +492,18 @@ export const register: Register = on => {
     }
   })
 
+  on('tool.call', { tool: 'mcp__ai-bunshin-panel__show_gantt' }, async $ => {
+    if (!me) return { result: NO_HOME }
+    const { isPlaced, g } = await showGantt($)
+    if (!g.ok) return { result: g.message }
+    const n = g.tasks.filter(t => t.end && t.state !== STATE_WAIT && t.state !== STATE_LOOP).length
+    return {
+      result: isPlaced
+        ? `これから2週間のガントチャート（${n}件）を右のパネルに出しました。`
+        : '切り替えましたが、画面が狭くて右のパネルが出ていません。',
+    }
+  })
+
   // tasks.json を書き換えたあとは、すぐ表示を更新する
   on('tool.call', async ($, e, next) => {
     const ran = await next(e)
@@ -370,6 +544,30 @@ export const register: Register = on => {
 
     const b = await read($, board)
     const v = await read($, view)
+
+    if (v.mode === 'gantt') {
+      const g = await read($, gantt)
+      // 窓の高さ（bodyRows）に収まる行数。見出し・凡例・日付・件数・ボタンで 7 行使う
+      const rowsMax = Math.max(3, e.props.scroll.bodyRows - 7)
+      const show = g.ok ? ganttLines(g, e.props.bodyColumns, rowsMax) : undefined
+      return (
+        <Box flexDirection="column">
+          <Text bold>{show ? show.head : GANTT_TITLE}</Text>
+          {!show && <Text color="red" wrap="wrap">{g.message}</Text>}
+          {show && (
+            <Text dimColor wrap="wrap">
+              = AI（着手見込み〜完了予定）　* {call}の期日　. 休み　→ 2週間より先
+            </Text>
+          )}
+          {show && <Text dimColor>{show.axis}</Text>}
+          {show && show.rows.length === 0 && <Text dimColor>棒にできるタスクなし</Text>}
+          {show && show.rows.map((r, i) => <Text key={`gantt-${i}`} wrap="truncate-end">{r}</Text>)}
+          {show && show.more > 0 && <Text dimColor>ほか {show.more} 件</Text>}
+          {show && show.waitLine !== '' && <Text dimColor wrap="wrap">{show.waitLine}</Text>}
+          <Button key="home" label="短い画面へ" onPress={() => void home($)} />
+        </Box>
+      )
+    }
 
     if (v.mode === 'all') {
       // ページ送り：1ページが窓（bodyRows）に収まる行数にする。見出し・ボタン・足元で 5行使う

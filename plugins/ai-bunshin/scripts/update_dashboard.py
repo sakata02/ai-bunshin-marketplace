@@ -388,6 +388,7 @@ BOARD_MD = ROOT / "00_タスク管理" / "タスクボード.md"
 REQUEST_MD = ROOT / "00_タスク管理" / f"{OWNER_CALL}へのお願い.md"
 SNAPSHOT_JSON = ROOT / "00_タスク管理" / "data" / ".snapshot.json"
 HISTORY_JSONL = ROOT / "00_タスク管理" / "data" / "history.jsonl"
+FORECAST_JSON = ROOT / "00_タスク管理" / "data" / "forecast.json"   # 右のパネルのガントチャート用（T118。毎回作り直す）
 KAIZEN_MD = ROOT / "04_ナレッジ" / "改善ログ.md"
 SPRINT_DIR = ROOT / "01_スプリント"
 HISTORY_FIELDS = ["title", "status", "progress", "pdca", "due", "assignee", "done_date", "points", "reestimate"]
@@ -740,6 +741,7 @@ def forecast(tasks, today, velocity, cal, today_planned=None):
     for t in tasks:
         t["_state"] = None
         t["_loop"] = None
+        t["_start"] = None   # 着手見込み（AI のタスクだけ。完了予定日の計算には使わない）
         if t["status"] == "完了":
             t["_forecast"] = parse_date(t.get("done_date"))
     for rank, t in enumerate(open_tasks, start=1):
@@ -787,14 +789,20 @@ def forecast(tasks, today, velocity, cal, today_planned=None):
         t = by_id[i]
         if today_planned is not None and i in today_planned:
             t["_forecast"] = today
+            t["_start"] = today
         else:
+            before = cum   # このタスクの前までの積み上げ（着手見込みに使う）
             cum += remaining_points(t)
-            t["_forecast"] = cal.add_workdays(start, math.ceil(cum / velocity) if cum > 0 else 1)
+            end_n = math.ceil(cum / velocity) if cum > 0 else 1
+            t["_forecast"] = cal.add_workdays(start, end_n)
+            # 着手見込み：前のタスクまでの積み上げが終わった日の続き（同じ日に続きから始めることもある）。完了予定より後にはしない
+            t["_start"] = cal.add_workdays(start, min(int(before / velocity) + 1, end_n))
             # depends_on のタスクが終わってから着手する（前提タスクの完了予定の翌営業日から数える）
             deps = [by_id[d]["_forecast"] for d in dep_list(t) if d in by_id and by_id[d].get("_forecast")]
             if deps:
                 own = math.ceil(remaining_points(t) / velocity) or 1
                 t["_forecast"] = max(t["_forecast"], cal.add_workdays(max(deps) + timedelta(days=1), own))
+                t["_start"] = min(max(t["_start"], cal.add_workdays(max(deps) + timedelta(days=1), 1)), t["_forecast"])
         for j in after.get(i, []):
             waiting_on[j] -= 1
             if waiting_on[j] == 0:
@@ -818,6 +826,45 @@ def forecast(tasks, today, velocity, cal, today_planned=None):
             t["_flag"] = FLAG_NO_DUE
     project_end = max((t["_forecast"] for t in open_tasks if t.get("_forecast")), default=None)
     return open_tasks, project_end
+
+
+FORECAST_DAYS = 14   # 右のパネルのガントチャートの期間（今日から14日。暦の日）
+
+
+def flag_word(flag):
+    """"🔴 期限超過" → "期限超過"（今の表示と同じ言葉。先頭の絵文字だけ外す）。"""
+    return flag.split(" ", 1)[1] if " " in flag else flag
+
+
+def build_forecast_json(ctx):
+    """右のパネルのガントチャート用（forecast.json）。完了予定日・着手見込み・休みの日は、ここで計算した結果を渡す
+    （パネルは計算し直さない）。未完了のタスクだけを、順位の順に入れる。"""
+    today, cal = ctx["today"], ctx["cal"]
+    days = []
+    for i in range(FORECAST_DAYS):
+        d = today + timedelta(days=i)
+        days.append({"date": fmt(d), "off": not cal.is_workday(d)})
+    rows = []
+    for t in ctx["open_tasks"]:
+        own = t.get("assignee") == OWNER
+        rows.append({
+            "id": t["id"], "title": str(t.get("title") or ""), "assignee": str(t.get("assignee") or ""),
+            "who": "本人" if own else "AI",
+            "start": fmt(t.get("_start")) or None, "end": fmt(t.get("_forecast")) or None,
+            "state": t.get("_state") or flag_word(t["_flag"]),
+        })
+    waiting = sum(1 for t in ctx["open_tasks"] if t.get("_state") == STATE_WAIT)
+    return {"made": ctx["now"], "today": fmt(today), "velocity": ctx["velocity"], "days": days,
+            "tasks": rows, "waiting": waiting}
+
+
+def write_forecast_json(ctx):
+    """forecast.json を一時ファイルに書いてから置き換える。書けなくても、ほかの生成物は止めない（書けなかった理由の型名を返す。書けたら None）。"""
+    try:
+        atomic_write_text(FORECAST_JSON, json.dumps(build_forecast_json(ctx), ensure_ascii=False, indent=2) + "\n")
+    except OSError as e:
+        return type(e).__name__
+    return None
 
 
 def fc_text(t):
@@ -2790,6 +2837,7 @@ def run(today):
     saved_note = write_excel(ctx)
     atomic_write_text(BOARD_MD, build_board_md(ctx))
     atomic_write_text(REQUEST_MD, build_requests_md(ctx))
+    ctx["forecast_error"] = write_forecast_json(ctx)
     # tasks.json の新しい形式への移しは、Excel・ボード・お願いを書き終えたあと（最後）に行う。検査を通っても Excel などで落ちたときに、
     # 移しだけ済んでしまわないように。移しのあとに data は読み直さない：メモリの data は移す前の内容で、違いは schema_version の有無だけ
     # （ここから先で使わない）。読み直すと、移しの途中の状態を見るおそれがある

@@ -44,6 +44,7 @@ type Src = {
   cfg?: unknown
   cwd?: string
   startFile?: boolean
+  forecast?: unknown // forecast.json の中身（文字ならそのまま。undefined なら読めない）
   home?: string // 本人のフォルダ（既定は HOME）。Windows の形（C:\\…）も渡せる
 }
 const CFG = { owner: '山田', owner_call: '山田さん', calendar: { type: 'ics' } }
@@ -53,20 +54,22 @@ async function setup($: any, on: any, s: Src) {
   if (!('cfg' in s)) s.cfg = CFG
   const titles: string[] = []
   const descs: string[] = []
+  const tools: { name: string; description: string }[] = []
   const home = s.home ?? HOME
   // fs.stat が答えるパスは、home と同じ区切りで組む（Windows の形なら \\）
   const sep = home.includes('\\') && !home.includes('/') ? '\\' : '/'
   const join = (rel: string) => home + sep + rel.replace(/\//g, sep)
   const statPaths: string[] = []
-  const n = { command: 0, tool: 0, open: 0, every: 0, writes: 0, tasksReads: 0, calReads: 0 }
+  const n = { command: 0, tool: 0, open: 0, every: 0, writes: 0, tasksReads: 0, calReads: 0, forecastReads: 0 }
   const want = s.hasFile
   on('command.register', (_: any, e: any) => {
     n.command++
     descs.push(String(e.description ?? ''))
     return { value: { command: 'x' } }
   })
-  on('tool.register', () => {
+  on('tool.register', (_: any, e: any) => {
     n.tool++
+    tools.push({ name: String(e.name ?? ''), description: String(e.description ?? '') })
     return { value: { name: 'x' } }
   })
   on('ui.open', (_: any, e: any) => {
@@ -90,6 +93,11 @@ async function setup($: any, on: any, s: Src) {
       if (s.cal === undefined) throw new Error('none')
       return { value: JSON.stringify(s.cal) }
     }
+    if (p.endsWith('forecast.json')) {
+      n.forecastReads++
+      if (s.forecast === undefined) throw new Error('none')
+      return { value: typeof s.forecast === 'string' ? s.forecast : JSON.stringify(s.forecast) }
+    }
     n.tasksReads++
     return { value: typeof s.data === 'string' ? s.data : JSON.stringify(s.data) }
   })
@@ -109,7 +117,7 @@ async function setup($: any, on: any, s: Src) {
   s.hasFile = s.startFile ?? true
   await $.session.start({ cwd: s.cwd ?? home, surface: 'terminal', isInteractive: true })
   s.hasFile = want
-  return { titles, n, s, descs, statPaths }
+  return { titles, n, s, descs, statPaths, tools }
 }
 
 test('全部のタスクに切り替え、ページを送り、短い画面に戻る。tasks.json は書かない', async ($, on) => {
@@ -365,7 +373,7 @@ test('本人のフォルダの外（どこにも config が無い）では何も
 test('本人のフォルダの下（05_開発/x）で開いても、本人のフォルダを見つける', async ($, on) => {
   const { n } = await setup($, on, { data: open(3), cwd: `${HOME}/05_開発/x` })
   expect(n.command).toBe(2)
-  expect(n.tool).toBe(2)
+  expect(n.tool).toBe(3) // open_task・show_all_tasks・show_gantt
   expect(n.open).toBeGreaterThan(0)
   expect(n.every).toBe(1)
   await $.tool.call({ tool: 'mcp__ai-bunshin-panel__show_all_tasks' })
@@ -477,4 +485,230 @@ test('調べるパス（Windows）：stat は config.json と tasks.json 以外�
   expect(statPaths.some(p => /設定\\config\.json$/.test(p))).toBe(true)
   expect(statPaths.some(p => /tasks\.json$/.test(p))).toBe(true)
   expect(statPaths.some(p => p.includes('/'))).toBe(false)
+})
+
+// ---------- これから2週間のガントチャート（T118）。forecast.json を読むだけ ----------
+
+const GT = 'mcp__ai-bunshin-panel__show_gantt'
+// 今日は 2026-11-02（月）。14 日ぶん。休みは土日（11/7・8・14・15）。テストの側でも暦は計算せず、日付の文字を並べるだけにする
+const GDAYS = Array.from({ length: 14 }, (_, i) => {
+  const d = new Date(Date.parse('2026-11-02T00:00:00Z') + i * 86400e3)
+  const wd = d.getUTCDay()
+  return { date: d.toISOString().slice(0, 10), off: wd === 0 || wd === 6 }
+})
+type FT = { id: string; title: string; who: string; start: string | null; end: string | null; state: string }
+const ft = (id: string, title: string, who: string, start: string | null, end: string | null, state = '順調'): FT => ({
+  id,
+  title,
+  who,
+  start,
+  end,
+  state,
+})
+const fcFile = (tasks: FT[], over: Record<string, unknown> = {}) => ({
+  made: '2026-11-02 09:00',
+  today: '2026-11-02',
+  velocity: 2,
+  days: GDAYS,
+  tasks,
+  waiting: tasks.filter(t => t.state === '見積もり待ち').length,
+  ...over,
+})
+// 画面での幅（テストの側の数え方。全角・絵文字は 2）
+// 全角（かな・漢字・全角記号・絵文字）は 2、半角カナは 1、「…」は幅が環境で違うので 2 として数える（パネルも同じ）
+const wcols = (s: string) =>
+  [...s].reduce((w, ch) => {
+    const c = ch.codePointAt(0)!
+    return w + (c > 0xffff || c === 0x2026 || (c >= 0x2e80 && c <= 0xa4cf) || (c >= 0xff01 && c <= 0xff60) || (c >= 0xffe0 && c <= 0xffe6) ? 2 : 1)
+  }, 0)
+const TALL = { ...PANE.props, scroll: { offset: 0, bodyRows: 30 } } // 行が多くても全部出る高さ
+const ganttRows = async (ui: any) =>
+  ((await ui.findAll({ type: 'Text', text: /^T\d+ / })) as { text: string }[]).map(r => r.text)
+
+test('ガント：新しい道具 show_gantt が登録され、説明は決めたとおり。切り替えて短い画面に戻せる', async ($, on) => {
+  const { tools, titles, n } = await setup($, on, { data: open(2), forecast: fcFile([ft('T001', '実装', 'AI', '2026-11-02', '2026-11-03')]) })
+  const g = tools.find(t => t.name === 'show_gantt')
+  expect(g?.description).toBe(
+    '右のパネルを、これから2週間のガントチャートに切り替える。「ガント見せて」と言われたときに使う。短い画面に戻すのは open_task（id を空にする）',
+  )
+  const r = await $.tool.call({ tool: GT })
+  expect(JSON.stringify(r)).toContain('ガントチャート')
+  expect(titles.at(-1)).toBe('これから2週間')
+  let ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect((await ui.find({ type: 'Text', text: /これから2週間/ }))?.text).toBe('これから2週間（11/2〜11/15）')
+  expect(await ui.find({ type: 'Text', text: /= AI.*\* 山田さんの期日.*\. 休み.*→/ })).toBeTruthy()
+  await ui.unmount()
+  // 短い画面に戻す（open_task の id を空に）
+  const back = await $.tool.call({ tool: 'mcp__ai-bunshin-panel__open_task', id: '' })
+  expect(JSON.stringify(back)).toContain('一覧に戻しました')
+  ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /今日の予定/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /これから2週間/ })).toBeFalsy()
+  await ui.unmount()
+  expect(n.writes).toBe(0)
+})
+
+test('ガント：AI は棒（休みの日は .）、本人は期日に印（*）、2週間の外は右端に →。見積もり待ち・依存の輪は棒にせず件数を出す', async ($, on) => {
+  const tasks = [
+    ft('T101', 'AI棒', 'AI', '2026-11-04', '2026-11-09'),
+    ft('T102', '本人の期日', '本人', null, '2026-11-06'),
+    ft('T103', '外へ続く', 'AI', '2026-11-13', '2026-11-20'),
+    ft('T104', '外から始まる', 'AI', '2026-11-18', '2026-11-19'),
+    ft('T105', '見積もりまだ', 'AI', null, null, '見積もり待ち'),
+    ft('T106', '見積もりまだ2', 'AI', '2026-11-03', '2026-11-04', '見積もり待ち'), // 日付が入っていても、状態が見積もり待ちなら棒にしない
+    ft('T107', '輪の中', 'AI', null, null, '依存の輪'),
+    ft('T108', '本人の外', '本人', null, '2026-11-30'),
+  ]
+  const { n } = await setup($, on, { data: open(1), forecast: fcFile(tasks) })
+  await $.tool.call({ tool: GT })
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: TALL })
+  const rows = await ganttRows(ui)
+  const by = (id: string) => rows.find(r => r.startsWith(id + ' '))!
+  // 列は 14 日ぶん：11/2 から数えて、T101 は 11/4〜11/6 が =、土日（11/7・8）が .、11/9 が =、11/14・15 が .
+  expect(by('T101')).toMatch(/ {2}===\.\.= {4}\.\.$/)
+  expect(by('T102')).toMatch(/ {4}\*\.\. {5}\.\.$/)
+  expect(by('T102')).not.toContain('=')
+  expect(by('T101')).not.toContain('*')
+  // 2週間の外に終わる：棒は右端（休みは .）まで、そのあとに →。外から始まるものは棒なしで →
+  expect(by('T103')).toMatch(/ {5}\.\. {4}=\.\.→$/)
+  expect(by('T104')).toMatch(/ {5}\.\. {5}\.\.→$/)
+  expect(by('T104')).not.toContain('=')
+  expect(by('T108')).toMatch(/→$/)
+  expect(by('T108')).not.toContain('*')
+  // 見積もり待ち・依存の輪は行にならず、件数を1行
+  expect(rows.some(r => /T105|T106|T107/.test(r))).toBe(false)
+  expect((await ui.find({ type: 'Text', text: /見積もり待ち 2 件/ }))?.text).toBe('見積もり待ち 2 件・依存の輪 1 件は、棒にしていません')
+  expect(rows.length).toBe(5)
+  await ui.unmount()
+  expect(n.writes).toBe(0)
+})
+
+test('ガント：件数が 0 のときは、件数の行を出さない', async ($, on) => {
+  await setup($, on, { data: open(1), forecast: fcFile([ft('T101', 'AI棒', 'AI', '2026-11-02', '2026-11-02')]) })
+  await $.tool.call({ tool: GT })
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /棒にしていません/ })).toBeFalsy()
+  expect(await ui.find({ type: 'Text', text: /^T101 / })).toBeTruthy()
+  await ui.unmount()
+})
+
+// forecast.json が「無い」「壊れている」「形が違う」「古い」：棒を出さず、1行。パネルは落ちず、何も書かない
+for (const [label, forecast, msg] of [
+  ['無い', undefined, /まだありません.*update_dashboard\.py を動かすと出ます/],
+  ['壊れている（JSON でない）', '{broken', /読めませんでした.*update_dashboard\.py を動かし直すと出ます/],
+  ['形が違う（days が無い）', { today: '2026-11-02', tasks: [] }, /読めませんでした.*update_dashboard\.py/],
+  ['形が違う（配列でない）', '[1,2]', /読めませんでした.*update_dashboard\.py/],
+  ['古い（前の日）', fcFile([ft('T101', 'x', 'AI', '2026-11-02', '2026-11-02')], { today: '2026-11-01' }), /古いです（11\/1 作成）.*update_dashboard\.py を動かすと出ます/],
+] as [string, unknown, RegExp][]) {
+  test(`ガント：forecast.json が${label}ときは、棒を出さず1行を出す（落ちない・書かない）`, async ($, on) => {
+    const { n } = await setup($, on, { data: open(2), forecast })
+    const r = await $.tool.call({ tool: GT })
+    expect(JSON.stringify(r)).toMatch(msg)
+    const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+    expect(await ui.find({ type: 'Text', text: msg })).toBeTruthy()
+    expect((await ganttRows(ui)).length).toBe(0)
+    expect(await ui.find({ type: 'Text', text: /^= AI/ })).toBeFalsy()
+    expect(await ui.find({ type: 'Button', text: /短い画面へ/ })).toBeTruthy()
+    await ui.unmount()
+    expect(n.writes).toBe(0)
+  })
+}
+
+test('ガント：全角の長いタスク名・半角・絵文字でも、列（棒の始まり）がずれない', async ($, on) => {
+  const tasks = [
+    ft('T201', 'あ', 'AI', '2026-11-02', '2026-11-02'),
+    ft('T202', 'とても長い全角のタスク名でも切って列をそろえる必要があります', 'AI', '2026-11-02', '2026-11-02'),
+    ft('T203', 'abcdefghijklmnopqrstuvwxyz0123456789', 'AI', '2026-11-02', '2026-11-02'),
+    ft('T204', '🔴絵文字とかなと漢字ｱｲｳ半角カナ混じりの名前', 'AI', '2026-11-02', '2026-11-02'),
+    ft('T205', '全角ちょうど十二文字のなまえです。', 'AI', '2026-11-02', '2026-11-02'),
+  ]
+  await setup($, on, { data: open(1), forecast: fcFile(tasks) })
+  await $.tool.call({ tool: GT })
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: TALL }) // bodyColumns 40
+  const rows = await ganttRows(ui)
+  expect(rows.length).toBe(5)
+  // 各行：「ID 名前 14 列」。名前の部分まで（最後の 14 列を除く）の幅がどの行でも同じ
+  const heads = rows.map(r => wcols(r.slice(0, -14)))
+  expect(new Set(heads).size).toBe(1)
+  // 全体も 40 列（bodyColumns）に収まる
+  for (const r of rows) expect(wcols(r)).toBeLessThanOrEqual(40)
+  // 短い名前はそのまま、長い名前は「…」で切れる
+  expect(rows[0]).toContain('あ ')
+  expect(rows[1]).toContain('…')
+  expect(rows[2]).toContain('…')
+  await ui.unmount()
+  // 幅が広ければ名前を長く出す（切り方は幅で決まる）
+  const wide = await $.ui.mount({ ...PANE, surface: 'terminal', props: { ...TALL, bodyColumns: 80 } })
+  const wrows = await ganttRows(wide)
+  expect(wrows[1].length).toBeGreaterThan(rows[1].length)
+  expect(new Set(wrows.map(r => wcols(r.slice(0, -14)))).size).toBe(1)
+  await wide.unmount()
+})
+
+test('ガント：行が多いときは優先順に上から出し、出せない分は「ほか N 件」', async ($, on) => {
+  const tasks = Array.from({ length: 8 }, (_, i) => ft(`T3${String(i).padStart(2, '0')}`, `件${i}`, 'AI', '2026-11-02', '2026-11-03'))
+  await setup($, on, { data: open(1), forecast: fcFile(tasks) })
+  await $.tool.call({ tool: GT })
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' }) // bodyRows 10 → 3 行
+  const rows = await ganttRows(ui)
+  expect(rows.map(r => r.slice(0, 4))).toEqual(['T300', 'T301', 'T302'])
+  expect((await ui.find({ type: 'Text', text: /^ほか/ }))?.text).toBe('ほか 5 件')
+  await ui.unmount()
+  // 窓が高ければ全部出て、「ほか」は出ない
+  const tall = await $.ui.mount({ ...PANE, surface: 'terminal', props: { ...PANE.props, scroll: { offset: 0, bodyRows: 30 } } })
+  expect((await ganttRows(tall)).length).toBe(8)
+  expect(await tall.find({ type: 'Text', text: /^ほか/ })).toBeFalsy()
+  await tall.unmount()
+})
+
+test('ガント：forecast.json が作り直されたら、Bash のあとなどに読み直す（開いている間）。ふつうの画面では読まない', async ($, on) => {
+  const src: Src = { data: open(1), forecast: fcFile([ft('T101', '前', 'AI', '2026-11-02', '2026-11-02')]) }
+  const { n } = await setup($, on, src)
+  await $.tool.call({ tool: 'Bash' }) // ふつうの画面：forecast.json は読まない
+  expect(n.forecastReads).toBe(0)
+  await $.tool.call({ tool: GT })
+  let ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /^T101 / })).toBeTruthy()
+  await ui.unmount()
+  src.forecast = fcFile([ft('T102', '後', 'AI', '2026-11-02', '2026-11-02')])
+  await $.tool.call({ tool: 'Bash' })
+  ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /^T102 / })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /^T101 / })).toBeFalsy()
+  await ui.unmount()
+})
+
+test('ガント：開いたあとも、ふつうの画面・全部の一覧・T013 開いて・戻る の動きは変わらない', async ($, on) => {
+  const { titles } = await setup($, on, { data: open(3), forecast: fcFile([ft('T001', '実装', 'AI', '2026-11-02', '2026-11-03')]) })
+  await $.tool.call({ tool: GT })
+  // ガント → 詳細 → 戻る：ガントに戻る
+  await $.tool.call({ tool: 'mcp__ai-bunshin-panel__open_task', id: 'T001' })
+  expect(titles.at(-1)).toBe('T001 の詳細')
+  let ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: 'back' })
+  expect(titles.at(-1)).toBe('これから2週間')
+  await ui.unmount()
+  // ガント → 全部の一覧 → 短い画面
+  await $.tool.call({ tool: 'mcp__ai-bunshin-panel__show_all_tasks' })
+  ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /全部のタスク/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /これから2週間/ })).toBeFalsy()
+  await ui.press({ key: 'home' })
+  expect(await ui.find({ type: 'Text', text: /今日の予定/ })).toBeTruthy()
+  await ui.unmount()
+  // ガントの「短い画面へ」ボタン
+  await $.tool.call({ tool: GT })
+  ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: 'home' })
+  expect(await ui.find({ type: 'Text', text: /今日の予定/ })).toBeTruthy()
+  await ui.unmount()
+})
+
+test('ガント：本人のフォルダの外では道具を登録せず、呼ばれても何も読まない', async ($, on) => {
+  const { n } = await setup($, on, { data: open(3), cwd: '/work/other', forecast: fcFile([]) })
+  expect(n.tool).toBe(0)
+  const r = await $.tool.call({ tool: GT })
+  expect(JSON.stringify(r)).toContain('本人のフォルダ')
+  expect(n.forecastReads).toBe(0)
+  expect(n.open).toBe(0)
 })

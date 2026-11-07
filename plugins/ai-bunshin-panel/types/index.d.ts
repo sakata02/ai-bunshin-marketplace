@@ -2,7 +2,7 @@ export type Row = { id: string; title: string; due: string; mark: string }
 // 全部のタスクの一覧の1行（担当と状態つき）
 export type AllRow = Row & { who: string; done: boolean }
 // 右のパネルの表示：ふだんの短い画面（home）か、全部のタスクの一覧（all）。page は 0 から
-export type View = { mode: 'home' | 'all'; page: number }
+export type View = { mode: 'home' | 'all' | 'gantt'; page: number }
 export type Board = {
   today: string
   mine: Row[]
@@ -27,8 +27,13 @@ export type Detail = {
 export type CalEvent = { start: string; end: string; title: string; allday: boolean; unknown: boolean }
 export type Cal = { fetched: string; events: CalEvent[]; nowMin: number; error: string }
 
+// これから2週間のガントチャート（forecast.json から。update_dashboard.py が計算した結果を読むだけ）。ok が false のときは message を1行出す
+export type ForecastDay = { date: string; off: boolean }
+export type ForecastTask = { id: string; title: string; who: string; start: string | null; end: string | null; state: string }
+export type Gantt = { ok: boolean; message: string; today: string; days: ForecastDay[]; tasks: ForecastTask[]; waiting: number }
+
 declare module 'claude-code' {
   interface PluginState {
-    'ai-bunshin-panel': { board: Shaped<Board>; view: Shaped<View>; mtime: number; detail: Shaped<Detail>; cal: Shaped<Cal> }
+    'ai-bunshin-panel': { board: Shaped<Board>; view: Shaped<View>; mtime: number; detail: Shaped<Detail>; cal: Shaped<Cal>; gantt: Shaped<Gantt> }
   }
 }
