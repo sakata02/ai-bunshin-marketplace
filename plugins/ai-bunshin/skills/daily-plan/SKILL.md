@@ -12,7 +12,7 @@ description: 1日スプリントのプランニング（平日9時に自動。�
 引数：日付（YYYY-MM-DD、省略時は今日）。
 自動実行（`claude -p`）のときは本人がその場にいない。**質問せずに最後まで進める。**
 Bash は `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/update_dashboard.py" …` だけを使う。tasks.json は Read と Edit で直接直す（別のスクリプトは作らない）。特定のタスクだけ見たいときは、tasks.json を全体で開かず `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/update_dashboard.py" --task T0XX T0YY` で出す（指定のタスクだけを JSON で出す。読むだけで何も書かない。無い ID は知らせて終了コード 1）。直すときは必要なところを Read してから Edit する。ロックの確認のときだけ `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/lock_check.py"` も使ってよい（読むだけ）。
-計画の段では Python は使えない（自動実行で使えるのは実行の段だけ）。Python を使う作業を指示書に入れるときは、使えない日の代わり（手で計算する・Read で数える）も前提に書く。
+計画の段では update_dashboard.py と lock_check.py 以外の Python は使えない（自動実行で使えるのは実行の段だけ）。Python を使う作業を指示書に入れるときは、使えない日の代わり（手で計算する・Read で数える）も前提に書く。
 先に `.claude/ai-bunshin-details/daily-sprint.md` を読む（一度読んだら、この会話では読み直さない）。
 
 ## 0. 開くかどうか

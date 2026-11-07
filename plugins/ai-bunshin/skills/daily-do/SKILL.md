@@ -10,7 +10,7 @@ description: 1日スプリントの実行（平日9時の計画に続けて自�
 引数：日付（YYYY-MM-DD、省略時は今日）。
 自動実行（`claude -p`）のときは本人がその場にいない。**質問せずに最後まで進める。**
 Bash は `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/update_dashboard.py" …` だけを使う。tasks.json は Read と Edit で直接直す（別のスクリプトは作らない）。特定のタスクだけ見たいときは、tasks.json を全体で開かず `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/update_dashboard.py" --task T0XX T0YY` で出す（指定のタスクだけを JSON で出す。読むだけで何も書かない。無い ID は知らせて終了コード 1）。直すときは必要なところを Read してから Edit する。ロックの確認のときだけ `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/lock_check.py"` も使ってよい（読むだけ）。
-自動実行の実行の段では、囲いの点検が全部通った日だけ、`python3` を Bash で使える。使う前に `python3 -c "print(1)"` を1回ためして、使えるかを決める。断られたら別の書き方で通さず、その日は今までどおり（Python を使わない）にする。使える日も、囲いの守る先（本人設定・`03_インプット/`・`.claude/`・プラグイン・`scripts/`・`.git/` など）には書けず、通信もできない。会話の中ではこれまでどおり。
+自動実行の実行の段では、囲いの設定が作れて、点検（カナリア）が全部止まった日だけ、`python3` を Bash で使える。使う前に `python3 -c "print(1)"` を1回ためして、使えるかを決める。断られたら別の書き方で通さず、その日は今までどおり（update_dashboard.py と lock_check.py 以外の Python を使わない）にする。使える日も、囲いの守る先（本人設定・`03_インプット/`・`.claude/`・プラグイン・`scripts/`・`.git/` など）には書けず、カレンダーの取得先以外へは通信もできない。会話の中ではこれまでどおり。
 
 ## 0. 準備
 
