@@ -158,8 +158,20 @@ def explicit_types_put_one_line_right_after_the_first_line():
 @case
 def warning_lines_stay_in_front_in_the_same_order():
     # 初回の起動では「共通ルールが更新されました」が先頭に付く。型を変えても、この行が先頭のまま・同じ文
-    absent = session_text(make_home()).splitlines()
-    simple = session_text(make_home({"type": "simple"})).splitlines()
+    # 警告が必ず出る状態を、テストの中で作る：本人のフォルダに古い共通ルールの写しを置く（本体が変わるので「更新されました」が出る）。
+    # 警告の有無を、手元の rules/ の中身や写しの有無の運に任せない。rules/commander.md が無い写しでは、土台が作れないと分かる文で落ちる
+    rules_md = os.path.join(os.path.dirname(SCRIPT), "..", "rules", "commander.md")
+    assert os.path.isfile(rules_md), f"土台を作れない：プラグインの写しに rules/commander.md が無い（{rules_md}）。プラグイン全体を写して試す"
+
+    def stale_home(display="__absent__"):
+        home = make_home(display)
+        os.makedirs(os.path.join(home, ".claude", "rules"))
+        with open(os.path.join(home, ".claude", "rules", "ai-bunshin-common.md"), "w", encoding="utf-8") as f:
+            f.write("# 古い共通ルール（テスト用）\n")
+        return home
+
+    absent = session_text(stale_home()).splitlines()
+    simple = session_text(stale_home({"type": "simple"})).splitlines()
     k = next(i for i, l in enumerate(absent) if "タスク状況" in l)
     assert k >= 1 and "共通ルールが更新されました" in absent[0], f"土台：警告が先頭にない {absent[:2]}"
     eq(simple[:k + 1], absent[:k + 1], "警告の行とまとめの先頭行（同じ文・同じ順）")

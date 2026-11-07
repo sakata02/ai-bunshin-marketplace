@@ -830,6 +830,27 @@ def t36_line_order_same_as_update_dashboard_startup():
         assert (not disp["overrides"]) or start[i - 1].startswith("個別の設定（型より優先）"), "個別の設定の行が「[見せ方：…]」のすぐ前にない"
 
 
+@case
+def t37_show_without_effective_settings_still_ends_with_the_full_line():
+    # 効く個別の設定も type も無いとき（値が範囲外・overrides が空など）、show は聞かれたときの表示なので最後に必ず「[見せ方：…]」を出す。
+    # 起動時のまとめ（update_dashboard.py）は、同じ設定のとき何も出さない（行を出すのは、型か効く個別の設定があるときだけ）
+    for disp in ({"overrides": {"terms": "bogus"}}, {"overrides": {"requests_max": 99}}, {"overrides": {}}):
+        cfg = {"owner": "テスト", "owner_call": "テストさん", "ai_name": "テストAI", "departments": ["総務"], "display": disp}
+        root = make_owner(dump(cfg))
+        rc, out, err = run(root, "show")
+        assert rc == 0, err
+        lines = out.rstrip("\n").split("\n")
+        assert lines[-1] == FULL_LINE, f"{disp}：show の最後の行が「{FULL_LINE}」でない\n{out}"
+        assert not any(l.startswith("個別の設定（型より優先）") for l in lines), f"{disp}：効かない値を効く個別の設定の行に出している\n{out}"
+        with open(os.path.join(root, "00_タスク管理", "data", "tasks.json"), "w", encoding="utf-8") as f:
+            json.dump({"project": {"name": "テストAI", "daily_capacity_default": 8.0, "holidays": []}, "daily_sprints": [],
+                       "sprints": [], "tasks": []}, f, ensure_ascii=False)
+        r = subprocess.run([sys.executable, os.path.join(SCRIPTS, "update_dashboard.py")], capture_output=True, text=True,
+                           encoding="utf-8", env=env_for(root), cwd=root, timeout=120, input="")
+        assert r.returncode == 0, r.stderr[:300]
+        assert "[見せ方：" not in r.stdout and "個別の設定（型より優先）" not in r.stdout, f"{disp}：起動時のまとめに見せ方の行が出ている\n{r.stdout[:600]}"
+
+
 shutil.rmtree(BASE, ignore_errors=True)
 print(f"\n失敗 {fails} 件")
 sys.exit(1 if fails else 0)

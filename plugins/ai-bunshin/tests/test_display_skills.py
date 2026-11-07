@@ -1,8 +1,9 @@
 """使い方の型（display。T182）が、スキル・詳しい手順・スクリプトの間で守られているかのテスト（組⑦b）。
 返事は AI が書く文なのでテストで固定できない（K5）。確かめるのは、スキルの「出力の印」の中の文と、2つのスクリプトの文面まで。
 - (1) skills/*/SKILL.md の `<!-- 出力 -->` と `<!-- /出力 -->` が、開いて閉じる対になっている（入れ子・閉じ忘れ・閉じ過ぎがない）
-- (2) 印の中の「シンプルのとき」の文に、シンプルで出さない言葉（部下・pt・Try・ベロシティ・スプリント・PDCA・KPT）が0件。
-      言葉の一覧は rules/details/display.md の terms の行から読む（ここに別の一覧を持たない。読めなければ落とす）
+- (2) 印の中の「シンプルのとき」の文に、シンプルで出さない言葉（部下・pt・Try・ベロシティ・スプリント・PDCA・KPT と、スプリントの番号 S###）が0件。
+      言葉の一覧は rules/details/display.md の terms の行から読む（ここに別の一覧を持たない。読めなければ落とす）。
+      さらに、出力の印のブロックごとに「シンプルのとき」の行が1つ以上ある（無いブロックは、名指しの例外だけ。理由はこのファイルに書く）
 - (3) 印の中に、手順の言葉（登録する・完了にする・do_log・追記してよいか）が無い（出す文だけを印で囲む。手順は印の外に置く）
 - (4) skills と rules/details に、設計の決定の番号（K1〜K19・U01〜U16）が出ない（本人にも AI にも意味のない番号を本文に残さない）
 - (5) K3：set_display.py と update_dashboard.py の「[見せ方：…]」の文（シンプル・フル・壊れたとき）と、
@@ -35,6 +36,23 @@ PROCEDURE_WORDS = ("登録する", "完了にする", "do_log", "追記してよ
 PROCEDURE_EXCEPTIONS = [
     ("daily-do", "do_log・tasks.json の中身は型で変えずに同じに書く",
      "「型で変えない」と言う文で、do_log に書く手順そのものではない（指揮官が確かめた文）"),
+]
+# (2) 例外（名指し）。「シンプルのとき」の文の中で、禁止の言葉を「出さない」と言うために名指ししている句。ここに無いものは落とす
+SIMPLE_WORD_EXCEPTIONS = [
+    ("status", "（S###・いまの段階の括りは付けない）",
+     "報告の形の行に S### を付けないと指示する句で、S### を本人に見せる文ではない"),
+    ("sprint", "S### の番号は付けない",
+     "完了の報告に S### を付けないと指示する句で、S### を本人に見せる文ではない"),
+]
+# (2) 「シンプルのとき」の行が無い印のブロックの例外（名指し）。(スキル名, ブロックの最初の行の書き出し, 理由, 覆っている文にある言葉)
+#     覆っている文＝同じスキルの別のブロックにある「シンプルのとき」の文。その文に言葉が書いてあることも確かめる
+BLOCKS_WITHOUT_SIMPLE_LINE = [
+    ("consult", "**「どう頼めばいい？」「使い方が分からない」**",
+     "1つ目の印の「シンプルのとき」の文が、この印の答えを名指しして言い換えを決めている", "使い方が分からない"),
+    ("dev", "3. **speckit の案件**",
+     "1つ目の印の「シンプルのとき」の文が、speckit の実装の手順を名指しして言い換えを決めている", "speckit の実装の手順"),
+    ("daily-review", "- 自動実行のときは、最後の出力を「3行まとめ」",
+     "自動実行の3行は型で変えない。会話の中で見せる文は、次の印の「見せ方がシンプルのとき」が決めている", "自動実行の3行は型で変えない"),
 ]
 # (4) 決定の番号
 DECISION_NO = re.compile(r"(?<![A-Za-z0-9])(?:K(?:1[0-9]|[1-9])|U(?:0[1-9]|1[0-6]))(?![0-9])")
@@ -114,7 +132,11 @@ def forbidden_words():
     assert m, "display.md の terms の行から「シンプルで出さない言葉」の一覧を読めない"
     words = m.group(1).split("・")
     assert len(words) >= 7 and {"部下", "pt", "Try"} <= set(words), f"読んだ一覧がおかしい：{words}"
-    return words
+    # スプリントの番号（S###）も出さない。同じ行の「スプリントの番号 S### も出さない」から読む（別の一覧を持たない）
+    row = re.search(r"\| `terms` \|[^\n]*", text).group(0)
+    n = re.search(r"スプリントの番号 (S###) も出さない", row)
+    assert n, "display.md の terms の行に「スプリントの番号 S### も出さない」が無い"
+    return words + [n.group(1)]
 
 
 def word_regex(w):
@@ -150,11 +172,49 @@ def t2_simple_sentences_have_no_forbidden_words():
             sent = simple_sentences(lines)
             seen += len(sent)
             for n, line in sent:
+                shown = line
+                for sk, phrase, _why in SIMPLE_WORD_EXCEPTIONS:
+                    if sk == skill_name(p):
+                        shown = shown.replace(phrase, "")
                 for w, rg in regs:
-                    if rg.search(line):
+                    if rg.search(shown):
                         bad.append(f"{rel(p)}:{n} 「{w}」 {line.strip()[:50]}")
+    assert "S###" in words, "禁止の言葉に S### が入っていない"
     assert seen >= 10, f"「シンプルのとき」の文が {seen} 行しか見つからない（読み方が壊れた？）"
     assert not bad, "シンプルの文に出さない言葉がある：\n    " + "\n    ".join(bad)
+
+
+@case
+def t2b_every_mark_block_has_a_simple_line_or_a_named_exception():
+    bad = []
+    used = set()
+    for p in SKILLS:
+        name = skill_name(p)
+        blocks = blocks_of(p)
+        all_simple = [l for _s, ls in blocks for _n, l in simple_sentences(ls)]
+        for start, lines in blocks:
+            if simple_sentences(lines):
+                continue
+            first = next((l.strip() for _n, l in lines if l.strip()), "")
+            hit = [e for e in BLOCKS_WITHOUT_SIMPLE_LINE if e[0] == name and first.startswith(e[1])]
+            if not hit:
+                bad.append(f"{rel(p)}:{start} 「シンプルのとき」の行が無い印のブロック（最初の行：{first[:40]}）")
+                continue
+            used.add(hit[0][:2])
+            assert any(hit[0][3] in l for l in all_simple), f"{name}：例外の理由（{hit[0][2]}）の言葉「{hit[0][3]}」が、同じスキルの「シンプルのとき」の文に無い"
+        if not any(sk == name for sk, *_ in BLOCKS_WITHOUT_SIMPLE_LINE) and not all_simple and blocks:
+            bad.append(f"{rel(p)}：印があるのに「シンプルのとき」の行が1つも無い")
+    assert not bad, "印の中に「シンプルのとき」の行が無い：\n    " + "\n    ".join(bad)
+    unused = [e[:2] for e in BLOCKS_WITHOUT_SIMPLE_LINE if e[:2] not in used]
+    assert not unused, f"使っていない例外がある（消す）：{unused}"
+
+
+@case
+def t2c_simple_word_exceptions_are_still_needed():
+    for sk, phrase, _why in SIMPLE_WORD_EXCEPTIONS:
+        path = os.path.join(PLUGIN, "skills", sk, "SKILL.md")
+        inside = [l for _s, ls in blocks_of(path) for _n, l in simple_sentences(ls)]
+        assert any(phrase in l for l in inside), f"例外の句が {sk} の「シンプルのとき」の文に無い（例外を消す）：{phrase}"
 
 
 # ---------------------------------------------------------------- (3) 印の中に手順の言葉が無い
