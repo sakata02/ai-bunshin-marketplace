@@ -1,6 +1,6 @@
 // category は案件の名前（無い・空・文字でないときは「未分類」）。短い画面は区切りの中をこれで分ける
 export type Row = { id: string; title: string; due: string; mark: string; category: string }
-// 全部のタスクの一覧の1行（担当と状態つき）。完了は分けないので category は使わない
+// 全部のタスクの一覧の1行（担当と状態つき）。完了の行では category は使わない
 export type AllRow = Row & { who: string; done: boolean }
 // 右のパネルの表示：ふだんの短い画面（home）か、全部のタスクの一覧（all）。page は 0 から
 export type View = { mode: 'home' | 'all' | 'gantt'; page: number }
