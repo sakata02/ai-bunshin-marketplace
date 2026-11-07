@@ -40,6 +40,7 @@
 |---|---|
 | 「フルにして」「ずっとくわしく見せて」 | `type` を `full` に。overrides は残す |
 | 「シンプルに戻して」「かんたんにして」 | `type` を `simple` に。overrides は残す |
+| 「シンプルにして」 | `type` を `simple` に。overrides は残す |
 | 「pt も見せて」「振り返りは表で見たい」など1つだけ | その項目だけ `overrides` に入れる（例 `{"terms": "full"}`・`{"review_view": "full"}`） |
 | 「個別の設定を全部戻して」 | `overrides` を空にする（確かめてから） |
 | 「今の設定を見せて」 | 型と overrides を表で見せる |
