@@ -290,6 +290,14 @@ def build_settings(home, plugin_roots, config_path, user_home, calendar_url, pat
     }
 
 
+def same_file(a, b):
+    """同じフォルダか（大文字小文字・リンクの違いを越えて）。どちらかが無い・調べられないときは False"""
+    try:
+        return os.path.samefile(a, b)
+    except OSError:
+        return False
+
+
 def print_add_dirs(config, home, user_home=None):
     """daily_cycle.sh の --add-dir に渡す先。読めない・無いときは何も出さない（前の daily_cycle.sh と同じ）。
     広すぎる先（/・ホーム・ホームの祖先・本人のフォルダの祖先。T193 K4）は出さず、標準エラーに1行（パスは出さない）。
@@ -300,12 +308,18 @@ def print_add_dirs(config, home, user_home=None):
     except Exception:
         return 0
     wide_of = [canon(home), canon(user_home or os.path.expanduser("~"))]
+    wide_all = []   # ホーム・本人のフォルダと、その祖先（/ を除く）。大文字小文字だけ違う綴りは文字では一致しないので、samefile でも照らす（T193 K4）
+    for w in wide_of:
+        while w and w != "/":
+            if w not in wide_all:
+                wide_all.append(w)
+            w = os.path.dirname(w)
     dropped = 0
     for d in dirs:
         if any(ch in str(d) for ch in "\n\r\x00"):   # 1行に1つで渡すので、改行を含む先は渡さない
             continue
         cd = canon(d)
-        if cd == "/" or any(is_inside(w, cd) for w in wide_of):   # その先が、本人のフォルダかホームを含む（＝同じか祖先）
+        if cd == "/" or any(is_inside(w, cd) for w in wide_of) or any(same_file(d, w) for w in wide_all):   # その先が、本人のフォルダかホームを含む（＝同じか祖先）
             dropped += 1
             continue
         sys.stdout.write(str(d) + "\n")

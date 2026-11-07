@@ -64,7 +64,10 @@ args = sys.argv[1:]
 prompt = args[args.index("-p") + 1] if "-p" in args else ""
 if "囲いの点検" not in prompt:
     with open(os.path.join(os.environ["FAKE_RECORD"], "calls.jsonl"), "a", encoding="utf-8") as f:
-        f.write(json.dumps({"args": args}, ensure_ascii=False) + "\\n")
+        f.write(json.dumps({"args": args, "auto_memory_off": os.environ.get("CLAUDE_CODE_DISABLE_AUTO_MEMORY")}, ensure_ascii=False) + "\\n")
+else:
+    with open(os.path.join(os.environ["FAKE_RECORD"], "canary_env.jsonl"), "a", encoding="utf-8") as f:
+        f.write(json.dumps({"auto_memory_off": os.environ.get("CLAUDE_CODE_DISABLE_AUTO_MEMORY")}) + "\\n")
 print("done")
 '''
 
@@ -104,7 +107,7 @@ def make(name, cfg=None, repo=None, plugin_name="plugin", link=False, owner="own
 
 
 def run(c, phase, stub_phase="plan", timeout=120):
-    env = {k: v for k, v in os.environ.items() if k not in ("AI_BUNSHIN_AUTO_RUN", "CLAUDE_PROJECT_DIR", "AI_BUNSHIN_CALENDAR_URL")}
+    env = {k: v for k, v in os.environ.items() if k not in ("AI_BUNSHIN_AUTO_RUN", "CLAUDE_PROJECT_DIR", "AI_BUNSHIN_CALENDAR_URL", "CLAUDE_CODE_DISABLE_AUTO_MEMORY")}
     env.update({"HOME": FAKE_HOME, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull, "AI_BUNSHIN_HOME": c["home"],
                 "PATH": c["bindir"] + os.pathsep + env.get("PATH", ""), "FAKE_RECORD": c["rec"], "STUB_PHASE": stub_phase})
     return subprocess.run(["/bin/zsh", os.path.join(c["plugin"], "scripts", "auto", "daily_cycle.sh"), phase],
@@ -194,6 +197,12 @@ def t3_print_add_dirs_drops_too_wide_places():
     for w in wide:
         rc, out, err = go([w, repo])
         assert out.splitlines() == [repo] and err.count("\n") == 1, (w, out, err)
+    # 大文字小文字だけ違う綴り（macOS の既定は区別しない）でも、すり抜けない（文字の比較だけでは一致しない。samefile でも照らす）
+    case_variants = [os.path.join(BASE, "t3", "UH"), os.path.join(uh, "WORK"), os.path.join(BASE, "t3", "UH", "Work")]
+    if all(os.path.isdir(v) for v in case_variants):   # 大文字小文字を区別するボリュームでは、実在しないので対象外
+        for v in case_variants:
+            rc, out, err = go([v, repo])
+            assert out.splitlines() == [repo] and err.count("\n") == 1, (v, out, err)
     # ふつうの外のリポジトリだけ：今までどおり（標準エラーは空）
     rc, out, err = go([repo])
     assert rc == 0 and out.splitlines() == [repo] and err == "", (rc, out, err)
@@ -306,6 +315,10 @@ def t5_plan_context_has_read_write_range_line():
     assert not any("読めませんでした" in x for x in lines), [x for x in lines if "読めませんでした" in x]
     use = [x for x in lines if "使える道具" in x]
     assert use and not any(" Read," in x or " Write," in x or "Read," in x for x in use), use
+    # 一覧に Glob・Grep が無いことと、1行が「Glob・Grep は使えない」と言うことは組（どちらかだけ変わったら落ちる）
+    assert not any("Glob" in x or "Grep" in x for x in use) and "Glob・Grep は使えない" in j, (use, j)
+    assert "自動記憶（~/.claude の下）は、自動実行では止めている" in j, j
+    assert "ls・cat・find・grep など読むだけの命令は、下の範囲の中だけ動く" in lines[i], lines[i]
 
 
 @case
@@ -323,6 +336,22 @@ def t6_log_does_not_copy_tool_output():
     assert secret not in text and "/Users/x" not in text and "h.example" not in text, text[-600:]
     assert "広すぎる開発の置き場所（/・ホーム" in log_of(c) and "規則に使えない文字があります（読み取りの規則を作れなかった先があります）" in log_of(c), log_of(c)
     assert not [i for i in tool_items(calls(c)[0]) if i.startswith("Read(")], tool_items(calls(c)[0])
+
+
+@case
+def t7_auto_memory_is_off_only_for_run_claude():
+    """自動記憶を止める：計画・続けた実行・実行・振り返りの起動に CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 が付く。囲いの点検の claude には付かない"""
+    c = make("t7")
+    run(c, "plan")
+    c2 = make("t7do")
+    run(c2, "do", stub_phase="do")
+    c3 = make("t7rev")
+    run(c3, "review")
+    got = calls(c) + calls(c2) + calls(c3)
+    assert len(got) == 4 and all(x["auto_memory_off"] == "1" for x in got), [x["auto_memory_off"] for x in got]
+    p = os.path.join(c2["rec"], "canary_env.jsonl")
+    assert os.path.exists(p), "点検の claude が呼ばれていない"
+    assert all(json.loads(ln)["auto_memory_off"] is None for ln in open(p, encoding="utf-8").read().splitlines()), "点検の claude に付いている"
 
 
 def main():

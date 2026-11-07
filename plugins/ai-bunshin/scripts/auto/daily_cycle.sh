@@ -487,7 +487,9 @@ sys.stdout.buffer.write(((t[0] if t else "")[:120]).encode("utf-8"))' 2>/dev/nul
   # 受けたときは on_stop が run_limited を止めて終わるので、ここに戻るのは run_limited が自分で終わったときだけ（STATUS はその終了コード）
   BG_BEFORE=$!
   LAUNCHING=1
-  python3 "$LIMITED" --minutes "$LIMIT_MIN" --stdout "$out" -- claude -p "$skill" \
+  # Claude Code の自動記憶（~/.claude/projects/…/memory/）を、この起動だけ止める（T193。公式：CLAUDE_CODE_DISABLE_AUTO_MEMORY=1）。
+  # 自動実行で読んだ資料・予定の中の指示が、記憶に書き込まれて次の対話に残るのを防ぐ。囲いの点検の claude には付けない（点検は書き込みをしない）
+  CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 python3 "$LIMITED" --minutes "$LIMIT_MIN" --stdout "$out" -- claude -p "$skill" \
     --permission-mode acceptEdits \
     --model opus \
     --max-turns "$MAX_TURNS" \

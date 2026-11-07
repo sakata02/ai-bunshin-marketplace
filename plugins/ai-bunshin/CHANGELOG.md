@@ -2,11 +2,12 @@
 
 ## 次の版（未公開）
 
-- 自動実行（`daily_cycle.sh` の `claude -p`）で読める・書ける場所を絞った（T193。安全の確かめ T099 の H1）：許可の一覧から、場所の指定なしの `Read`・`Write`・`Edit`・`Glob`・`Grep` を外した。書ける場所は `--permission-mode acceptEdits` が決める＝本人のフォルダと `--add-dir`（`config.json` の `dev.projects`）の中だけで、外は自動実行では断られる（`.zshrc`・`.gitconfig`・`.claude/` などの保護された場所も）。読める場所も同じ範囲と、プラグインの中（読むだけ。`sandbox_settings.py --print-read-rules` が作る `Read(//…/**)`。リンク経由で呼ばれたときは両方の名前）。3つの段（計画・実行・振り返り）とも同じ
+- 自動実行（`daily_cycle.sh` の `claude -p`）で読める・書ける場所を絞った（T193。安全の確かめ T099 の H1）：許可の一覧から、場所の指定なしの `Read`・`Write`・`Edit`・`Glob`・`Grep` を外した。書ける場所は `--permission-mode acceptEdits` が決める＝本人のフォルダと `--add-dir`（`config.json` の `dev.projects`）の中だけで、外は自動実行では断られる（`.zshrc`・`.gitconfig`・`.claude/` などの保護された場所も。自動記憶は別に止めた＝下）。読める場所も同じ範囲と、プラグインの中（読むだけ。`sandbox_settings.py --print-read-rules` が作る `Read(//…/**)`。リンク経由で呼ばれたときは両方の名前）。長い出力の退避（tool-results）は、規則を足さなくても読める。3つの段（計画・実行・振り返り）とも同じ
   - **`Glob`・`Grep` のツールは自動実行では使えなくなる**（Claude Code 2.1.319 で確認：許可の一覧に無いとツール自体が出ない）。探すだけの `find`・`grep`・`ls` は、Bash の読むだけの命令として同じ範囲の中だけで動く
   - `--add-dir` が広すぎる先（`/`・ホーム・ホームの祖先・本人のフォルダの祖先）は外し、ログに1行（パスなし）。本人が `config.json` に書いたホームの中の先（`~/.ssh` など）は外さない（`config.json` は AI が書けない＝本人の意思）
+  - Claude Code の自動記憶（`~/.claude/projects/…/memory/`）は、自動実行（`run_claude` の `claude -p` の起動だけ。囲いの点検の `claude` は触らない）で止める（`CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`。公式の環境変数）。止めないと、自動実行で書いた記憶が次の対話に読み込まれる（E7 で、自動実行から書けることを確認）
   - 朝の計画の材料（`--plan-context`）の道具の節に、ファイルを読む・書く・直すの範囲の1行を足した（上の一覧に `Read` などが無くなったことで「使えない」と読まれないように）
-  - 変えていないもの：囲いの点検の `claude` の許可、`Bash(python3:*)` の囲い（T119）、README の注意書き、見張り（`ng_guard`）、`settings.json`（外れない守りへの追加はしない）。Claude Code の自動記憶（`~/.claude/projects/…/memory/`）には、今のところ自動実行から書ける
+  - 変えていないもの：囲いの点検の `claude` の許可、`Bash(python3:*)` の囲い（T119）、README の注意書き、見張り（`ng_guard`）、`settings.json`（外れない守りへの追加はしない）。
   - テスト：新しく `tests/test_auto_paths.py`（最終の許可に素の `Read` などが無い・`--add-dir` の絞り込み・読み取りの規則・計画の材料の1行）
 
 ## 1.0.0-beta.7 — 2026-11-07（使い方の型（シンプル／フル）・合格のあとの再確認・右のパネルにガント・カテゴリ・試し中の Try・自動実行の囲い）
