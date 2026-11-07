@@ -1075,7 +1075,7 @@ def make_cycle(name, claude_body, cfg=None, guard=None):
     os.makedirs(os.path.join(plugin, "scripts", "auto"))
     shutil.copy(CYCLE, os.path.join(plugin, "scripts", "auto", "daily_cycle.sh"))
     shutil.copy(LIMITED, os.path.join(plugin, "scripts", "auto", "run_limited.py"))
-    for f in ("lock_check.py", "watch_check.py", "ng_guard.py", "ng_guard_legacy.py"):
+    for f in ("lock_check.py", "watch_check.py", "ng_guard.py", "ng_guard_legacy.py", "sandbox_settings.py", "protected_paths.json"):
         shutil.copy(os.path.join(SCRIPTS, f), os.path.join(plugin, "scripts", f))
     if guard is not None:
         open(os.path.join(plugin, "scripts", "ng_guard.py"), "w").write(guard)

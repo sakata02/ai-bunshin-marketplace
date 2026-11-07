@@ -380,6 +380,39 @@ def real_values_match_zsh_evaluation():
         assert ph["DENY"]["val"] == z_deny, f"{mode} の DENY が zsh と違う:\n  読んだ {ph['DENY']['val']}\n  zsh   {z_deny}"
 
 
+@case
+def sandbox_python_line_is_in_the_section_with_real_line_number():
+    """T119 G5b（S18）：実行の段の Python の1行が出る。行番号は実物の SANDBOX_TOOLS=",Bash(python3:*)" の行。上の使える道具の一覧は変わらない"""
+    sec = section(plan_context())
+    l = find(sec, "- 実行の段は、囲いの設定が作れて点検（カナリア）が全部止まった日だけ `Bash(python3:*)` も使える")
+    for want in ("囲いの守る先（sandbox_settings.py の denyWrite）には書けず、カレンダーの取得先以外へは通信もできない", "囲いが作れない日や点検が通らない日は上の道具のまま", "計画・振り返りの段では使えない"):
+        assert want in l, f"{want} が無い: {l}"
+    cyc = real_cycle_lines()
+    want_no = [n for n, x in enumerate(cyc, 1) if x.strip() == 'SANDBOX_TOOLS=",Bash(python3:*)"']
+    assert len(want_no) == 1, f"実物に python3 の行が {len(want_no)} 本: {want_no}"
+    assert f"（daily_cycle.sh:{want_no[0]}）" in l, f"行番号が実物の行（{want_no[0]}）と合わない: {l}"
+    # 上の一覧（定数から読んだもの）に python3 を混ぜない
+    for key in ("- 計画　使える道具", "- 実行　使える道具"):
+        assert "python3:*" not in find(sec, key), f"使える道具の一覧に Bash(python3:*) が混ざった: {find(sec, key)}"
+
+
+@case
+def sandbox_python_line_without_cycle_line_does_not_crash():
+    """daily_cycle.sh に python3 の行が無い・読めない形でも、--plan-context は落ちず、行は行番号なしで出る"""
+    def gone(lines):
+        return [("# (なくした)" if l.strip() == 'SANDBOX_TOOLS=",Bash(python3:*)"' else l) for l in lines]
+
+    def odd(lines):
+        return [('SANDBOX_TOOLS=$(printf ",Bash(%s)" "python3:*")' if l.strip() == 'SANDBOX_TOOLS=",Bash(python3:*)"' else l) for l in lines]
+    for name, edit in (("t119g5b_gone", gone), ("t119g5b_odd", odd)):
+        root = make_plugin(name, edit)
+        out = plan_context(root)
+        assert out.splitlines()[0].startswith(("OPEN", "SKIP")), f"[{name}] 1行目: {out.splitlines()[0]}"
+        l = find(section(out), "- 実行の段は、囲いの設定が作れて点検（カナリア）が全部止まった日だけ `Bash(python3:*)` も使える")
+        assert "daily_cycle.sh" not in l, f"[{name}] 行番号が出ている: {l}"
+        assert "使える。その日も、囲いの守る先" in l, f"[{name}] 行番号なしの文になっていない: {l}"
+
+
 run_all()
 print(f"失敗 {fails} 件（{len(names)} 項目）")
 sys.exit(1 if fails else 0)

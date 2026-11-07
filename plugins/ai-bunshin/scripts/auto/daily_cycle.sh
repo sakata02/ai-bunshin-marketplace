@@ -19,21 +19,14 @@ PLUGIN_ROOT="${0:A:h:h:h}"
 DASH="$PLUGIN_ROOT/scripts/update_dashboard.py"
 WATCH="$PLUGIN_ROOT/scripts/watch_check.py"          # 時間の上限・手数の上限・見張りの点検・「上限で止めた」印（T095・T066）
 LIMITED="$PLUGIN_ROOT/scripts/auto/run_limited.py"   # claude を時間の上限つきで動かす（T095）
-# 開発の置き場所のうち、本人のフォルダの外にあるリポジトリ（自動実行でも編集できるように --add-dir で渡す）
-ADD_DIRS=(${(f)"$(python3 - "$ROOT" <<'PY'
-import json, os, sys
-from pathlib import Path
-root = Path(sys.argv[1])
-try:
-    cfg = json.load(open(root / "設定" / "config.json", encoding="utf-8-sig"))
-except Exception:
-    sys.exit(0)
-for p in (cfg.get("dev") or {}).get("projects", []):
-    d = Path(os.path.expanduser(p.get("path", "")))
-    if p.get("path") and d.is_absolute() and root not in [d, *d.parents] and d.exists():
-        print(d)
-PY
-)"})
+SANDBOX="$PLUGIN_ROOT/scripts/sandbox_settings.py"  # 実行の段の囲いの設定を作る（T119）。-I＝本人のフォルダの中のファイルを読み込まない
+CANARY="$PLUGIN_ROOT/scripts/sandbox_canary.py"     # 囲いが効いているかを確かめる点検（T119 G4a）。-I で動かす
+PLUGIN_ROOT_RAW="${0:a:h:h:h}"                       # 呼ばれた名前のままのプラグインの場所（installPath）。PLUGIN_ROOT はリンクを解いた実体
+# カレンダーの URL は、この実行の環境変数に載せない（claude の中から読めないように。T119 S14）。囲いの設定を作る1行にだけ付けて渡す
+unset AI_BUNSHIN_CALENDAR_URL
+# 開発の置き場所のうち、本人のフォルダの外にあるリポジトリ（自動実行でも編集できるように --add-dir で渡す）。
+# 囲いの守る先（sandbox_settings.py）と同じ判定にそろえるため、同じ道具（--print-add-dirs）で出す（T119 W7）
+ADD_DIRS=(${(f)"$(python3 -I "$SANDBOX" --home "$ROOT" --print-add-dirs 2>/dev/null)"})
 ADD_DIR_ARGS=()
 for d in ${(u)ADD_DIRS}; do ADD_DIR_ARGS+=(--add-dir "$d"); done
 AI_NAME=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1], encoding="utf-8-sig")).get("ai_name","AI"))' "$ROOT/設定/config.json" 2>/dev/null || echo AI)
@@ -112,6 +105,7 @@ LIMITED_PID=""   # 起動中の run_limited の PID（背景で動かして wait
 LAUNCHING=0      # 1＝起動の直前から PID を控えるまで（この間に届いたときは $! を使う）
 BG_BEFORE=""     # 起動の直前の $!（まだ背景に出していない・前の run_limited の PID のままのときは、使わない）
 CUR_OUT=""       # 起動中の run_limited の出力の一時ファイル（名前を決めたら、ファイルを作る前に控える）
+CUR_TMPS=()      # 囲いの点検が作る一時ファイル（設定の写し・結果。名前を決めたら、作る前に控える）
 on_stop() {
   local name=$1 num=$2 pid=$LIMITED_PID stopped=0
   trap '' TERM HUP INT   # 片づけの最中に重ねて届いても、途中でやめない
@@ -126,6 +120,8 @@ on_stop() {
     stopped=1
   fi
   [ -n "$CUR_OUT" ] && rm -f "$CUR_OUT"
+  local f
+  for f in "${CUR_TMPS[@]}"; do rm -f "$f"; done   # 囲いの点検の一時ファイル（設定の写し・結果）
   # ログの文は実際の動きに合わせる：run_limited が動いていたとき（claude を起動したあと）だけ「claude を止め」と書く
   if [ "$stopped" = 1 ]; then
     log "シグナル（$name）を受けて止めました。claude を止め、ロックと一時ファイルを片づけました"
@@ -185,8 +181,10 @@ case "$PHASE:$HEAD" in
 esac
 
 # 使える道具を絞る（送信・削除・設定やスクリプトの変更はできない）
-TOOLS="Read,Write,Edit,Glob,Grep,Agent,SendMessage,Skill,Bash(python3 *update_dashboard.py*),Bash(python3 *lock_check.py*),Bash(python3 $DASH:*),Bash(python3 \"$DASH\":*)"
-DENY="Bash(rm:*),Bash(curl:*),Edit(.claude/settings.json),Edit(scripts/**),Edit(/$PLUGIN_ROOT/**),Edit(設定/**),Edit(CLAUDE.md),Edit(.claude/**)"
+# Bash は update_dashboard.py・lock_check.py の完全なパス（ワイルドカードなし。T062）。スキルは "${CLAUDE_PLUGIN_ROOT}/scripts/…" を引用符つきで呼ぶので、引用符なし・ありの両方
+# 実行の段で囲いが作れたときだけ足す Python（SANDBOX_TOOLS）と、リンク経由の同じ道具の許可（LINK_TOOLS）は、run_claude の中で足す（ここには書かない）
+TOOLS="Read,Write,Edit,Glob,Grep,Agent,SendMessage,Skill,Bash(python3 $DASH:*),Bash(python3 \"$DASH\":*),Bash(python3 $PLUGIN_ROOT/scripts/lock_check.py:*),Bash(python3 \"$PLUGIN_ROOT/scripts/lock_check.py\":*)"
+DENY="Bash(rm:*),Bash(curl:*),Edit(.claude/settings.json),Edit(scripts/**),Edit(/$PLUGIN_ROOT/**),Edit(設定/**),Edit(CLAUDE.md),Edit(.claude/**),Edit(CLAUDE.local.md)"
 if [ "$PHASE" = "do" ]; then
   TOOLS="$TOOLS,WebSearch,WebFetch"   # 実行では調査のためにネットを読むことだけ許可
 else
@@ -256,6 +254,132 @@ backup_commit() {
   return 0
 }
 
+# 囲いの設定を作る道具に渡すカレンダーの URL（通信の許可の host だけに使う）。config に calendar（ics）があり、Mac で、キーチェーンから取れたときだけ標準出力に出す。
+# 取れない・つないでいないときは何も出さない。取り方は calendar_today.py と同じ（キーチェーンの名前・空白の取り除き）。エラーも出さない（URL・理由をログに残さない）
+calendar_url_for_sandbox() {
+  python3 -I - "$PLUGIN_ROOT/scripts" "$ROOT" 2>/dev/null <<'PY'
+import json, sys
+try:
+    sys.path.insert(0, sys.argv[1])
+    cfg = json.load(open(sys.argv[2] + "/設定/config.json", encoding="utf-8-sig"))
+    cal = cfg.get("calendar")
+    if isinstance(cal, dict) and cal.get("type") == "ics" and not cal.get("ics_file"):
+        import calendar_today
+        if calendar_today._platform() == "darwin":
+            sys.stdout.write(calendar_today.keychain_secret(cal.get("keychain", "ai-bunshin-calendar")))
+except BaseException:
+    pass
+PY
+}
+
+# 囲いのカナリア（T119 G4a・G4c。決定 S05・S06・S15・S16・S20〜S23）：Python を許す前に、囲いが本当に効いているかを1回確かめる。
+# 囲いは claude の中の Bash に掛かるもので、外から同じ囲いは作れない。そこで本番と同じ --settings と、点検の道具（sandbox_canary.py）だけを許す --allowedTools で、
+# 短い claude -p を1回動かし、その中で点検の道具を動かす。結果は本人のフォルダの tasks.json と同じフォルダに JSON で残る（点検の道具が書く）。
+# 点検の claude が結果を偽造・左右できないようにする作り（G4c）：
+#  - 点検の claude は --permission-mode default。書く・調べる・人を呼ぶ道具（Write・Edit・NotebookEdit・Agent・Task・WebFetch・WebSearch）を止め、使えるのは点検の道具だけ（S20①）
+#  - 鍵はここで毎回ランダムに作り、点検の claude を起動する1行の環境変数 AI_BUNSHIN_CANARY_KEY にだけ渡す。引数・プロンプト・ログには出さない。
+#    結果の印（HMAC）を、囲いの外のここで、同じ鍵（判定の1行の環境変数）で確かめる（S20②）
+#  - 点検の道具は nonce 以外の引数を受けない。設定（--settings と同じ JSON）・確かめ先・結果の書き先・キーチェーンの名前は、ここで囲いの外から
+#    <ユーザーのホーム>/.ai-bunshin/canary/<nonce>.json に置く（囲いの守る先）。置いた中身の sha256 と、write で確かめる数の下限は、ここで持っておき、判定のときに結果と比べる（S20③）
+#  - キーチェーンは、囲いの外で先に項目があるかを確かめ（-w なし）、ある名前だけを点検に渡す（S22）
+# 通った・確かめられなかった・結果が無い・印が違う・claude が失敗・時間切れ・道具が無い、のどれでも戻り値 1（呼ぶ側は Python を許さず、今の許可に退く。通知は呼ぶ側で1行。S20④）。
+# 理由は CANARY_WHY（項目名と状態だけ。パス・URL・鍵を入れない）。run_claude と同じく、背景で動かして wait する（シグナルを受けたら on_stop が止める）
+sandbox_canary() {
+  local sjson="$1" nonce="$RUN_ID.canary" sec="${AI_BUNSHIN_CANARY_SEC:-180}" min cstatus jrc cprompt key prep psha pmin
+  local cres="$ROOT/00_タスク管理/data/.sandbox_canary.$$.json" cout="$LOG_DIR/.out.canary.$$"
+  local ccfg="$HOME/.ai-bunshin/canary/$nonce.json"   # sandbox_canary.py の config_path と同じ場所
+  CANARY_WHY=""
+  case "$sec" in (''|*[!0-9]*|0) sec=180 ;; esac
+  min=$((sec / 60.0))
+  if [ ! -f "$CANARY" ]; then CANARY_WHY="点検の道具が無い"; return 1; fi
+  # S25：本人のフォルダ・ユーザーのホームの設定（settings.json・settings.local.json）の permissions.allow に Bash（や mcp）の許可があると、点検の claude が鍵を読んで偽の結果を作れる。
+  # 止めずに点検は続け、ログに1行だけ出す（許可の中身は出さない。読めない・壊れた JSON でも止めない）
+  if python3 -I - "$PLUGIN_ROOT/scripts" "$ROOT/.claude/settings.json" "$ROOT/.claude/settings.local.json" "$HOME/.claude/settings.json" 2>/dev/null <<'PY'
+import sys
+found = False
+try:
+    sys.path.insert(0, sys.argv[1])
+    import sandbox_canary as C
+    found = C.settings_allow_bash(sys.argv[2:])
+except BaseException:
+    pass
+sys.exit(0 if found else 1)
+PY
+  then
+    log "囲いの点検：設定に Bash の許可があるため、点検の結果の偽造は防げません（README の限界）"
+  fi
+  # 名前の付け替えの点検に使う目印フォルダ。守る先は中の guard だけで、親（.ai-bunshin-canary-dir）は守らない（S23）。囲いの外のここで前もって作る
+  # （無ければ作る。守る先の一覧に guard が入っている。本物の scripts/・.git は付け替えない）
+  if ! mkdir -p "$ROOT/.ai-bunshin-canary-dir/guard" 2>/dev/null; then CANARY_WHY="点検の目印フォルダを作れなかった"; return 1; fi
+  # 一時ファイル（結果・設定のファイル）。名前を決めたら、作る前に控える（CUR_OUT は run_claude の出力ファイル用に空けておく。上書きすると、シグナルのときに残る）
+  CUR_TMPS=("$cres" "$cres.tmp" "$cout" "$ccfg" "$ccfg.tmp")
+  # 鍵（毎回ランダムな64文字の16進）。変数にだけ入れる。export しない・ログに書かない
+  key=$(python3 -I -c 'import secrets,sys; sys.stdout.write(secrets.token_hex(32))' 2>/dev/null)
+  case "$key" in (''|*[!0-9a-f]*) key="" ;; esac
+  if [ ${#key} -ne 64 ]; then CANARY_WHY="点検の鍵を作れなかった"; CUR_TMPS=(); return 1; fi
+  # 設定のファイルを囲いの外で置く。標準出力は3行（設定の中身の sha256・write で確かめる数の下限・置いた場所）。失敗の理由は出さない（パスを出さない）
+  prep=$(python3 -I - "$PLUGIN_ROOT/scripts" "$ROOT" "$nonce" "$cres" "$1" 2>/dev/null <<'PY'
+import sys
+try:
+    sys.path.insert(0, sys.argv[1])
+    import sandbox_canary as C
+    home, nonce, out, sjson = sys.argv[2:6]
+    names = C.existing_keychain_services(home, C.DEFAULT_SECURITY)   # 囲いの中（点検の道具）と同じ security（/usr/bin/security）で確かめる
+    sha, minw, path = C.prepare(home, sjson, nonce, out, names)
+    sys.stdout.write("%s\n%d\n%s\n" % (sha, minw, path))
+except BaseException:
+    sys.exit(1)
+PY
+)
+  psha=$(printf '%s\n' "$prep" | sed -n 1p)
+  pmin=$(printf '%s\n' "$prep" | sed -n 2p)
+  case "$psha" in (''|*[!0-9a-f]*) psha="" ;; esac
+  case "$pmin" in (''|*[!0-9]*|0) pmin="" ;; esac
+  if [ ${#psha} -ne 64 ] || [ -z "$pmin" ]; then
+    CANARY_WHY="点検の設定を置けなかった（守る先が1つも無い場合も含む）"
+    key=""; rm -f "$ccfg" "$ccfg.tmp"; CUR_TMPS=()
+    return 1
+  fi
+  if ! : > "$cout" 2>/dev/null; then
+    CANARY_WHY="点検の一時ファイルを作れなかった"
+    key=""; rm -f "$cout" "$ccfg" "$ccfg.tmp"; CUR_TMPS=()
+    return 1
+  fi
+  rm -f "$cres" "$cres.tmp"
+  cprompt="これは自動実行の囲いの点検です。次の Bash コマンドを、1回だけ、そのままの形で実行してください。ほかのコマンドの実行・ファイルの読み書き・調べものはしないでください。終わったら「完了」とだけ答えてください。
+python3 -I \"$CANARY\" --nonce \"$nonce\""
+  BG_BEFORE=$!   # （囲いの点検の起動。run_claude と同じ控え方。test_long_run_watch の目印が1つに決まるよう、行末に注を付けてある）
+  LAUNCHING=1    # （同上）
+  AI_BUNSHIN_CANARY_KEY="$key" python3 "$LIMITED" --minutes "$min" --stdout "$cout" -- claude -p "$cprompt" \
+    --permission-mode default \
+    --model sonnet \
+    --max-turns 6 \
+    --allowedTools "Bash(python3 -I \"$CANARY\":*),Bash(python3 -I $CANARY:*)" \
+    --disallowedTools "$DENY,Write,Edit,NotebookEdit,Agent,Task,WebFetch,WebSearch" \
+    --settings "$sjson" \
+    "${ADD_DIR_ARGS[@]}" \
+    < /dev/null 2>> "$LOG" &
+  LIMITED_PID=$!
+  LAUNCHING=0    # （同上）
+  wait "$LIMITED_PID"
+  cstatus=$?
+  LIMITED_PID=""
+  if [ $cstatus -eq 124 ]; then
+    CANARY_WHY="時間切れ"
+  elif [ $cstatus -ne 0 ]; then
+    CANARY_WHY="claude が失敗した（終了コード $cstatus）"
+  else
+    CANARY_WHY=$(AI_BUNSHIN_CANARY_KEY="$key" python3 -I "$CANARY" --judge "$cres" --nonce "$nonce" --config-sha256 "$psha" --min-writes "$pmin" 2>/dev/null)
+    jrc=$?
+    [ $jrc -ne 0 ] && [ -z "$CANARY_WHY" ] && CANARY_WHY="判定できなかった"
+    [ $jrc -eq 0 ] && CANARY_WHY=""
+  fi
+  key=""
+  rm -f "$cres" "$cres.tmp" "$cout" "$ccfg" "$ccfg.tmp"
+  CUR_TMPS=()
+  [ -z "$CANARY_WHY" ]
+}
+
 # claude を時間の上限と手数の上限つきで動かす（T095・T066）。結果は RESULT、終了コードは STATUS。
 # 時間の上限（auto.max_minutes。段階を決めたあとに決める）を超えたら、自分の起動した claude のグループだけを止めて exit 124。
 # 手数の上限（auto.max_turns。claude -p --max-turns）は claude 自身が止まる。終了コード 1 で、出力の最後の行が上限の文面（Error: Reached max turns (N)）のときだけ、
@@ -275,6 +399,67 @@ run_claude() {
   CUR_OUT="$out"
   : > "$out" || { log "一時ファイルを作れませんでした"; exit 1; }
   start=$(date '+%Y-%m-%d %H:%M:%S')
+  # 囲い（T119）：Python を許すのは実行（do）の段だけ。計画・振り返りは今のまま。
+  # 囲いの設定を作れたとき（終了コード0）だけ --settings を付けて Bash(python3:*) を許す。作れなければ、どちらも付けず今の許可（完全一致）のまま動かす
+  SANDBOX_ARGS=()
+  SANDBOX_TOOLS=""
+  LINK_TOOLS=""
+  if [ "$PLUGIN_ROOT_RAW" != "$PLUGIN_ROOT" ]; then   # リンク経由で呼ばれた（installPath が実体と違う）ときは、そちらの名前の完全なパスも許す
+    LINK_TOOLS=",Bash(python3 $PLUGIN_ROOT_RAW/scripts/update_dashboard.py:*),Bash(python3 \"$PLUGIN_ROOT_RAW/scripts/update_dashboard.py\":*),Bash(python3 $PLUGIN_ROOT_RAW/scripts/lock_check.py:*),Bash(python3 \"$PLUGIN_ROOT_RAW/scripts/lock_check.py\":*)"
+  fi
+  if [ "$PHASE" = "do" ]; then
+    local cal_url sbx_out sbx_rc sbx_json sbx_why
+    cal_url=$(calendar_url_for_sandbox)   # 取れなければ空。変数にだけ入れ、export しない・ログに書かない
+    local sbx_roots=(--plugin-root "$PLUGIN_ROOT")
+    [ "$PLUGIN_ROOT_RAW" != "$PLUGIN_ROOT" ] && sbx_roots+=(--plugin-root "$PLUGIN_ROOT_RAW")
+    # 標準エラーも一緒に受ける（失敗の理由の1行を使う。成功のときの標準エラーは空）
+    if [ -n "$cal_url" ]; then
+      sbx_out=$(AI_BUNSHIN_CALENDAR_URL="$cal_url" python3 -I "$SANDBOX" --home "$ROOT" "${sbx_roots[@]}" 2>&1 < /dev/null)
+    else
+      sbx_out=$(python3 -I "$SANDBOX" --home "$ROOT" "${sbx_roots[@]}" 2>&1 < /dev/null)
+    fi
+    sbx_rc=$?
+    cal_url=""
+    sbx_json=$(printf '%s\n' "$sbx_out" | tail -n 1)
+    if [ $sbx_rc -eq 0 ] && printf '%s' "$sbx_json" | python3 -I -c 'import json,sys
+d=json.load(sys.stdin)
+sys.exit(0 if isinstance(d, dict) and d.get("sandbox", {}).get("enabled") is True else 1)' 2>/dev/null; then
+      # 囲いの設定は作れた。Python を許す前に、囲いが本当に効いているかを点検する（カナリア）。全部止まった日だけ許す。
+      # 通った・確かめられなかった・時間切れ・点検が動かなかった日は、囲い（--settings）も Python も付けず、今の許可で動かす（囲いなしでの Python はあり得ない。S05・S19）
+      if sandbox_canary "$sbx_json"; then
+        SANDBOX_ARGS=(--settings "$sbx_json")
+        SANDBOX_TOOLS=",Bash(python3:*)"
+        log "囲いの設定を作れたので、点検（カナリア）も全部止まったのを確かめて、Python を許して動かす"
+      else
+        SANDBOX_ARGS=()
+        SANDBOX_TOOLS=""
+        log "囲いの点検（カナリア）が通らなかったので、Python は許さず今の許可で動かす（項目：${CANARY_WHY:-不明}）"
+        case "$CANARY_WHY" in
+          *write=leaked*|*case=leaked*) log "囲いの点検：守る先に、名前が .ai-bunshin-canary- で始まる空のファイルが残っているかもしれません（消さずに残しています。確かめてください）" ;;
+        esac
+        case "$CANARY_WHY" in
+          "時間切れ") log "囲いの点検：時間切れのため、点検用の名前（.ai-bunshin-canary- で始まるもの）が残っているかもしれません。確かめてください" ;;
+        esac
+        case "$CANARY_WHY" in
+          *keychain=error*) log "囲いの点検：キーチェーンに確かめる項目（ai-bunshin-calendar か Claude Code-credentials）が無いか、確かめられなかったため、点検が通りません。Python なしで動いています" ;;
+        esac
+        case "$CANARY_WHY" in
+          *parent_mv=leaked*) log "囲いの点検：点検用の目印フォルダ（.ai-bunshin-canary-dir）の名前を一時的に変えました。名前が .ai-bunshin-canary-dir.moved-… や guard.ai-bunshin-canary-… のフォルダが残っていたら、元の名前に戻してください（本物の scripts/・.git は変えていません）" ;;
+        esac
+        notify "今日は囲いの点検が通らなかったので、Python を使わずに動かしました（ログを見てください）"
+      fi
+    else
+      # 理由は囲いの設定を作る道具の1行。パス・URL らしきものが入っていたら出さない（ログに残さない）
+      sbx_why=$(printf '%s\n' "$sbx_out" | head -n 1 | sed 's/^sandbox_settings: //' | python3 -I -c 'import sys
+t = sys.stdin.buffer.read().decode("utf-8", "replace").splitlines()
+sys.stdout.buffer.write(((t[0] if t else "")[:120]).encode("utf-8"))' 2>/dev/null)   # 文字の数で切る（cut -c は C ロケールでバイトで切るため）
+      [ $sbx_rc -eq 0 ] && sbx_why="囲いの設定の形が正しくありません"
+      if [[ "$sbx_why" == *'://'* || "$sbx_why" == *'/'[^\ ]* || "$sbx_why" == *"$ROOT"* ]]; then sbx_why="理由の文面に場所が含まれるため省略"; fi
+      SANDBOX_ARGS=()
+      SANDBOX_TOOLS=""
+      log "囲いの設定を作れなかったので、Python は許さず今の許可で動かす（理由：${sbx_why:-不明}）"
+    fi
+  fi
   log "claude を起動（時間の上限 ${LIMIT_MIN}分・手数の上限 ${MAX_TURNS}回）"
   # 背景で動かして wait する（前景だと、シグナルを受けても run_limited と claude が残るため）。
   # 受けたときは on_stop が run_limited を止めて終わるので、ここに戻るのは run_limited が自分で終わったときだけ（STATUS はその終了コード）
@@ -284,8 +469,9 @@ run_claude() {
     --permission-mode acceptEdits \
     --model opus \
     --max-turns "$MAX_TURNS" \
-    --allowedTools "$TOOLS" \
+    --allowedTools "$TOOLS$LINK_TOOLS$SANDBOX_TOOLS" \
     --disallowedTools "$DENY" \
+    "${SANDBOX_ARGS[@]}" \
     "${ADD_DIR_ARGS[@]}" \
     < /dev/null 2>> "$LOG" &
   LIMITED_PID=$!

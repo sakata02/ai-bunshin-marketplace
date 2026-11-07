@@ -153,11 +153,13 @@ def task_outside_owner_folder_fails():
 def task_command_matches_auto_run_allowlist():
     """自動実行（daily_cycle.sh の --allowedTools）で許可されている形で、--task が動くこと。"""
     sh = read(CYCLE)
-    pats = re.findall(r"Bash\((python3 [^)]*?update_dashboard\.py[^)]*)\)", sh)
-    assert pats, "daily_cycle.sh に update_dashboard.py の許可が見つからない"
+    # 許可は完全なパス（ワイルドカードなし。T062・T119 W3）。スキルが呼ぶ引用符つきの形（python3 "$DASH" …）が、許可の前方一致（:*）に当たること
+    assert "*update_dashboard.py*" not in sh, "update_dashboard.py の許可にワイルドカードが残っている"
+    pats = re.findall(r'Bash\((python3 \\"\$DASH\\":\*)\)', sh)
+    assert pats, "daily_cycle.sh に update_dashboard.py の完全一致の許可（引用符つき）が見つからない"
     cmd = f'python3 "{DASH}" --task T001 T002'
-    star = [p for p in pats if p.startswith("python3 *update_dashboard.py*")]
-    assert star and fnmatch.fnmatchcase(cmd, star[0]), (pats, cmd)
+    prefix = pats[0].replace('\\"', '"').replace("$DASH", DASH)[:-2]   # 末尾の :* を前方一致として扱う
+    assert cmd.startswith(prefix + " ") or cmd == prefix, (pats, cmd)
     # 許可のコマンドそのままの形でも動く
     root = make_owner("f")
     env = dict(os.environ, AI_BUNSHIN_HOME=root, HOME=os.path.join(BASE, "home"))

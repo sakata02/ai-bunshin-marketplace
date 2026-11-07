@@ -157,6 +157,76 @@ def load_config(path):
     return cfg, None
 
 
+# ---------- 使い方の型（display。T182①）----------
+# 型は「見せ方」だけを変える（U01）。安全の仕組みや中の動きは読まない・変えない（U02）。
+# 読むのはこのファイルだけ。check_config には入れない（U08：display の問題で全体を止めない）。
+DISPLAY_TYPES = ("simple", "full")
+DISPLAY_OVERRIDE_NAMES = ("features", "terms", "requests_max", "stop_notice", "review_view", "team_view")
+SIMPLE_REQUESTS_MAX = 3   # シンプルでお願いを一度に見せる件数（期限を過ぎたものは、これを超えても全部出す。U03）
+REQUESTS_MAX_RANGE = (1, 20)
+# 「[見せ方：…]」の文面。scripts/set_display.py にも同じ文を持たせる（U02：import で共通にしない。K3：テストで比べる）
+DISPLAY_LINE = {"simple": "[見せ方：シンプル（言葉・件数の決まりを守る）]",
+                "full": "[見せ方：フル（今までどおり）]"}
+DISPLAY_BROKEN_LINE = "[見せ方：設定の display.type を読めないので、フルで動いています（simple か full に直してください）]"
+
+
+def read_display(cfg):
+    """config の display を読む。戻り値：{"type", "line", "overrides", "invalid"}。例外は出さない（U08・U14）。
+    - 無い・空（None・""・{}・[]）→ 静かにフル（line は空。案内を出さない）
+    - type が無く、効く個別の設定だけがある → フルの行（「[見せ方：フル（今までどおり）]」）を出す（K16）
+    - 壊れている（辞書でない・type が simple／full 以外）→ フルにして、案内の1行（overrides は読まない）
+    - overrides は決まった6つの名前と値だけ読む。名前が違うものは無視。値が範囲外のものは invalid に入れ、その項目はフル（U14）"""
+    out = {"type": "full", "line": "", "overrides": {}, "invalid": set()}
+    raw = cfg.get("display") if isinstance(cfg, dict) else None
+    if raw is None or raw == "" or raw == {} or raw == []:
+        return out
+    if not isinstance(raw, dict):
+        out["line"] = DISPLAY_BROKEN_LINE
+        return out
+    if "type" in raw:
+        typ = raw["type"]
+        if not (isinstance(typ, str) and typ in DISPLAY_TYPES):
+            out["line"] = DISPLAY_BROKEN_LINE
+            return out
+        out["type"] = typ
+        out["line"] = DISPLAY_LINE[typ]
+    ov = raw.get("overrides")
+    if isinstance(ov, dict):
+        for name in DISPLAY_OVERRIDE_NAMES:
+            if name not in ov:
+                continue
+            v = ov[name]
+            if name == "requests_max":
+                ok = (isinstance(v, int) and not isinstance(v, bool)
+                      and REQUESTS_MAX_RANGE[0] <= v <= REQUESTS_MAX_RANGE[1])
+            else:
+                ok = isinstance(v, str) and v in DISPLAY_TYPES
+            if ok:
+                out["overrides"][name] = v
+            else:
+                out["invalid"].add(name)
+    if "type" not in raw and out["overrides"]:
+        # type が無く、効く個別の設定だけがあるとき：最後の行は必ず「[見せ方：…]」（set_display.py の show と同じ並び。K16）
+        out["line"] = DISPLAY_LINE["full"]
+    return out
+
+
+def overrides_line(disp):
+    """効く個別の設定が1つ以上あるときの1行（「[見せ方：…]」のすぐ前の行に出す。U11）。無ければ空。
+    文面と並び（DISPLAY_OVERRIDE_NAMES の順）は scripts/set_display.py の overrides_line と同じ（K3：テストで比べる）。"""
+    ov = disp["overrides"]
+    return ("個別の設定（型より優先）：" + "、".join(f"{n}={ov[n]}" for n in DISPLAY_OVERRIDE_NAMES if n in ov)) if ov else ""
+
+
+def requests_cap(disp):
+    """お願いを一度に見せる件数の上限。None は全件。個別の設定は型より強い（U06）。範囲外の値の項目はフル（U14）。"""
+    if "requests_max" in disp["overrides"]:
+        return disp["overrides"]["requests_max"]
+    if "requests_max" in disp["invalid"]:
+        return None
+    return SIMPLE_REQUESTS_MAX if disp["type"] == "simple" else None
+
+
 ROOT = find_root() or Path(os.getcwd()).resolve()
 CONFIG_JSON = ROOT / "設定" / "config.json"
 _cfg, CONFIG_ERROR = load_config(CONFIG_JSON)
@@ -164,6 +234,7 @@ OWNER = _cfg.get("owner", "本人")                 # tasks.json の assignee �
 OWNER_CALL = _cfg.get("owner_call", OWNER + "さん")  # 文章での呼び方
 AI_NAME = _cfg.get("ai_name", "AI")
 DEPARTMENTS = _cfg.get("departments", []) + ["共通"]
+DISPLAY = read_display(_cfg)   # 使い方の型（T182①）。config に無ければ静かにフル
 PLUGIN_ROOT = Path(__file__).resolve().parent.parent
 RULES_MD = PLUGIN_ROOT / "rules" / "commander.md"   # 指揮官ルール（Windows の展開で壊れないよう、プラグインの中のファイル名は英数字）
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -317,6 +388,7 @@ BOARD_MD = ROOT / "00_タスク管理" / "タスクボード.md"
 REQUEST_MD = ROOT / "00_タスク管理" / f"{OWNER_CALL}へのお願い.md"
 SNAPSHOT_JSON = ROOT / "00_タスク管理" / "data" / ".snapshot.json"
 HISTORY_JSONL = ROOT / "00_タスク管理" / "data" / "history.jsonl"
+FORECAST_JSON = ROOT / "00_タスク管理" / "data" / "forecast.json"   # 右のパネルのガントチャート用（T118。毎回作り直す）
 KAIZEN_MD = ROOT / "04_ナレッジ" / "改善ログ.md"
 SPRINT_DIR = ROOT / "01_スプリント"
 HISTORY_FIELDS = ["title", "status", "progress", "pdca", "due", "assignee", "done_date", "points", "reestimate"]
@@ -669,6 +741,7 @@ def forecast(tasks, today, velocity, cal, today_planned=None):
     for t in tasks:
         t["_state"] = None
         t["_loop"] = None
+        t["_start"] = None   # 着手見込み（AI のタスクだけ。完了予定日の計算には使わない）
         if t["status"] == "完了":
             t["_forecast"] = parse_date(t.get("done_date"))
     for rank, t in enumerate(open_tasks, start=1):
@@ -716,14 +789,20 @@ def forecast(tasks, today, velocity, cal, today_planned=None):
         t = by_id[i]
         if today_planned is not None and i in today_planned:
             t["_forecast"] = today
+            t["_start"] = today
         else:
+            before = cum   # このタスクの前までの積み上げ（着手見込みに使う）
             cum += remaining_points(t)
-            t["_forecast"] = cal.add_workdays(start, math.ceil(cum / velocity) if cum > 0 else 1)
+            end_n = math.ceil(cum / velocity) if cum > 0 else 1
+            t["_forecast"] = cal.add_workdays(start, end_n)
+            # 着手見込み：前のタスクまでの積み上げが終わった日の続き（同じ日に続きから始めることもある）。完了予定より後にはしない
+            t["_start"] = cal.add_workdays(start, min(int(before / velocity) + 1, end_n))
             # depends_on のタスクが終わってから着手する（前提タスクの完了予定の翌営業日から数える）
             deps = [by_id[d]["_forecast"] for d in dep_list(t) if d in by_id and by_id[d].get("_forecast")]
             if deps:
                 own = math.ceil(remaining_points(t) / velocity) or 1
                 t["_forecast"] = max(t["_forecast"], cal.add_workdays(max(deps) + timedelta(days=1), own))
+                t["_start"] = min(max(t["_start"], cal.add_workdays(max(deps) + timedelta(days=1), 1)), t["_forecast"])
         for j in after.get(i, []):
             waiting_on[j] -= 1
             if waiting_on[j] == 0:
@@ -747,6 +826,45 @@ def forecast(tasks, today, velocity, cal, today_planned=None):
             t["_flag"] = FLAG_NO_DUE
     project_end = max((t["_forecast"] for t in open_tasks if t.get("_forecast")), default=None)
     return open_tasks, project_end
+
+
+FORECAST_DAYS = 14   # 右のパネルのガントチャートの期間（今日から14日。暦の日）
+
+
+def flag_word(flag):
+    """"🔴 期限超過" → "期限超過"（今の表示と同じ言葉。先頭の絵文字だけ外す）。"""
+    return flag.split(" ", 1)[1] if " " in flag else flag
+
+
+def build_forecast_json(ctx):
+    """右のパネルのガントチャート用（forecast.json）。完了予定日・着手見込み・休みの日は、ここで計算した結果を渡す
+    （パネルは計算し直さない）。未完了のタスクだけを、順位の順に入れる。"""
+    today, cal = ctx["today"], ctx["cal"]
+    days = []
+    for i in range(FORECAST_DAYS):
+        d = today + timedelta(days=i)
+        days.append({"date": fmt(d), "off": not cal.is_workday(d)})
+    rows = []
+    for t in ctx["open_tasks"]:
+        own = t.get("assignee") == OWNER
+        rows.append({
+            "id": t["id"], "title": str(t.get("title") or ""), "assignee": str(t.get("assignee") or ""),
+            "who": "本人" if own else "AI",
+            "start": fmt(t.get("_start")) or None, "end": fmt(t.get("_forecast")) or None,
+            "state": t.get("_state") or flag_word(t["_flag"]),
+        })
+    waiting = sum(1 for t in ctx["open_tasks"] if t.get("_state") == STATE_WAIT)
+    return {"made": ctx["now"], "today": fmt(today), "velocity": ctx["velocity"], "days": days,
+            "tasks": rows, "waiting": waiting}
+
+
+def write_forecast_json(ctx):
+    """forecast.json を一時ファイルに書いてから置き換える。書けなくても、ほかの生成物は止めない（書けなかった理由の型名を返す。書けたら None）。"""
+    try:
+        atomic_write_text(FORECAST_JSON, json.dumps(build_forecast_json(ctx), ensure_ascii=False, indent=2) + "\n")
+    except OSError as e:
+        return type(e).__name__
+    return None
 
 
 def fc_text(t):
@@ -1461,6 +1579,12 @@ def auto_run_warning(today, cal):
 def summary_text(ctx, limit=10, with_ids=False):
     lines = [f"[{AI_NAME} タスク状況 {fmt(ctx['today'])}] 全体完了予定 {project_end_text(ctx)}"
              f"／{VELOCITY_LABEL} {ctx['velocity']:.1f}pt/日（{ctx['velocity_src']}）"]
+    # 型を AI に伝える（U11）。個別の設定の行が先、「[見せ方：…]」が後（set_display.py の出力と同じ並び。「[見せ方：…]」が最後の行）。
+    # 警告の行は main が先頭に足すので、並びは動かない（U12）
+    if overrides_line(DISPLAY):
+        lines.append(overrides_line(DISPLAY))
+    if DISPLAY["line"]:
+        lines.append(DISPLAY["line"])
     for t in ctx["open_tasks"][:limit]:
         due = parse_date(t.get("due"))
         lines.append(f"  {t['_rank']}. {t['id']} {t['title']} [{t['status']}/{role_name(t.get('assignee'))}] "
@@ -1482,10 +1606,17 @@ def summary_text(ctx, limit=10, with_ids=False):
             lines.append(f"  - {t['id']} {t['title']} — 期日 {fmt_jp(due) if due else 'なし'}"
                          f"{'（' + days_left(t, ctx['today']) + '）' if due else ''}")
     lines.append(f"[📌 {OWNER_CALL}へのお願い 未完了 {len(reqs)} 件]（00_タスク管理/{OWNER_CALL}へのお願い.md）")
-    for t in sorted(reqs, key=lambda t: parse_date(t.get("due")) or date.max):
+    ordered = sorted(reqs, key=lambda t: parse_date(t.get("due")) or date.max)
+    cap = requests_cap(DISPLAY)
+    shown = ordered
+    if cap is not None:   # シンプル：上限か、期限を過ぎたお願いの全件のうち多いほう（期日順なので期限超過が先に並ぶ。U03）
+        shown = ordered[:max(cap, sum(1 for t in ordered if t["_flag"] == FLAG_OVERDUE))]
+    for t in shown:
         due = parse_date(t.get("due"))
         lines.append(f"  - {t['id']} [{t.get('kind') or 'その他'}] {t['title']} — 期日 {fmt_jp(due) if due else '未設定'}"
                      f"（{days_left(t, ctx['today'])}）{' 🔴' if t['_flag'] == FLAG_OVERDUE else ''}")
+    if len(ordered) > len(shown):
+        lines.append(f"  …ほかに {len(ordered) - len(shown)} 件（一覧：00_タスク管理/{OWNER_CALL}へのお願い.md）")
     warns = assignment_warnings(ctx["tasks"])
     if warns:
         lines.append(f"[⚠ 振り分けの確認 {len(warns)} 件] " + "／".join(warns[:6]) + ("／…" if len(warns) > 6 else ""))
@@ -1878,6 +2009,17 @@ def _unreadable(st):
     return f"（読めませんでした：daily_cycle.sh{_nos(st['bad'])}）"
 
 
+def _sandbox_python_no(cycle_path):
+    """daily_cycle.sh の SANDBOX_TOOLS=",Bash(python3:*)" の行番号。見つからない・読めないときは None（落ちない）"""
+    try:
+        for n, l in enumerate(Path(cycle_path).read_text(encoding="utf-8").splitlines(), 1):
+            if re.match(r'\s*SANDBOX_TOOLS="[^"]*Bash\(python3:\*\)', l):
+                return n
+    except Exception:
+        pass
+    return None
+
+
 def auto_tools_lines(cycle_path=None):
     """--plan-context の最後の節。daily_cycle.sh が読めなくても落ちない"""
     cycle_path = Path(cycle_path) if cycle_path else PLUGIN_ROOT / "scripts" / "auto" / "daily_cycle.sh"
@@ -1927,6 +2069,9 @@ def auto_tools_lines(cycle_path=None):
         out.append(f"- daily_cycle.sh:{n} の行は読めませんでした。使う前に1回ためしてください")
     for t in res["notes"]:
         out.append(f"- {t}")
+    no = _sandbox_python_no(cycle_path)
+    where = f"（daily_cycle.sh:{no}）" if no else ""
+    out.append(f"- 実行の段は、囲いの設定が作れて点検（カナリア）が全部止まった日だけ `Bash(python3:*)` も使える{where}。その日も、囲いの守る先（sandbox_settings.py の denyWrite）には書けず、カレンダーの取得先以外へは通信もできない。囲いが作れない日や点検が通らない日は上の道具のまま。計画・振り返りの段では使えない")
     out += [
         "- 書けない場所の見方：Edit(…) の決まりは、ファイルを書く道具（Write など）に効く。Bash でファイルに書くことには効かないので、Bash で使えるのは上の「使える道具」の Bash(…) だけ。パターンは本人のフォルダから見たもの（`//` で始まるのは絶対パス）。指示書の書き先のパスを、このパターンと照らす",
         "- 次は定数では分からないので、計画で使う前に1回ためす：自動モードかどうかの判定、NG の見張り（ng_guard）が止めるか（`python3 <プラグイン>/scripts/ng_guard.py --explain \"<コマンド>\"`）",
@@ -2706,6 +2851,7 @@ def run(today):
     saved_note = write_excel(ctx)
     atomic_write_text(BOARD_MD, build_board_md(ctx))
     atomic_write_text(REQUEST_MD, build_requests_md(ctx))
+    ctx["forecast_error"] = write_forecast_json(ctx)
     # tasks.json の新しい形式への移しは、Excel・ボード・お願いを書き終えたあと（最後）に行う。検査を通っても Excel などで落ちたときに、
     # 移しだけ済んでしまわないように。移しのあとに data は読み直さない：メモリの data は移す前の内容で、違いは schema_version の有無だけ
     # （ここから先で使わない）。読み直すと、移しの途中の状態を見るおそれがある

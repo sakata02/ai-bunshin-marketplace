@@ -306,9 +306,10 @@ def s3_daily_cycle_stale_lock_is_ignored_and_replaced():
 
 @case
 def s4_guard_in_allowed_tools():
-    # 自動実行の中の Claude が lock_check.py を使える（許可リストに入っている）
+    # 自動実行の中の Claude が lock_check.py を使える（許可リストに、完全なパスで入っている。ワイルドカードは使わない。T062・T119 W3）
     src = open(CYCLE, encoding="utf-8").read()
-    assert "Bash(python3 *lock_check.py*)" in src
+    assert 'Bash(python3 $PLUGIN_ROOT/scripts/lock_check.py:*)' in src and 'Bash(python3 \\"$PLUGIN_ROOT/scripts/lock_check.py\\":*)' in src
+    assert "*lock_check.py*" not in src
 
 
 # ---------- 直し（部下D の確かめへの対応） ----------

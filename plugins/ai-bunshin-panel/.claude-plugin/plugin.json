@@ -1,6 +1,6 @@
 {
   "name": "ai-bunshin-panel",
-  "version": "1.0.0-beta.6",
+  "version": "1.0.0-beta.7",
   "displayName": "AI分身の右のパネル",
   "description": "AI分身：右のパネルに今日のやること・予定・お願いを出す（本人のフォルダでだけ出る）",
   "author": {

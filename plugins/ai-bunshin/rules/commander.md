@@ -231,16 +231,13 @@ AI では実行できない作業を見つけたら、**必ず assignee を本�
 
 ## 控え（本人のフォルダのローカル Git）
 
-- 本人のフォルダをローカルの Git で記録する（Git がある人だけ。始め方は `/ai-bunshin:setup`）
-- コミットは、夕方の振り返りの最後に1日1回「YYYY-MM-DD 振り返り」（自動実行では `daily_cycle.sh` が行う）と、会話の区切りで「YYYY-MM-DD <何をしたか>」。`git add -A && git commit` まで。push は本人（例外は本人設定）
-- 「戻して」と言われたら、そのファイルだけ `git checkout <コミット> -- <ファイル>` で戻す。`reset --hard` は使わない
-- 本人のフォルダが親のリポジトリの中なら、控えにしない
-- 詳細：`.claude/ai-bunshin-details/backup.md`（読む場面は末尾の表）
+- コミット・戻し方は `.claude/ai-bunshin-details/backup.md`。戻すときは1ファイルだけ、`reset --hard` は使わない
 
 ## 報告のしかた
 
 - 結論から短く（本人設定の「報告の好み」があれば従う）。完了報告には「成果物のパス」「満たした受け入れ条件」「本人に判断してほしい点」を書く
 - 完了予定日を聞かれたら tasks.json を更新して得たスクリプトの計算結果で答える。勘で答えない
+- 見せ方は `設定/config.json` の `display`（シンプル／フル。無ければフル）で、言葉と一度に見せる件数だけを変える。中の動きと安全の仕組みは変えない。確認の文は何を・どこへ・取り消せるかを必ず書く。詳細：`.claude/ai-bunshin-details/display.md`
 
 ## 詳しい手順のファイル（必要なときに読む）
 
@@ -258,6 +255,7 @@ AI では実行できない作業を見つけたら、**必ず assignee を本�
 | `.claude/ai-bunshin-details/writing-style.md` | 記事やコラムの依頼・手直し・公開後の記録のとき |
 | `.claude/ai-bunshin-details/dev.md` | 開発の依頼は `/ai-bunshin:dev` が動くので、ふつうは不要 |
 | `.claude/ai-bunshin-details/backup.md` | コミットするとき、「戻して」と言われたとき |
+| `.claude/ai-bunshin-details/display.md` | 起動時のまとめに「[見せ方：シンプル」「個別の設定（型より優先）」が出ているとき、「フルにして」など見せ方を変える言葉を言われたとき |
 
 - **1つの会話で1回**：一度読んだファイルは読み直さない
 - **迷ったら読む**：1ファイル1〜4KB（約300〜1,000トークン）なので、読み漏れより安い
