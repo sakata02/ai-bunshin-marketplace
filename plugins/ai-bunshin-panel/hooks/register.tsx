@@ -465,7 +465,9 @@ function ganttCells(t: ForecastTask, days: ForecastDay[]): { cells: string; beyo
   return { cells: mark.join(''), beyond }
 }
 
-type GanttShow = { head: string; overdueLine: string; axis: string; rows: string[]; waitLine: string; more: number }
+// 棒の行は「本人」「AI」の2つのまとまりに分ける（見出しの件数は、そのまとまりの描ける件数）
+type GanttGroup = { label: string; count: number; rows: string[] }
+type GanttShow = { head: string; overdueLine: string; axis: string; groups: GanttGroup[]; waitLine: string; more: number }
 
 // 棒（または印）の行にできるタスクと、期限を過ぎた本人のタスク（今日より前が期日。行にせず件数だけ出す）に分ける
 function ganttSplit(g: Gantt) {
@@ -481,24 +483,45 @@ function ganttLines(g: Gantt, cols: number, bodyRows: number, call: string): Gan
   const { draw, overdue } = ganttSplit(g)
   const overdueLine = overdue > 0 ? `期限超過 ${overdue} 件（${call}・今日より前）` : ''
   const overdueRows = overdueLine ? Math.ceil(cellWidth(overdueLine) / Math.max(1, cols)) : 0
-  const rowsMax = Math.max(1, bodyRows - 6 - overdueRows)
-  const shown = draw.slice(0, rowsMax)
-  const idW = Math.max(4, ...shown.map(t => cellWidth(t.id)))
+  // 見出し（まとまりごとに1行）と、まとまりの間の空行も、窓の行に数える
+  const own = draw.filter(t => t.who === '本人')
+  const ai = draw.filter(t => t.who !== '本人')
+  const sets = [
+    { label: call, list: own },
+    { label: 'AI', list: ai },
+  ].filter(x => x.list.length > 0)
+  const overhead = sets.length === 0 ? 0 : sets.length * 2 - 1 // 見出し + 空行（2つのまとまりなら 2 + 1）
+  const rowsMax = Math.max(sets.length, bodyRows - 6 - overdueRows - overhead)
+  // 棒の数：両方に件数があれば最低1行ずつ。残りは前（本人）から詰める
+  const take = sets.map(x => x.list.length)
+  if (sets.length === 2 && take[0] + take[1] > rowsMax) {
+    take[0] = Math.min(take[0], Math.max(1, rowsMax - 1))
+    take[1] = Math.min(take[1], Math.max(1, rowsMax - take[0]))
+  } else if (sets.length === 1) {
+    take[0] = Math.min(take[0], rowsMax)
+  }
+  const picked = sets.map((x, i) => x.list.slice(0, take[i]))
+  const shownAll = picked.flat()
+  const idW = Math.max(4, ...shownAll.map(t => cellWidth(t.id)))
   const titleW = Math.max(6, Math.min(24, cols - idW - 1 - 1 - g.days.length - 2))
   const lead = ' '.repeat(idW + 1 + titleW + 1)
-  const rows = shown.map(t => {
-    const { cells, beyond } = ganttCells(t, g.days)
-    return `${fitCells(t.id, idW)} ${fitCells(t.title, titleW)} ${cells}${beyond ? '→' : ''}`
-  })
+  const groups: GanttGroup[] = sets.map((x, i) => ({
+    label: `■ ${x.label}（${x.list.length}）`,
+    count: x.list.length,
+    rows: picked[i].map(t => {
+      const { cells, beyond } = ganttCells(t, g.days)
+      return `${fitCells(t.id, idW)} ${fitCells(t.title, titleW)} ${cells}${beyond ? '→' : ''}`
+    }),
+  }))
   const loops = g.tasks.filter(t => t.state === STATE_LOOP).length
   const parts = [g.waiting > 0 ? `${STATE_WAIT} ${g.waiting}` : '', loops > 0 ? `${STATE_LOOP} ${loops}` : ''].filter(Boolean)
   return {
     head: `これから2週間（${md(g.days[0].date)}〜${md(g.days[g.days.length - 1].date)}）`,
     overdueLine,
     axis: lead + g.days.map(d => d.date.slice(-1)).join(''),
-    rows,
+    groups,
     waitLine: parts.length ? `${parts.join('・')}（棒なし）` : '',
-    more: draw.length - shown.length,
+    more: draw.length - shownAll.length,
   }
 }
 
@@ -604,8 +627,11 @@ export const register: Register = on => {
       .catch(() => undefined)
     await refresh($, true).catch(() => undefined)
     await update($, detail, () => NONE)
-    await update($, view, () => HOME)
-    void $.ui.open({ id: PANE, title: TITLE })
+    // 最初の画面：今日の forecast.json が読めればガント、読めなければ短い画面
+    await refreshGantt($).catch(() => undefined)
+    const first = (await read($, gantt)).ok
+    await update($, view, () => (first ? { mode: 'gantt', page: 0 } : HOME))
+    void $.ui.open({ id: PANE, title: first ? GANTT_TITLE : TITLE })
     $.clock.every(20000, () => refresh($))
     return next(e)
   })
@@ -715,8 +741,19 @@ export const register: Register = on => {
           {show && <Text dimColor wrap="truncate-end">= AI　* 期日　. 休み　→ 先</Text>}
           {show && show.overdueLine !== '' && <Text wrap="wrap">{show.overdueLine}</Text>}
           {show && <Text dimColor>{show.axis}</Text>}
-          {show && show.rows.length === 0 && <Text dimColor>棒にできるタスクなし</Text>}
-          {show && show.rows.map((r, i) => <Text key={`gantt-${i}`} wrap="truncate-end">{r}</Text>)}
+          {show && show.groups.length === 0 && <Text dimColor>棒にできるタスクなし</Text>}
+          {show &&
+            show.groups.map((grp, gi) => [
+              gi > 0 ? <Text key={`gantt-gap-${gi}`}> </Text> : null,
+              <Text key={`gantt-head-${gi}`} bold wrap="truncate-end">
+                {grp.label}
+              </Text>,
+              ...grp.rows.map((r, i) => (
+                <Text key={`gantt-${gi}-${i}`} wrap="truncate-end">
+                  {r}
+                </Text>
+              )),
+            ])}
           {show && show.more > 0 && <Text dimColor>ほか {show.more} 件</Text>}
           {show && show.waitLine !== '' && <Text dimColor wrap="truncate-end">{show.waitLine}</Text>}
           <Button key="home" label="短い画面へ" onPress={() => void home($)} />

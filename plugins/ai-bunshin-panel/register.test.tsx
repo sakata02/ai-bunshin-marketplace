@@ -659,10 +659,10 @@ test('ガント：行が多いときは優先順に上から出し、出せな�
   const tasks = Array.from({ length: 8 }, (_, i) => ft(`T3${String(i).padStart(2, '0')}`, `件${i}`, 'AI', '2026-11-02', '2026-11-03'))
   await setup($, on, { data: open(1), forecast: fcFile(tasks) })
   await $.tool.call({ tool: GT })
-  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' }) // bodyRows 10 → 見出し・凡例・日付・ほか・ボタンの 5 行を引いて 4 行（件数のまとめが無いので 1 行余る）
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' }) // bodyRows 10 → 見出し・凡例・日付・ほか・ボタンの 5 行と、まとまりの見出し 1 行（T188）を引いて 3 行（件数のまとめが無いので 1 行余る）
   const rows = await ganttRows(ui)
-  expect(rows.map(r => r.slice(0, 4))).toEqual(['T300', 'T301', 'T302', 'T303'])
-  expect((await ui.find({ type: 'Text', text: /^ほか/ }))?.text).toBe('ほか 4 件')
+  expect(rows.map(r => r.slice(0, 4))).toEqual(['T300', 'T301', 'T302'])
+  expect((await ui.find({ type: 'Text', text: /^ほか/ }))?.text).toBe('ほか 5 件')
   await ui.unmount()
   // 窓が高ければ全部出て、「ほか」は出ない
   const tall = await $.ui.mount({ ...PANE, surface: 'terminal', props: { ...PANE.props, scroll: { offset: 0, bodyRows: 30 } } })
@@ -674,8 +674,11 @@ test('ガント：行が多いときは優先順に上から出し、出せな�
 test('ガント：forecast.json が作り直されたら、Bash のあとなどに読み直す（開いている間）。ふつうの画面では読まない', async ($, on) => {
   const src: Src = { data: open(1), forecast: fcFile([ft('T101', '前', 'AI', '2026-11-02', '2026-11-02')]) }
   const { n } = await setup($, on, src)
-  await $.tool.call({ tool: 'Bash' }) // ふつうの画面：forecast.json は読まない
-  expect(n.forecastReads).toBe(0)
+  expect(n.forecastReads).toBe(1) // 起動のときに1回（T188：最初からガント）
+  await $.tool.call({ tool: 'mcp__ai-bunshin-panel__open_task', id: '' }) // ふつうの画面に戻す
+  const reads = n.forecastReads
+  await $.tool.call({ tool: 'Bash' }) // ふつうの画面：forecast.json は読み直さない
+  expect(n.forecastReads).toBe(reads)
   await $.tool.call({ tool: GT })
   let ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect(await ui.find({ type: 'Text', text: /^T101 / })).toBeTruthy()
@@ -810,7 +813,7 @@ test('ガント：凡例とまとめの行は幅40で1行。いちばん行が�
     const lines = texts.reduce((n, t) => n + Math.max(1, Math.ceil(wcols(t) / 40)), 0) + buttons
     expect(lines).toBeLessThanOrEqual(bodyRows)
     // 窓が高いほど棒の行が増える（行の数は窓の高さで決まる）
-    if (bodyRows === 10) expect((await ganttRows(ui)).length).toBe(3) // 期限超過の行は1行 → 10 - 6 - 1 = 3 行
+    if (bodyRows === 10) expect((await ganttRows(ui)).length).toBe(2) // 期限超過の行は1行・まとまりの見出し1行 → 10 - 6 - 1 - 1 = 2 行（T188）
     await ui.unmount()
   }
 })
@@ -831,7 +834,142 @@ test('ガント：呼び方が長い人は期限超過の行が折り返す。�
   const buttons = ((await ui.findAll({ type: 'Button' })) as { text: string }[]).length
   const lines = texts.reduce((n, t) => n + Math.max(1, Math.ceil(wcols(t) / 40)), 0) + buttons
   expect(lines).toBeLessThanOrEqual(12)
-  expect((await ganttRows(ui)).length).toBe(4) // 12 - 6 - 折り返して 2 行 = 4 行
+  expect((await ganttRows(ui)).length).toBe(3) // 12 - 6 - 折り返して 2 行 - まとまりの見出し 1 行 = 3 行（T188）
+  await ui.unmount()
+})
+
+// ---------- 最初にガント・本人と AI を分けて空行（T188） ----------
+
+const textsOf = async (ui: any) => ((await ui.findAll({ type: 'Text' })) as { text: string }[]).map(t => t.text)
+const rowsAt = (bodyRows: number) => ({ ...PANE.props, scroll: { offset: 0, bodyRows } })
+const own = (i: number) => ft(`T2${String(i).padStart(2, '0')}`, `本人${i}`, '本人', null, '2026-11-04')
+const aiT = (i: number) => ft(`T3${String(i).padStart(2, '0')}`, `AI${i}`, 'AI', '2026-11-02', '2026-11-03')
+
+test('T188 起動：今日の forecast.json が読めれば、道具を呼ばなくても最初からガントで開く（読むだけ・書かない）', async ($, on) => {
+  const { titles, n } = await setup($, on, { data: open(2), forecast: fcFile([aiT(0)]) })
+  expect(titles).toEqual(['これから2週間'])
+  expect(n.writes).toBe(0)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect((await ui.find({ type: 'Text', text: /これから2週間/ }))?.text).toBe('これから2週間（11/2〜11/15）')
+  expect(await ui.find({ type: 'Button', text: /短い画面へ/ })).toBeTruthy()
+  await ui.unmount()
+})
+
+for (const [label, forecast] of [
+  ['無い', undefined],
+  ['壊れている', '{broken'],
+  ['形が違う', { today: '2026-11-02', tasks: [] }],
+  ['古い', fcFile([aiT(0)], { today: '2026-11-01' })],
+] as [string, unknown][]) {
+  test(`T188 起動：forecast.json が${label}ときは、今までどおり短い画面（今日のやること）で開く`, async ($, on) => {
+    const { titles, n } = await setup($, on, { data: open(2), forecast })
+    expect(titles).toEqual(['今日のやること'])
+    expect(n.writes).toBe(0)
+    const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+    expect(await ui.find({ type: 'Text', text: /今日の予定/ })).toBeTruthy()
+    expect(await ui.find({ type: 'Text', text: /これから2週間/ })).toBeFalsy()
+    await ui.unmount()
+  })
+}
+
+test('T188 起動：本人のフォルダの外では開かない（forecast.json も読まない）', async ($, on) => {
+  const { titles, n } = await setup($, on, { data: open(1), cwd: '/work/other', forecast: fcFile([aiT(0)]) })
+  expect(titles).toEqual([])
+  expect(n.forecastReads).toBe(0)
+})
+
+test('T188 まとまり：先に本人「■ 山田さん（N）」、次に AI「■ AI（N）」。間に空行が1行。まとまりの中は forecast の順のまま。列はそろう', async ($, on) => {
+  // forecast の順は AI・本人・AI・本人・AI（混ぜておく）
+  const tasks = [aiT(1), own(1), aiT(2), own(2), aiT(3)]
+  await setup($, on, { data: open(1), forecast: fcFile(tasks) })
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: rowsAt(30) })
+  const t = await textsOf(ui)
+  const i1 = t.indexOf('■ 山田さん（2）')
+  const i2 = t.indexOf('■ AI（3）')
+  expect(i1).toBeGreaterThan(-1)
+  expect(i2).toBeGreaterThan(i1)
+  expect(t.slice(i1 + 1, i2 - 1).map(r => r.slice(0, 4))).toEqual(['T201', 'T202'])
+  expect(t[i2 - 1]).toBe(' ') // まとまりの間の空行は1行だけ
+  expect(t[i1 - 1]).not.toBe(' ') // 先頭のまとまりの前には空行を足さない
+  expect(t.slice(i2 + 1, i2 + 4).map(r => r.slice(0, 4))).toEqual(['T301', 'T302', 'T303'])
+  // 列：日付の軸と棒の行は、日付の始まる位置が同じ（見出しは列の外）
+  const axis = t.find(x => /^ +[0-9]{14}$/.test(x))!
+  const rows = [...t.slice(i1 + 1, i2 - 1), ...t.slice(i2 + 1, i2 + 4)]
+  for (const r of rows) expect(wcols(r)).toBe(wcols(axis))
+  await ui.unmount()
+})
+
+test('T188 まとまり：件数は表示しきれない分も含む。窓が小さいときも、両方に最低1行ずつ棒を出す。残りは前（本人）から詰める', async ($, on) => {
+  const tasks = [...Array.from({ length: 5 }, (_, i) => own(i)), ...Array.from({ length: 5 }, (_, i) => aiT(i))]
+  await setup($, on, { data: open(1), forecast: fcFile(tasks) })
+  // bodyRows 12：12 - 6 - 見出し2 - 空行1 = 3 行 → 本人 2・AI 1。ほか 7 件。窓に収まる
+  let ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: rowsAt(12) })
+  let t = await textsOf(ui)
+  expect(t).toContain('■ 山田さん（5）')
+  expect(t).toContain('■ AI（5）')
+  expect((await ganttRows(ui)).map(r => r.slice(0, 4))).toEqual(['T200', 'T201', 'T300'])
+  expect((await ui.find({ type: 'Text', text: /^ほか/ }))?.text).toBe('ほか 7 件')
+  const buttons = ((await ui.findAll({ type: 'Button' })) as unknown[]).length
+  expect(t.reduce((n, x) => n + Math.max(1, Math.ceil(wcols(x) / 40)), 0) + buttons).toBeLessThanOrEqual(12)
+  await ui.unmount()
+  // bodyRows 10：本来は 1 行しか空かないが、両方に1行ずつは出す
+  ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: rowsAt(10) })
+  expect((await ganttRows(ui)).map(r => r.slice(0, 4))).toEqual(['T200', 'T300'])
+  expect((await ui.find({ type: 'Text', text: /^ほか/ }))?.text).toBe('ほか 8 件')
+  await ui.unmount()
+})
+
+test('T188 まとまり：本人が1件・AI が多いとき、窓が小さくても本人の1行は消えない。残りは AI', async ($, on) => {
+  const tasks = [own(0), ...Array.from({ length: 8 }, (_, i) => aiT(i))]
+  await setup($, on, { data: open(1), forecast: fcFile(tasks) })
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: rowsAt(12) })
+  expect((await ganttRows(ui)).map(r => r.slice(0, 4))).toEqual(['T200', 'T300', 'T301'])
+  expect((await ui.find({ type: 'Text', text: /^ほか/ }))?.text).toBe('ほか 6 件')
+  await ui.unmount()
+  const tall = await $.ui.mount({ ...PANE, surface: 'terminal', props: rowsAt(40) })
+  expect((await ganttRows(tall)).length).toBe(9)
+  expect(await tall.find({ type: 'Text', text: /^ほか/ })).toBeFalsy()
+  await tall.unmount()
+})
+
+test('T188 まとまり：AI だけのときは見出しが1つ（空行なし）。件数は見えない分も含む', async ($, on) => {
+  await setup($, on, { data: open(1), forecast: fcFile(Array.from({ length: 8 }, (_, i) => aiT(i))) })
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: rowsAt(10) })
+  const t = await textsOf(ui)
+  expect(t.filter(x => x.startsWith('■ '))).toEqual(['■ AI（8）'])
+  expect(t).not.toContain(' ')
+  expect((await ganttRows(ui)).length).toBe(3) // 10 - 6 - 見出し 1
+  await ui.unmount()
+})
+
+test('T188 まとまり：本人だけのときも見出しは1つ（空行なし）', async ($, on) => {
+  await setup($, on, { data: open(1), forecast: fcFile([own(0), own(1)]) })
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: rowsAt(30) })
+  const t = await textsOf(ui)
+  expect(t.filter(x => x.startsWith('■ '))).toEqual(['■ 山田さん（2）'])
+  expect(t).not.toContain(' ')
+  await ui.unmount()
+})
+
+test('T188 まとまり：棒にできるものが無いときは、見出しは出ない', async ($, on) => {
+  await setup($, on, { data: open(1), forecast: fcFile([ft('T901', '待ち', 'AI', null, null, '見積もり待ち')]) })
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: rowsAt(30) })
+  const t = await textsOf(ui)
+  expect(t.filter(x => x.startsWith('■ '))).toEqual([])
+  expect(t).toContain('棒にできるタスクなし')
+  await ui.unmount()
+})
+
+test('T188 まとまり：期限超過の行・凡例・見積もり待ち・「短い画面へ」は残る。期限超過の本人は棒にも見出しの件数にも入らない', async ($, on) => {
+  const tasks = [aiT(0), own(0), ft('T290', '切れ', '本人', null, '2026-10-30'), ft('T291', '待ち', 'AI', null, null, '見積もり待ち')]
+  await setup($, on, { data: open(1), forecast: fcFile(tasks) })
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: rowsAt(30) })
+  const t = await textsOf(ui)
+  expect(t).toContain('期限超過 1 件（山田さん・今日より前）')
+  expect(t).toContain('= AI　* 期日　. 休み　→ 先')
+  expect(t).toContain('見積もり待ち 1（棒なし）')
+  expect(t).toContain('■ 山田さん（1）')
+  expect(await ui.find({ type: 'Button', text: /短い画面へ/ })).toBeTruthy()
   await ui.unmount()
 })
 
