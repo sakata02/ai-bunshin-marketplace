@@ -23,6 +23,9 @@ export type Detail = {
   error: string
 }
 
+// 試し中の Try（改善ログの「実施中の Try」の表の1行。列の中身はそのまま）
+export type Try = { id: string; area: string; body: string; check: string; start: string }
+
 // 今日の予定（calendar_cache.json から。件名と時間だけ）
 export type CalEvent = { start: string; end: string; title: string; allday: boolean; unknown: boolean }
 export type Cal = { fetched: string; events: CalEvent[]; nowMin: number; error: string }

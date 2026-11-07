@@ -46,6 +46,7 @@ type Src = {
   startFile?: boolean
   forecast?: unknown // forecast.json の中身（文字ならそのまま。undefined なら読めない）
   home?: string // 本人のフォルダ（既定は HOME）。Windows の形（C:\\…）も渡せる
+  log?: string // 04_ナレッジ/改善ログ.md の中身（undefined なら読めない）
 }
 const CFG = { owner: '山田', owner_call: '山田さん', calendar: { type: 'ics' } }
 async function setup($: any, on: any, s: Src) {
@@ -60,7 +61,7 @@ async function setup($: any, on: any, s: Src) {
   const sep = home.includes('\\') && !home.includes('/') ? '\\' : '/'
   const join = (rel: string) => home + sep + rel.replace(/\//g, sep)
   const statPaths: string[] = []
-  const n = { command: 0, tool: 0, open: 0, every: 0, writes: 0, tasksReads: 0, calReads: 0, forecastReads: 0 }
+  const n = { command: 0, tool: 0, open: 0, every: 0, writes: 0, tasksReads: 0, calReads: 0, forecastReads: 0, logReads: 0 }
   const want = s.hasFile
   on('command.register', (_: any, e: any) => {
     n.command++
@@ -88,6 +89,11 @@ async function setup($: any, on: any, s: Src) {
   on('fs.read', (_: any, e: any) => {
     const p = String(e.path)
     if (p.endsWith('config.json')) return { value: typeof s.cfg === 'string' ? s.cfg : JSON.stringify(s.cfg) }
+    if (p.endsWith('改善ログ.md')) {
+      n.logReads++
+      if (s.log === undefined) throw new Error('none')
+      return { value: s.log }
+    }
     if (p.includes('calendar')) {
       n.calReads++
       if (s.cal === undefined) throw new Error('none')
@@ -1030,4 +1036,298 @@ test('カテゴリ（C5・C6）：見出しは1行で切れる（truncate-end）
   expect(titles.at(-1)).toBe('これから2週間')
   await $.tool.call({ tool: 'mcp__ai-bunshin-panel__open_task', id: '' })
   expect(titles.at(-1)).toBe('今日のやること')
+})
+
+// ---------- T179：試し中の Try と承認待ち ----------
+// 改善ログの形（雛形と同じ列。内容の先頭に「（…）」の注記が付く行がある）
+const LOG_HEAD = '| ID | 良くするもの（プラグイン／チーム／人間側） | 内容 | 確かめ方 | 開始日 |\n|---|---|---|---|---|\n'
+const LOG_ROWS = [
+  '| Y20261106-2 | チーム・プラグイン | （ベロシティ。畳んで作り方を変える）正の表を作る。行＝決定ごと | 次の仕事で手戻りが0回 | 2026-11-09 |',
+  '| Y20261106-3 | チーム | （ベロシティ）5pt 以上は数えてから出す | 1回に出した量が上限の中 | 2026-11-09 |',
+  '| Y20261106-1 | チーム・プラグイン | 外のリポジトリで作業するときは先に聞く | 聞いたことが do_log に1行ある | 2026-11-06 |',
+]
+const logOf = (rows: string[] = LOG_ROWS, before = '', after = '## 定着したルール\n\n| ID | ルール |\n|---|---|\n| Y20261101-9 | 定着した分 |\n') =>
+  `# 改善ログ\n\n> 注記\n\n${before}## 実施中の Try\n\n${LOG_HEAD}${rows.join('\n')}\n\n${after}`
+const STD_HEADS = ['■ 今日の予定（09:00 取得）', '■ 山田さん（今日まで）', '■ AI（今日の計画）', '■ AI（これから）', '■ 近いうちに（山田さん）']
+const TRY_HEADS = ['■ 今日の予定（09:00 取得）', '■ 山田さん（今日まで）', '■ AI（今日の計画）', '■ AI（これから）', '■ 試し中の Try（3）', '■ 近いうちに（山田さん）']
+const TRY_LINES = [
+  '11/9 Y20261106-2 正の表を作る。行＝決定ごと',
+  '11/9 Y20261106-3 5pt 以上は数えてから出す',
+  '11/6 Y20261106-1 外のリポジトリで作業するときは先に聞く',
+]
+const CAL_OK = { fetched: '2026-11-02 09:00', events: [] } // 予定が読めている（赤い行を出さない）
+const homeTexts = async ($: any) => {
+  const ui = await mountAll($, 30, 40)
+  const ts = await texts(ui)
+  await ui.unmount()
+  return ts
+}
+
+test('Try（T1・T2）：「AI（これから）」と「近いうちに」の間に区画が出る。1件1行「M/D ID 内容」で、注記を飛ばす。表の並びのまま', async ($, on) => {
+  await setup($, on, { data: catData([ct('T001', '仕事', 1)]), log: logOf(), cal: CAL_OK })
+  const ui = await mountAll($, 30, 40)
+  const ts = await texts(ui)
+  expect(heads(ts)).toEqual(TRY_HEADS)
+  const i = ts.indexOf('■ 試し中の Try（3）')
+  expect(ts.slice(i + 1, i + 4)).toEqual(TRY_LINES)
+  expect(ts[i + 4]).toBe(' ') // 次の区画の前の空き
+  expect(ts[i + 5]).toBe('■ 近いうちに（山田さん）')
+  const rows = ((await ui.findAll({ type: 'Text' })) as any[]).filter(t => TRY_LINES.includes(t.text))
+  expect(rows.length).toBe(3)
+  expect(rows.every(t => t.props.wrap === 'truncate-end')).toBe(true)
+  // 同じ ID が詳細へつながる（押せる）
+  expect(await ui.find({ type: 'Button', key: 'try-Y20261106-1' })).toBeTruthy()
+  await ui.unmount()
+})
+
+test('Try（T1・T6・T7）：区画を足しても、ほかの行は同じ。増えるのは空き1＋見出し1＋件数の5行だけ。ログは読むだけ・描くたびに読み直す', async ($, on) => {
+  const { s, n } = await setup($, on, { data: catData([ct('T001', '仕事', 1), ct('T002', '次', 2)]), log: logOf(), cal: CAL_OK })
+  const withLog = await homeTexts($)
+  s.log = undefined
+  const without = await homeTexts($)
+  expect(withLog.length - without.length).toBe(5)
+  expect(withLog.filter(t => !without.includes(t) || t === ' ').length).toBeGreaterThanOrEqual(5)
+  expect(withLog.filter(t => t !== ' ' && !t.startsWith('■ 試し中') && !TRY_LINES.includes(t))).toEqual(without.filter(t => t !== ' '))
+  // 読み直す：1件にすると、次に描いたときは 1 件になる
+  s.log = logOf([LOG_ROWS[2]])
+  const one = await homeTexts($)
+  expect(heads(one)).toContain('■ 試し中の Try（1）')
+  expect(one.length - without.length).toBe(3)
+  expect(n.logReads).toBeGreaterThanOrEqual(3)
+  expect(n.writes).toBe(0)
+})
+
+const NO_SECTION: [string, (() => string | undefined) | string | undefined][] = [
+  ['改善ログが無い', undefined],
+  ['「実施中の Try」の見出しが無い', '# 改善ログ\n\n## 定着したルール\n\n' + LOG_HEAD + LOG_ROWS.join('\n') + '\n'],
+  ['見出しはあるが表が無い', '## 実施中の Try\n\n（なし）\n\n## 定着したルール\n'],
+  ['表の列が欠ける（内容が無い）', '## 実施中の Try\n\n| ID | 良くするもの | 確かめ方 | 開始日 |\n|---|---|---|---|\n| Y1 | a | b | 2026-11-06 |\n'],
+  ['表の列が欠ける（開始日が無い）', '## 実施中の Try\n\n| ID | 良くするもの | 内容 | 確かめ方 |\n|---|---|---|---|\n| Y1 | a | c | b |\n'],
+  ['表が空', logOf([])],
+  ['区切りの行が無い', '## 実施中の Try\n\n' + LOG_HEAD.split('\n')[0] + '\n' + LOG_ROWS.join('\n') + '\n'],
+  ['表が次の「## 」の後ろにある', '## 実施中の Try\n\nなし\n\n## 定着したルール\n\n' + LOG_HEAD + LOG_ROWS.join('\n') + '\n'],
+  ['ID が Y で始まらない行だけ', logOf(['| （なし） | | | | |', '| T001 | a | b | c | 2026-11-06 |'])],
+  ['空のファイル', ''],
+]
+for (const [label, log] of NO_SECTION) {
+  test(`Try（T1）：${label}ときは区画を出さない。エラーの行も出さず、落ちない`, async ($, on) => {
+    const { n } = await setup($, on, { data: catData([ct('T001', '仕事', 1)]), log: log as string | undefined, cal: CAL_OK })
+    const ui = await mountAll($, 30, 40)
+    const ts = await texts(ui)
+    expect(heads(ts)).toEqual(STD_HEADS)
+    expect(ts.some(t => t.includes('Try') || /Y\d/.test(t))).toBe(false)
+    expect(((await ui.findAll({ type: 'Text' })) as any[]).some(t => t.props.color === 'red')).toBe(false)
+    await ui.unmount()
+    // 開こうとすると「ありません」
+    const r = await $.tool.call({ tool: 'mcp__ai-bunshin-panel__open_task', id: 'Y20261106-1' })
+    expect(JSON.stringify(r)).toContain('ありません')
+    expect(n.writes).toBe(0)
+  })
+}
+
+test('Try（T1）：「実施中の Try」の下の表だけを読む。次の「## 」より後ろは読まない。列の順が違っても・列名の後ろに説明が付いていても読める', async ($, on) => {
+  const log =
+    '## 実施中の Try\n\n| 開始日 | 確かめ方（数字で） | 内容 | 良くするもの（チーム） | ID |\n|---|---|---|---|---|\n' +
+    '| 2026-11-08 | 確 | 本文A | 人 | Y9-1 |\n\n## 定着したルール\n\n| ID | 良くするもの | 内容 | 確かめ方 | 開始日 |\n|---|---|---|---|---|\n| Y9-2 | x | 本文B | y | 2026-11-01 |\n'
+  await setup($, on, { data: catData([ct('T001', '仕事', 1)]), log, cal: CAL_OK })
+  const ts = await homeTexts($)
+  expect(heads(ts)).toContain('■ 試し中の Try（1）')
+  expect(ts).toContain('11/8 Y9-1 本文A')
+  expect(ts.some(t => t.includes('Y9-2'))).toBe(false)
+})
+
+test('Try（T2）：内容の先頭の「（…）」の注記は飛ばす。注記が無い行はそのまま・閉じ括弧が無い行は飛ばさない・入れ子は外側まで・注記だけの行は飛ばさない・途中の括弧は残す', async ($, on) => {
+  const rows = [
+    '| Y1 | a | （注記）本文1 | c | 2026-11-06 |',
+    '| Y2 | a | 注記なしの本文2 | c | 2026-11-06 |',
+    '| Y3 | a | （閉じ括弧が無い本文3 | c | 2026-11-06 |',
+    '| Y4 | a | （入れ（子）の注記）本文4 | c | 2026-11-06 |',
+    '| Y5 | a | （注記だけ） | c | 2026-11-06 |',
+    '| Y6 | a | 本文6（途中の括弧）です | c | 2026-11-06 |',
+    '| Y7 | a | （注記）　　空白を挟む本文7 | c | |',
+  ]
+  await setup($, on, { data: catData([ct('T001', '仕事', 1)]), log: logOf(rows), cal: CAL_OK })
+  const ts = await homeTexts($)
+  const i = ts.indexOf('■ 試し中の Try（7）')
+  expect(ts.slice(i + 1, i + 8)).toEqual([
+    '11/6 Y1 本文1',
+    '11/6 Y2 注記なしの本文2',
+    '11/6 Y3 （閉じ括弧が無い本文3',
+    '11/6 Y4 本文4',
+    '11/6 Y5 （注記だけ）',
+    '11/6 Y6 本文6（途中の括弧）です',
+    'Y7 空白を挟む本文7', // 開始日が空なら日付は出さない
+  ])
+})
+
+const KEY = (id: string) => `try-${id}`
+test('Try（T3）：行を押すと Try の詳細（ID・良くするもの・内容の全文・確かめ方・開始日）。一覧に戻るで戻る', async ($, on) => {
+  const { titles } = await setup($, on, { data: catData([ct('T001', '仕事', 1)]), log: logOf(), cal: CAL_OK })
+  let ui = await mountAll($, 30, 40)
+  await ui.press({ key: KEY('Y20261106-2') })
+  expect(titles.at(-1)).toBe('Y20261106-2 の詳細')
+  await ui.unmount()
+  ui = await mountAll($, 30, 40)
+  const ts = (await texts(ui)).filter(t => !t.endsWith('：')) // 見出しの文字（太字）も別の Text として数えられるので除く
+  expect(ts).toEqual([
+    'Y20261106-2 試し中の Try',
+    ' ',
+    '良くするもの：チーム・プラグイン',
+    '内容：（ベロシティ。畳んで作り方を変える）正の表を作る。行＝決定ごと', // 全文（注記も入る）
+    '確かめ方：次の仕事で手戻りが0回',
+    '開始日：11/9',
+    ' ',
+  ])
+  expect(await ui.find({ type: 'Button', text: /一覧に戻る/ })).toBeTruthy()
+  await ui.press({ key: 'back' })
+  expect(titles.at(-1)).toBe('今日のやること')
+  const back = await texts(ui)
+  expect(heads(back)).toEqual(TRY_HEADS)
+  await ui.unmount()
+})
+
+test('Try（T3）：open_task に Y の ID を渡しても同じ詳細が開く。戻れる。知らない Y の ID は「ありません」の1行', async ($, on) => {
+  const { titles, n } = await setup($, on, { data: catData([ct('T001', '仕事', 1)]), log: logOf(), cal: CAL_OK })
+  const r = await $.tool.call({ tool: 'mcp__ai-bunshin-panel__open_task', id: 'Y20261106-1' })
+  expect(JSON.stringify(r)).toContain('Y20261106-1')
+  expect(JSON.stringify(r)).toContain('開きました')
+  expect(titles.at(-1)).toBe('Y20261106-1 の詳細')
+  let ui = await mountAll($, 30, 40)
+  const ts = await texts(ui)
+  expect(ts[0]).toBe('Y20261106-1 試し中の Try')
+  expect(ts).toContain('開始日：11/6')
+  await ui.press({ key: 'back' })
+  expect(heads(await texts(ui))).toEqual(TRY_HEADS)
+  await ui.unmount()
+
+  // 小文字でも同じ
+  await $.tool.call({ tool: 'mcp__ai-bunshin-panel__open_task', id: 'y20261106-3' })
+  expect(titles.at(-1)).toBe('Y20261106-3 の詳細')
+
+  // 知らない ID：1行（赤）で「ありません」。詳細は開かない
+  const before = titles.length
+  const no = await $.tool.call({ tool: 'mcp__ai-bunshin-panel__open_task', id: 'Y99999999-9' })
+  expect(JSON.stringify(no)).toContain('Y99999999-9 は改善ログにありません')
+  ui = await mountAll($, 30, 40)
+  const err = ((await ui.findAll({ type: 'Text' })) as any[]).filter(t => t.props.color === 'red')
+  expect(err.map(t => t.text)).toEqual(['Y99999999-9 は改善ログにありません'])
+  expect(titles.at(-1)).toBe('今日のやること')
+  expect(titles.length).toBe(before + 1)
+  await ui.unmount()
+  expect(n.writes).toBe(0)
+})
+
+test('Try（T3）：タスクの詳細の動きは変わらない（ボタンは「← 戻る」。T で始まる ID はこれまでどおり tasks.json を見る）', async ($, on) => {
+  await setup($, on, { data: catData([ct('T001', '仕事', 1)]), log: logOf(), cal: CAL_OK })
+  await $.tool.call({ tool: 'mcp__ai-bunshin-panel__open_task', id: 'T001' })
+  const ui = await mountAll($, 30, 40)
+  expect(await ui.find({ type: 'Button', text: /← 戻る/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Button', text: /一覧に戻る/ })).toBeFalsy()
+  expect((await texts(ui))[0]).toBe('T001 仕事')
+  await ui.unmount()
+})
+
+// 承認待ち：本人のお願い（題名が「ルール変更の承認」で始まる）
+const ap = (id: string, title: string, due: string, over: Record<string, unknown> = {}) => ({
+  id,
+  title,
+  assignee: '山田',
+  status: 'ToDo',
+  due,
+  kind: '判断',
+  priority: Number(id.slice(1)),
+  ...over,
+})
+const APDATA = {
+  tasks: [
+    ap('T001', '本人の期限切れ', '2026-11-01'),
+    ap('T002', '振り返り会議の仕組みの変更案（3点）を承認する', '2026-11-01'), // 「承認」はあるが「ルール変更の承認」で始まらない
+    ap('T003', 'ルール変更の承認（2件）', '2026-11-02'),
+    ap('T004', '本人の今日', '2026-11-02'),
+    ap('T005', '近い1', '2026-11-03'),
+    ap('T006', 'ルール変更の承認（1件）', '2026-11-04'),
+    ap('T007', '近い3', '2026-11-05'),
+    ap('T008', 'ルール変更の承認（AI の分）', '2026-11-02', { assignee: 'dev-a' }), // 本人ではない
+    ap('T009', 'ルール変更の承認（前の分）', '2026-11-02', { status: '完了' }), // 完了
+    ap('T010', '前のルール変更の承認（題名の途中）', '2026-11-02'), // 途中に入っているだけ
+  ],
+  daily_sprints: [],
+}
+// 区画の中の行（[印] ID … の形と、印の無い ID … の形）
+const sec = (ts: string[], name: string) => {
+  const i = ts.findIndex(t => t.startsWith(`■ ${name}`))
+  const rest = ts.slice(i + 1)
+  const j = rest.findIndex(t => t.startsWith('■ '))
+  return (j < 0 ? rest : rest.slice(0, j)).filter(t => /^(\[[^\]]*\] )?T\d+ /.test(t))
+}
+
+test('承認待ち（T4）：「今日まで」の一番上に [承認]（赤）。そのほかの並びは期日の順のまま。「ルール変更の承認」で始まらないお願い・本人以外・完了は承認待ちにならない', async ($, on) => {
+  await setup($, on, { data: APDATA, cal: CAL_OK })
+  const ui = await mountAll($, 30, 40)
+  const ts = await texts(ui)
+  expect(sec(ts, '山田さん（今日まで）')).toEqual([
+    '[承認] T003 ルール変更の承認（2件）（11/2）',
+    '[超過] T001 本人の期限切れ（11/1）',
+    '[超過] T002 振り返り会議の仕組みの変更案（3点）を承認する（11/1）',
+    '[今日] T004 本人の今日',
+    '[今日] T010 前のルール変更の承認（題名の途中）', // 途中に入っているだけ
+  ])
+  const all = (await ui.findAll({ type: 'Text' })) as any[]
+  const color = (re: RegExp) => all.find(t => re.test(t.text))?.props.color
+  expect(color(/\[承認\] T003/)).toBe('red')
+  expect(color(/\[超過\] T001/)).toBe('red') // 超過は今までどおり赤
+  expect(color(/\[今日\] T004/)).toBeUndefined()
+  // 本人以外・完了は印が付かない（AI のこれからに出る T008 は [ToDo] のまま）
+  expect(ts.filter(t => t.startsWith('[承認]')).length).toBe(2)
+  expect(sec(ts, 'AI（これから）')).toContain('[ToDo] T008 ルール変更の承認（AI の分）（11/2）')
+  await ui.unmount()
+})
+
+test('承認待ち（T4）：「近いうちに」では印だけ付いて赤。並びは期日の順のまま（引き上げない）', async ($, on) => {
+  await setup($, on, { data: APDATA, cal: CAL_OK })
+  const ui = await mountAll($, 30, 40)
+  const ts = await texts(ui)
+  expect(sec(ts, '近いうちに')).toEqual(['T005 近い1（11/3）', '[承認] T006 ルール変更の承認（1件）（11/4）', 'T007 近い3（11/5）'])
+  const all = (await ui.findAll({ type: 'Text' })) as any[]
+  expect(all.find(t => /\[承認\] T006/.test(t.text))?.props.color).toBe('red')
+  expect(all.find(t => /^T005/.test(t.text))?.props.color).toBeUndefined()
+  await ui.unmount()
+})
+
+test('承認待ち（T4）：承認待ちが無いときは並びも印も今までどおり', async ($, on) => {
+  await setup($, on, { data: { tasks: APDATA.tasks.filter(t => !t.title.startsWith('ルール変更の承認')), daily_sprints: [] }, cal: CAL_OK })
+  const ui = await mountAll($, 30, 40)
+  const ts = await texts(ui)
+  expect(ts.some(t => t.startsWith('[承認]'))).toBe(false)
+  expect(sec(ts, '山田さん（今日まで）')[0]).toBe('[超過] T001 本人の期限切れ（11/1）')
+  await ui.unmount()
+})
+
+test('承認待ち（T4）：承認待ちの行を押すと、ほかのお願いと同じ詳細が開く', async ($, on) => {
+  const { titles } = await setup($, on, { data: APDATA, cal: CAL_OK })
+  const ui = await mountAll($, 30, 40)
+  await ui.press({ key: 'mine-T003' })
+  expect(titles.at(-1)).toBe('T003 の詳細')
+  await ui.unmount()
+})
+
+test('承認待ち（T5）：全部の一覧では印を [承認] にするだけ。並び・色・ほかの行は変わらない', async ($, on) => {
+  await setup($, on, { data: APDATA, cal: CAL_OK })
+  await $.tool.call({ tool: AT })
+  const ui = await mountAll($, 40, 60)
+  const ts = await texts(ui)
+  expect(ts.filter(t => /^\[[^\]]*\] T\d+ /.test(t))).toEqual([
+    '[ToDo] T001 本人の期限切れ ・山田（11/1）',
+    '[ToDo] T002 振り返り会議の仕組みの変更案（3点）を承認する ・山田（11/1）',
+    '[承認] T003 ルール変更の承認（2件） ・山田（11/2）',
+    '[ToDo] T004 本人の今日 ・山田（11/2）',
+    '[ToDo] T005 近い1 ・山田（11/3）',
+    '[承認] T006 ルール変更の承認（1件） ・山田（11/4）',
+    '[ToDo] T007 近い3 ・山田（11/5）',
+    '[ToDo] T008 ルール変更の承認（AI の分） ・dev-a（11/2）',
+    '[ToDo] T010 前のルール変更の承認（題名の途中） ・山田（11/2）',
+    '[済] T009 ルール変更の承認（前の分） ・山田',
+  ])
+  expect(((await ui.findAll({ type: 'Text' })) as any[]).some(t => t.props.color === 'red')).toBe(false)
+  await ui.unmount()
 })

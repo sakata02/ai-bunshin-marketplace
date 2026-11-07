@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { AllRow, Board, Cal, CalEvent, Detail, ForecastDay, ForecastTask, Gantt, Row, View } from '../types'
+import type { AllRow, Board, Cal, CalEvent, Detail, ForecastDay, ForecastTask, Gantt, Row, Try, View } from '../types'
 
 // 共通のパネル。本人のフォルダ（設定/config.json と 00_タスク管理/data/tasks.json がある所）でだけ出る。
 // tasks.json と予定のキャッシュは読むだけ。名前・呼び方は config.json の owner・owner_call から
@@ -34,7 +34,7 @@ type Task = {
 }
 
 // 本人のフォルダ（見つかったときだけ入る。session.start のたびに探し直す）
-type Me = { home: string; owner: string; call: string; hasCal: boolean; file: string; calFile: string; forecastFile: string }
+type Me = { home: string; owner: string; call: string; hasCal: boolean; file: string; calFile: string; forecastFile: string; logFile: string }
 let me: Me | undefined
 const NO_HOME = '本人のフォルダ（設定/config.json と 00_タスク管理/data/tasks.json がある所）の中ではないので、使えません。'
 
@@ -76,7 +76,7 @@ async function findMe($: EngineInterface): Promise<Me | undefined> {
         const owner = typeof c.owner === 'string' && c.owner.trim() ? c.owner.trim() : '本人'
         const call = typeof c.owner_call === 'string' && c.owner_call.trim() ? c.owner_call.trim() : `${owner}さん`
         // 予定は update_dashboard.py が起動時・自動実行のときに書く（config に calendar があるときだけ）
-        return { home: dir, owner, call, hasCal: !!c.calendar, file, calFile: at(dir, '00_タスク管理/data/calendar_cache.json'), forecastFile: at(dir, '00_タスク管理/data/forecast.json') }
+        return { home: dir, owner, call, hasCal: !!c.calendar, file, calFile: at(dir, '00_タスク管理/data/calendar_cache.json'), forecastFile: at(dir, '00_タスク管理/data/forecast.json'), logFile: at(dir, '04_ナレッジ/改善ログ.md') }
       } catch {
         return undefined
       }
@@ -97,23 +97,30 @@ const UNCAT = '未分類'
 const DONE_HEAD = '完了'
 const catOf = (t: Task): string => (typeof t.category === 'string' && t.category.trim() ? t.category.trim() : UNCAT)
 
+// 承認待ち：未完了で、担当が本人、題名が「ルール変更の承認」で始まるお願い（振り返りが出すお願いの目印）。印は [承認]
+const APPROVAL = 'ルール変更の承認'
+const APPROVAL_MARK = '承認'
+const isApproval = (t: Task, OWNER: string) =>
+  t.status !== '完了' && t.assignee === OWNER && typeof t.title === 'string' && t.title.startsWith(APPROVAL)
+
 function build(data: any, today: string, OWNER: string): Board {
   const tasks: Task[] = data.tasks ?? []
   const open = tasks.filter(t => t.status !== '完了')
   const row = (t: Task, mark: string): Row => ({ id: t.id, title: t.title, due: md(t.due ?? ''), mark })
   const byDue = (a: Task, b: Task) => (a.due ?? '').localeCompare(b.due ?? '')
 
-  const mine = open
-    .filter(t => t.assignee === OWNER && t.due && t.due <= today)
-    .sort(byDue)
-    .map(t => row(t, t.due! < today ? '超過' : '今日'))
+  // 今日まで：期日の順。承認待ちは一番上（同じ仲間の中は期日の順のまま）
+  const mineTasks = open.filter(t => t.assignee === OWNER && t.due && t.due <= today).sort(byDue)
+  const mine = [...mineTasks.filter(t => isApproval(t, OWNER)), ...mineTasks.filter(t => !isApproval(t, OWNER))].map(t =>
+    row(t, isApproval(t, OWNER) ? APPROVAL_MARK : t.due! < today ? '超過' : '今日'),
+  )
 
   const limit = dayOf(Date.parse(today) + 4 * 86400e3)
   const soon = open
     .filter(t => t.assignee === OWNER && t.due && t.due > today && t.due <= limit)
     .sort(byDue)
     .slice(0, 6)
-    .map(t => row(t, ''))
+    .map(t => row(t, isApproval(t, OWNER) ? APPROVAL_MARK : ''))
 
   const sprint = (data.daily_sprints ?? []).find((s: any) => s.date === today)
   const planned: string[] = [...(sprint?.planned ?? []), ...(sprint?.added ?? []), ...(sprint?.pulled ?? [])]
@@ -133,7 +140,7 @@ function build(data: any, today: string, OWNER: string): Board {
   // 全部のタスク：未完了をカテゴリごとにまとめる（順位の順に並べ、カテゴリは「いちばん順位が高いタスク」が早い順。「未分類」は最後）。
   // カテゴリの中は順位の順のまま。そのあとに完了を新しい順に（カテゴリでは分けない）
   const allRow = (t: Task): AllRow => ({
-    ...row(t, t.status === '完了' ? '済' : (t.status ?? '')),
+    ...row(t, t.status === '完了' ? '済' : isApproval(t, OWNER) ? APPROVAL_MARK : (t.status ?? '')),
     who: t.assignee ?? '',
     done: t.status === '完了',
     category: catOf(t),
@@ -154,13 +161,102 @@ function build(data: any, today: string, OWNER: string): Board {
 const fmt = (v: any): string =>
   Array.isArray(v) ? v.map(fmt).join('、') : v == null ? '' : typeof v === 'object' ? JSON.stringify(v) : String(v)
 
-// 1件分の詳細。お願いなら手順・完了の基準・報告してほしいことも出す
+// ---------- 試し中の Try（本人のフォルダの 04_ナレッジ/改善ログ.md の「## 実施中の Try」の表。読むだけ） ----------
+const TRY_HEAD = /^##\s+実施中の\s*Try/
+const TRY_COLS = ['ID', '良くするもの', '内容', '確かめ方', '開始日'] as const
+
+// 表の1行を、| で区切った欄にする（\| は区切りにしない。前後の空白は除く）
+const splitRow = (line: string): string[] => {
+  const s = line.trim().replace(/^\|/, '').replace(/(?<!\\)\|$/, '')
+  const cells: string[] = []
+  let cur = ''
+  for (let i = 0; i < s.length; i++) {
+    if (s[i] === '\\' && s[i + 1] === '|') {
+      cur += '|'
+      i++
+    } else if (s[i] === '|') {
+      cells.push(cur.trim())
+      cur = ''
+    } else cur += s[i]
+  }
+  cells.push(cur.trim())
+  return cells
+}
+
+// 内容の先頭の「（…）」の注記を飛ばして、そこから右をそのまま返す。閉じ括弧が無い・飛ばすと何も残らないときは飛ばさない
+function skipNote(body: string): string {
+  if (!body.startsWith('（')) return body
+  let depth = 0
+  for (let i = 0; i < body.length; i++) {
+    if (body[i] === '（') depth++
+    else if (body[i] === '）' && --depth === 0) {
+      const rest = body.slice(i + 1).trimStart()
+      return rest === '' ? body : rest
+    }
+  }
+  return body
+}
+
+// 「実施中の Try」の見出しから次の「## 」までの表を読む。列は見出しの名前で探す。無い・形が違う・空のときは []（エラーにしない）
+function parseTries(text: string): Try[] {
+  const lines = text.split(/\r?\n/)
+  const from = lines.findIndex(l => TRY_HEAD.test(l))
+  if (from < 0) return []
+  let to = lines.findIndex((l, i) => i > from && /^##\s/.test(l))
+  if (to < 0) to = lines.length
+  const rows = lines.slice(from + 1, to).map(l => l.trim())
+  const t0 = rows.findIndex(l => l.startsWith('|'))
+  if (t0 < 0 || !rows[t0 + 1]?.startsWith('|') || !/^[\s|:-]+$/.test(rows[t0 + 1]) || !rows[t0 + 1].includes('-')) return []
+  const head = splitRow(rows[t0])
+  const col = TRY_COLS.map(name => head.findIndex(h => h.startsWith(name)))
+  if (col.some(i => i < 0)) return []
+  const tries: Try[] = []
+  for (let i = t0 + 2; i < rows.length && rows[i].startsWith('|'); i++) {
+    const c = splitRow(rows[i])
+    const cell = (k: number) => c[col[k]] ?? ''
+    if (!cell(0).toUpperCase().startsWith('Y')) continue
+    tries.push({ id: cell(0), area: cell(1), body: cell(2), check: cell(3), start: cell(4) })
+  }
+  return tries
+}
+
+// 改善ログを読んで Try の一覧にする。読めなければ []
+async function loadTries($: EngineInterface): Promise<Try[]> {
+  if (!me) return []
+  try {
+    return parseTries(await $.fs.read(me.logFile))
+  } catch {
+    return []
+  }
+}
+
+// 開始日：YYYY-MM-DD なら M/D、ほかの書き方はそのまま
+const startOf = (s: string) => (ISO.test(s) ? md(s) : s)
+
+// 1件分の詳細。お願いなら手順・完了の基準・報告してほしいことも出す。Y で始まる ID なら Try の詳細
 async function show($: EngineInterface, raw: string): Promise<Detail & { isPlaced: boolean }> {
   if (!me) return { ...NONE, error: NO_HOME, isPlaced: false }
   const FILE = me.file
   let id = (raw.trim().split(/\s+/)[0] ?? '').toUpperCase()
   if (/^\d+$/.test(id)) id = `T${id.padStart(3, '0')}`
   let d: Detail
+  if (id.startsWith('Y')) {
+    const t = (await loadTries($)).find(x => x.id.toUpperCase() === id)
+    if (!t) {
+      d = { ...NONE, id, error: `${id} は改善ログにありません` }
+    } else {
+      const pairs: [string, string][] = [
+        ['良くするもの', t.area],
+        ['内容', t.body],
+        ['確かめ方', t.check],
+        ['開始日', startOf(t.start)],
+      ]
+      d = { id: t.id, title: '試し中の Try', lines: pairs.map(([label, text]) => ({ label, text })).filter(l => l.text !== ''), steps: [], error: '' }
+    }
+    await update($, detail, () => d)
+    const { isPlaced } = await $.ui.open({ id: PANE, title: d.error ? TITLE : `${d.id} の詳細` })
+    return { ...d, isPlaced }
+  }
   try {
     const data = JSON.parse(await $.fs.read(FILE))
     const t: Task | undefined = (data.tasks ?? []).find((x: Task) => x.id === id)
@@ -601,7 +697,7 @@ export const register: Register = on => {
             </Text>
           ))}
           <Text> </Text>
-          <Button key="back" label="← 戻る" onPress={() => void back($)} />
+          <Button key="back" label={d.id.startsWith('Y') ? '← 一覧に戻る' : '← 戻る'} onPress={() => void back($)} />
         </Box>
       )
     }
@@ -669,6 +765,7 @@ export const register: Register = on => {
       )
     }
 
+    const tries = await loadTries($)
     const c = await read($, cal)
     // 予定 1件：「09:00〜09:30 件名」。終わったものは薄く、今のものは太字
     const ev = (e: CalEvent, i: number) => {
@@ -709,7 +806,7 @@ export const register: Register = on => {
         <Text bold> </Text>
         <Text bold>■ {call}（今日まで）</Text>
         {b.mine.length === 0 && <Text dimColor>なし</Text>}
-        {b.mine.map(r => line('mine', r, r.mark === '超過' ? 'red' : undefined))}
+        {b.mine.map(r => line('mine', r, r.mark === '超過' || r.mark === APPROVAL_MARK ? 'red' : undefined))}
 
         <Text bold> </Text>
         <Text bold>■ AI（今日の計画）</Text>
@@ -732,10 +829,18 @@ export const register: Register = on => {
         {b.aiNext.map(r => line('aiNext', r))}
         {b.aiNextMore > 0 && <Text dimColor>ほか {b.aiNextMore} 件</Text>}
 
+        {tries.length > 0 && <Text bold> </Text>}
+        {tries.length > 0 && <Text bold>■ 試し中の Try（{tries.length}）</Text>}
+        {tries.map(t => (
+          <Button key={`try-${t.id}`} plain onPress={() => void show($, t.id)}>
+            <Text wrap="truncate-end">{[startOf(t.start), t.id, skipNote(t.body)].filter(Boolean).join(' ')}</Text>
+          </Button>
+        ))}
+
         <Text bold> </Text>
         <Text bold>■ 近いうちに（{call}）</Text>
         {b.soon.length === 0 && <Text dimColor>なし</Text>}
-        {b.soon.map(r => line('soon', r))}
+        {b.soon.map(r => line('soon', r, r.mark === APPROVAL_MARK ? 'red' : undefined))}
 
         <Text bold> </Text>
         <Button key="open-all" label="全部のタスクを見る" onPress={() => void showAll($)} />
