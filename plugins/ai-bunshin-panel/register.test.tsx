@@ -878,7 +878,7 @@ test('T188 起動：本人のフォルダの外では開かない（forecast.jso
   expect(n.forecastReads).toBe(0)
 })
 
-// ---------- T189：ガントの棒の行を、案件のカテゴリ（OASYS・AI分身 など）ごとにまとめる ----------
+// ---------- T189：ガントの棒の行を、案件のカテゴリ（A案件・B案件 など）ごとにまとめる ----------
 // forecast.json の tasks にはカテゴリが無い。tasks.json（board.all）から id で引く。引けないものは「未分類」
 type GT1 = { id: string; title: string; priority: number; category?: unknown; status: string; assignee: string }
 const gt = (id: string, priority: number, category?: unknown): GT1 => ({
