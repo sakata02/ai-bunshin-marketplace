@@ -5,6 +5,7 @@
 - claude も security（キーチェーン）も動かさない。URL は作り物（SECRET を含む）。本物の本人のフォルダは読むだけ"""
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -22,6 +23,7 @@ URL_ENV = "TEST_CAL_URL"
 
 fail = 0
 count = 0
+TMP_DIRS = []   # このテストが作った一時フォルダ（終わりに片付ける。D5）
 
 
 def check(cond, msg):
@@ -43,6 +45,7 @@ def nfd(s):
 def mkfixture():
     """本人のフォルダ・プラグインの元・ユーザーのホーム・外のリポジトリの作り物"""
     root = Path(os.path.realpath(tempfile.mkdtemp(prefix="sbxtest_")))
+    TMP_DIRS.append(root)
     home = root / "本人"
     for d in ["設定", "03_インプット", ".claude/rules", "scripts/auto/logs", "00_タスク管理/data", "04_ナレッジ", "05_開発/x"]:
         (home / d).mkdir(parents=True)
@@ -50,10 +53,24 @@ def mkfixture():
     (home / "CLAUDE.md").write_text("x", encoding="utf-8")
     (home / "scripts/auto/run.sh").write_text("#!/bin/zsh\n", encoding="utf-8")
     (home / "scripts/auto/daily_cycle.sh").write_text("#!/bin/zsh\n", encoding="utf-8")
-    plug = root / "marketplace" / "plugins" / "ai-bunshin"
+    (home / ".git/hooks").mkdir(parents=True)
+    (home / ".git/config").write_text("", encoding="utf-8")
+    mkt = root / "marketplace"
+    plug = mkt / "plugins" / "ai-bunshin"
     (plug / "scripts").mkdir(parents=True)
     uh = root / "userhome"
     (uh / ".claude/plugins").mkdir(parents=True)
+    other_mkt = root / "other_marketplace"
+    other_mkt.mkdir()
+    (root / "gh_clone").mkdir()   # github 由来のもの（実在する。directory でないので足さない）
+    (uh / ".claude/plugins/known_marketplaces.json").write_text(json.dumps({
+        "official": {"source": {"source": "github", "repo": "x/y"}, "installLocation": str(root / "gh_clone")},
+        "mine": {"source": {"source": "directory", "path": str(mkt)}, "installLocation": str(mkt)},
+        "second": {"source": {"source": "directory", "path": str(other_mkt)}, "installLocation": str(other_mkt)},
+        "gone": {"source": {"source": "directory", "path": "x"}, "installLocation": str(root / "nowhere")},
+        "rel": {"source": {"source": "directory", "path": "x"}, "installLocation": "relative/dir"},
+        "broken1": "x", "broken2": {"source": "directory"}, "broken3": {"source": {"source": "directory"}, "installLocation": 5},
+    }), encoding="utf-8")
     repo = root / "repos" / "hp"
     (repo / ".git/hooks").mkdir(parents=True)
     (repo / ".git/config").write_text("", encoding="utf-8")
@@ -68,7 +85,7 @@ def mkfixture():
         ]},
     }
     (home / "設定/config.json").write_text(json.dumps(cfg, ensure_ascii=False), encoding="utf-8")
-    return {"root": root, "home": home, "plug": plug, "uh": uh, "repo": repo, "cfg": cfg}
+    return {"root": root, "home": home, "plug": plug, "uh": uh, "repo": repo, "cfg": cfg, "mkt": mkt, "mkt2": other_mkt}
 
 
 def write_cfg(fx, cfg):
@@ -110,10 +127,18 @@ def expected(fx):
         (h / ".claude", "dir", "S02 .claude"),
         (uh / ".claude/plugins", "dir", "S02 プラグイン（コピー）"),
         (pl, "dir", "S02 プラグイン（元）"),
-        (h / "scripts/auto/run.sh", "file", "S04 run.sh"),
-        (h / "scripts/auto/daily_cycle.sh", "file", "S04 daily_cycle.sh"),
-        (h / "scripts/hooks", "dir", "S04・X6 hook のフォルダ"),
-        (h / "scripts/mods", "dir", "S04・X6 mod のフォルダ"),
+        (h / "scripts", "dir", "S04 scripts/ を丸ごと"),
+        (fx["mkt"], "dir", "S12 マーケットプレイスのルート"),
+        (fx["mkt2"], "dir", "S12 directory の2つ目"),
+        (h / "CLAUDE.local.md", "file", "S13 CLAUDE.local.md"),
+        (h / ".git/hooks", "dir", "S13 本人のフォルダの .git/hooks"),
+        (h / ".git/config", "file", "S13 本人のフォルダの .git/config"),
+        (uh / "Library/LaunchAgents", "dir", "S13 LaunchAgents"),
+        (uh / ".claude/settings.json", "file", "S13 利用者の settings.json"),
+        (uh / ".claude/CLAUDE.md", "file", "S13 利用者の CLAUDE.md"),
+        (uh / ".claude/skills", "dir", "S13 skills"),
+        (uh / ".claude/agents", "dir", "S13 agents"),
+        (uh / ".claude/commands", "dir", "S13 commands"),
         (repo / ".git/hooks", "dir", "X12 hooks"),
         (repo / ".git/config", "file", "X12 config"),
     ]
@@ -173,28 +198,35 @@ def test_nfc_and_nfd():
     check(nfc(str(odd / "設定")) in deny_write(s2) and nfd(str(odd / "設定")) in deny_write(s2), "X13 本人のフォルダ名が NFC・NFD の両方")
 
 
-# --- 4. 書けるままのもの（S02・S04）---
-def test_tasks_json_and_logs_stay_writable():
+# --- 4. 書けるままのもの（S02。S04 改で logs は書けなくなった）---
+def test_tasks_json_stays_writable_scripts_all_protected():
     fx = mkfixture()
     s = ok_json(fx)
-    for w in [fx["home"] / "00_タスク管理/data/tasks.json", fx["home"] / "scripts/auto/logs", fx["home"] / "scripts/auto/logs/20261107.log",
-              fx["home"] / "00_タスク管理/data/calendar_cache.json", fx["home"] / "scripts/auto/.lock"]:
+    for w in [fx["home"] / "00_タスク管理/data/tasks.json", fx["home"] / "00_タスク管理/data/calendar_cache.json",
+              fx["home"] / "00_タスク管理/タスクボード.md", fx["home"] / "02_成果物/x.xlsx", fx["home"] / "04_ナレッジ/a.md"]:
         for v in (nfc(str(w)), nfd(str(w))):
             hit = [x for x in deny_write(s) if v == x or v.startswith(x.rstrip("/") + "/")]
-            check(not hit, "S02・S04 書けるままのはずが denyWrite に含まれる：%s ← %s" % (w.name, hit))
+            check(not hit, "S02 書けるままのはずが denyWrite に含まれる：%s ← %s" % (w.name, hit))
     check("tasks.json" not in json.dumps(s), "tasks.json の名前が出力に出ている")
-    check("logs" not in json.dumps(s), "logs が出力に出ている")
-    check(not any(x.rstrip("/").endswith("/scripts") for x in deny_write(s)), "S04 scripts ごと denyWrite にしない")
-    check(not any(x.rstrip("/").endswith("/scripts/auto") for x in deny_write(s)), "S04 scripts/auto ごと denyWrite にしない")
-    check(not any("/scripts/**" in x or "scripts/auto/**" in x for x in deny_edit(s)), "S04 scripts ごと Edit の deny にしない")
     check(not any(x.rstrip("/") == str(fx["home"]) for x in deny_write(s)), "本人のフォルダ全体を denyWrite にしない")
+    # S04 改：scripts/ は丸ごと。run.sh だけ・hooks と mods だけ、では親を mv してリンクに替えられる
+    for sub in ("scripts", ):
+        for v in (nfc(str(fx["home"] / sub)), nfd(str(fx["home"] / sub))):
+            check(v in deny_write(s), "S04 %s が丸ごと denyWrite にある" % sub)
+            check(rule(v, "dir") in deny_edit(s), "S04 %s が丸ごと Edit の deny にある" % sub)
+    for w in [fx["home"] / "scripts/auto/logs/20261107.log", fx["home"] / "scripts/auto/.lock", fx["home"] / "scripts/hooks/x.sh",
+              fx["home"] / "scripts/mods/m/a.ts", fx["home"] / "scripts/new_dir/x"]:
+        hit = [x for x in deny_write(s) if nfc(str(w)).startswith(x.rstrip("/") + "/")]
+        check(hit, "S04 scripts/ の中は書けない：%s" % w.name)
+    # 個別に分けて守る形に戻っていない（scripts/ の中だけの項目は冗長なので無いはず）
+    check(not any(x.endswith("/scripts/auto/run.sh") or x.endswith("/scripts/hooks") or x.endswith("/scripts/mods") for x in deny_write(s)),
+          "S04 scripts/ の中の個別の項目は作らない（丸ごとだけ）")
 
 
 def test_stay_writable_guard():
-    """一覧が書けるままの先を含むと、作らずに止める"""
+    """一覧が tasks.json を含むと、作らずに止める"""
     base = json.loads(PATHS_JSON.read_text(encoding="utf-8"))
-    for bad_path, bad_base in [("scripts", "home"), ("scripts/auto", "home"), ("scripts/auto/logs", "home"),
-                               ("00_タスク管理", "home"), ("00_タスク管理/data", "home"), ("00_タスク管理/data/tasks.json", "home"), (".", "home")]:
+    for bad_path, bad_base in [("00_タスク管理", "home"), ("00_タスク管理/data", "home"), ("00_タスク管理/data/tasks.json", "home"), (".", "home")]:
         fx = mkfixture()
         spec = json.loads(json.dumps(base))
         spec["entries"].append({"id": "BAD", "base": bad_base, "path": bad_path, "kind": "dir"})
@@ -210,24 +242,63 @@ def test_stay_writable_guard():
     pf.write_text(json.dumps(spec, ensure_ascii=False), encoding="utf-8")
     rc, out, err = run(fx, extra=["--paths-file", str(pf)])
     check(rc == 1, "must_stay_writable が無い一覧は作らない")
-
-
-def test_hooks_and_mods_protected_even_if_missing():
-    """X6：hook と mod のフォルダは、無くても守る（囲いの中で作られたあとに hook・mod として動くのを防ぐ）"""
+    # マーケットプレイスのルートが tasks.json を含む（本人のフォルダの親を登録した）ときも作らない
     fx = mkfixture()
-    for d in ("hooks", "mods"):
-        check(not (fx["home"] / "scripts" / d).exists(), "テスト自体：scripts/%s は無い状態から" % d)
+    (fx["uh"] / ".claude/plugins/known_marketplaces.json").write_text(json.dumps(
+        {"p": {"source": {"source": "directory", "path": "x"}, "installLocation": str(fx["root"])}}), encoding="utf-8")
+    rc, out, err = run(fx)
+    check(rc == 1 and out == "" and "S12-marketplace" in err, "S12 マーケットプレイスのルートが tasks.json を含むときは作らない rc=%s err=%s" % (rc, err))
+
+
+def test_scripts_missing_still_protected():
+    """X6：scripts/ が無くても守る（囲いの中で作られて、あとで hook・mod・launchd の入口になるのを防ぐ）"""
+    fx = mkfixture()
+    shutil.rmtree(str(fx["home"] / "scripts"))
     s = ok_json(fx)
-    for d in ("hooks", "mods"):
-        p = fx["home"] / "scripts" / d
-        check(nfc(str(p)) in deny_write(s), "X6 無い scripts/%s も denyWrite にある" % d)
-        check(rule(nfc(str(p)), "dir") in deny_edit(s), "X6 無い scripts/%s も Edit の deny にある" % d)
-    # あっても同じ（実在する形）
-    (fx["home"] / "scripts/hooks").mkdir(); (fx["home"] / "scripts/mods/sakata-tasks").mkdir(parents=True)
-    s2 = ok_json(fx)
-    check(s2 == s, "フォルダがあっても無くても同じ出力")
-    # logs・tasks.json とは重ならない
-    check(not any(x.rstrip("/").endswith("/scripts/auto/logs") for x in deny_write(s2)), "hooks・mods を入れても logs は書ける")
+    check(nfc(str(fx["home"] / "scripts")) in deny_write(s) and rule(nfc(str(fx["home"] / "scripts")), "dir") in deny_edit(s), "無い scripts/ も守る")
+    # CLAUDE.local.md・~/Library/LaunchAgents・~/.claude の項目も、無くても入る
+    for p in [fx["home"] / "CLAUDE.local.md", fx["uh"] / "Library/LaunchAgents", fx["uh"] / ".claude/skills"]:
+        check(not p.exists() and nfc(str(p)) in deny_write(s), "S13 無い %s も denyWrite にある" % p.name)
+
+
+def test_marketplace_roots():
+    fx = mkfixture()
+    s = ok_json(fx)
+    for r in (fx["mkt"], fx["mkt2"]):
+        check(nfc(str(r)) in deny_write(s) and rule(nfc(str(r)), "dir") in deny_edit(s), "S12 directory のマーケットプレイスのルートを丸ごと守る：%s" % r.name)
+    check(not any("gh_clone" in x or "nowhere" in x or "relative" in x for x in deny_write(s)), "S12 github・無い・相対の installLocation は足さない")
+    # --plugin-root を渡さない形でなく、渡した plugin-root が別の場所でも、マーケットプレイスは足される
+    other = fx["root"] / "cache" / "p"
+    other.mkdir(parents=True)
+    rc, out, err = run(fx, args=["--home", str(fx["home"]), "--plugin-root", str(other), "--user-home", str(fx["uh"])])
+    s2 = json.loads(out)
+    check(rc == 0 and str(fx["mkt"]) in deny_write(s2) and str(other) in deny_write(s2), "S12 plugin-root が別でもマーケットプレイスを守る（両方）")
+    # 読めない・無いときは、足さずに作る（止めない）
+    f = fx["uh"] / ".claude/plugins/known_marketplaces.json"
+    for body in ["", "{", "[]", "null", "\"x\"", "\x00", None]:
+        if body is None:
+            f.rename(fx["uh"] / ".claude/plugins/moved.json")
+        else:
+            f.write_text(body, encoding="utf-8")
+        rc, out, err = run(fx)
+        sj = json.loads(out) if rc == 0 else {}
+        check(rc == 0 and err == "" and str(fx["mkt2"]) not in deny_write(sj) and str(fx["plug"]) in deny_write(sj),
+              "S12 known_marketplaces.json=%r でも作る（マーケットプレイスは足さない）rc=%s err=%s" % (body, rc, err))
+    # ファイルがフォルダ
+    (fx["uh"] / ".claude/plugins/moved.json").rename(f)
+    f.rename(fx["uh"] / ".claude/plugins/moved2.json")
+    f.mkdir()
+    rc, out, err = run(fx)
+    check(rc == 0, "S12 known_marketplaces.json がフォルダでも作る rc=%s" % rc)
+    # 一覧の marketplaces の書き方が違うときは作らない
+    base = json.loads(PATHS_JSON.read_text(encoding="utf-8"))
+    for mod in (lambda d: d.pop("marketplaces"), lambda d: d["marketplaces"].pop("file"), lambda d: d["marketplaces"].update(base="home")):
+        spec = json.loads(json.dumps(base))
+        mod(spec)
+        pf = fx["root"] / "m.json"
+        pf.write_text(json.dumps(spec, ensure_ascii=False), encoding="utf-8")
+        rc, out, err = run(fx, extra=["--paths-file", str(pf)])
+        check(rc == 1 and out == "", "S12 一覧の marketplaces が壊れていたら作らない")
 
 
 # --- 5. 作らないもの（S08・S10・X9）---
@@ -380,6 +451,23 @@ def test_add_dir_repos():
     s = ok_json(fx)
     ww = [nfc(x) for x in deny_write(s)]
     check(nfc(str(fx["repo"] / ".git/hooks")) in ww and nfc(str(fx["repo"] / ".git/config")) in ww, "X12 足すリポジトリの .git/hooks・.git/config")
+    # D4：ファイルかフォルダかは名前でなく一覧の kind で決まる（config はファイル＝ /** を付けない、hooks はフォルダ）
+    ee = [nfc(x) for x in deny_edit(s)]
+    check("Edit(/%s)" % nfc(str(fx["repo"] / ".git/config")) in ee and "Edit(/%s/**)" % nfc(str(fx["repo"] / ".git/hooks")) in ee, "D4 kind どおりの Edit の deny")
+    base = json.loads(PATHS_JSON.read_text(encoding="utf-8"))
+    spec = json.loads(json.dumps(base))
+    spec["add_dir_git"] = [{"path": ".git/info/exclude_x", "kind": "file"}, {"path": ".git/hooks_config", "kind": "dir"}]
+    pf = fx["root"] / "g.json"
+    pf.write_text(json.dumps(spec, ensure_ascii=False), encoding="utf-8")
+    sg = ok_json(fx, extra=["--paths-file", str(pf)])
+    eg = [nfc(x) for x in deny_edit(sg)]
+    check("Edit(/%s)" % nfc(str(fx["repo"] / ".git/info/exclude_x")) in eg, "D4 名前が config でなくても kind=file ならファイル")
+    check("Edit(/%s/**)" % nfc(str(fx["repo"] / ".git/hooks_config")) in eg, "D4 名前が config で終わっても kind=dir ならフォルダ")
+    for bad in ([".git/hooks"], [{"path": ".git/x"}], [{"path": ".git/x", "kind": "pipe"}], [{"path": "/etc", "kind": "dir"}], [{"path": "../a", "kind": "dir"}]):
+        spec["add_dir_git"] = bad
+        pf.write_text(json.dumps(spec, ensure_ascii=False), encoding="utf-8")
+        rc, out, err = run(fx, extra=["--paths-file", str(pf)])
+        check(rc == 1 and out == "", "D4 add_dir_git の書き方が違えば作らない：%r" % (bad,))
     check(not any("05_開発" in x and ".git" in x for x in ww), "本人のフォルダの中の案件は対象外（daily_cycle.sh と同じ選び方）")
     check(not any("/none/" in x for x in ww), "実在しない案件は対象外")
     check(not any("relative" in x for x in ww), "相対パスの案件は対象外")
@@ -387,7 +475,7 @@ def test_add_dir_repos():
     cfg = {k: v for k, v in fx["cfg"].items() if k != "dev"}
     write_cfg(fx, cfg)
     s2 = ok_json(fx)
-    check(s2 is not None and not any(".git" in x for x in deny_write(s2)), "dev が無ければ .git の項目は入らない")
+    check(s2 is not None and not any(str(fx["repo"]) in x for x in deny_write(s2)), "dev が無ければ足すリポジトリの .git の項目は入らない")
     write_cfg(fx, dict(fx["cfg"], dev="x"))
     check(ok_json(fx) is not None, "dev が文字列でも作れる（読み飛ばす）")
 
@@ -431,12 +519,16 @@ def test_no_writes():
 def test_paths_json_shape():
     spec = json.loads(PATHS_JSON.read_text(encoding="utf-8"))
     ids = {e["id"] for e in spec["entries"]}
-    want = {"A-settings", "A-claude-md", "A-ai-bunshin-dir", "B-input", "C-claude", "D-plugin-cache", "D-plugin-source", "S04-run-sh", "S04-daily-cycle", "S04-hooks", "S04-mods"}
+    want = {"A-settings", "A-claude-md", "A-claude-local-md", "A-ai-bunshin-dir", "B-input", "C-claude", "C-git-hooks", "C-git-config",
+            "D-plugin-cache", "D-plugin-source", "S04-scripts", "S13-launchagents", "S13-user-settings", "S13-user-claude-md",
+            "S13-user-skills", "S13-user-agents", "S13-user-commands"}
     check(ids == want, "一覧の id が決定どおり：差 %s" % (ids ^ want))
-    check(spec["add_dir_git"] == [".git/hooks", ".git/config"], "X12 add_dir_git")
+    check(spec["add_dir_git"] == [{"path": ".git/hooks", "kind": "dir"}, {"path": ".git/config", "kind": "file"}], "X12 add_dir_git")
     stay = {(m["base"], m["path"]) for m in spec["must_stay_writable"]}
-    check(stay == {("home", "00_タスク管理/data/tasks.json"), ("home", "scripts/auto/logs")}, "must_stay_writable が tasks.json と logs")
-    check(all(e["path"] not in ("scripts", "scripts/auto", "scripts/auto/logs", "00_タスク管理/data/tasks.json") for e in spec["entries"]), "S02・S04 一覧に scripts・tasks.json・logs が無い")
+    check(stay == {("home", "00_タスク管理/data/tasks.json")}, "must_stay_writable は tasks.json だけ（S04 改）")
+    check(spec["marketplaces"]["source_kind"] == "directory", "S12 directory のものだけ")
+    check(all(e["path"] not in ("scripts/auto", "scripts/auto/logs", "scripts/auto/run.sh", "scripts/hooks", "scripts/mods", "00_タスク管理/data/tasks.json")
+              for e in spec["entries"]), "S04 一覧に scripts の中の個別の項目・tasks.json が無い（scripts/ を丸ごと）")
 
 
 # --- 想定外の例外でも URL を出さない・シンボリックリンクの実体も守る ---
@@ -483,5 +575,13 @@ for name, fn in list(globals().items()):
     if name.startswith("test_") and callable(fn):
         fn()
 
+tmproot = os.path.realpath(tempfile.gettempdir())
+for d in TMP_DIRS:   # 自分が作った sbxtest_* だけ片付ける（本物の本人のフォルダ・~/.claude には触れない）
+    if str(d).startswith(tmproot + os.sep) and d.name.startswith("sbxtest_"):
+        shutil.rmtree(str(d), ignore_errors=True)
+leftover = [d for d in TMP_DIRS if d.exists()]
+if leftover:
+    fail += 1
+    print("FAIL 一時フォルダが残っている", leftover[:3])
 print("%d checks, %d failed" % (count, fail))
 sys.exit(1 if fail else 0)

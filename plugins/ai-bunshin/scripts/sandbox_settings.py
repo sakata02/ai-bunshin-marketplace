@@ -11,7 +11,10 @@
 決まり（T119 S01〜S10。決定一覧.md）：
 - 守る先は一覧から denyWrite（Bash に OS）と permissions.deny の Edit(...)（道具）の両方に作る（T097 §3-2）。
   日本語のパスは NFC と NFD の両方を入れる（Mac のファイル名の形。T097 X13）。実体のパス（realpath）も入れる
-- tasks.json と scripts/auto/logs は書けるまま（S02・S04）。一覧がそれを含むと作らずに止める（must_stay_writable）
+- tasks.json は書けるまま（S02）。一覧がそれを含むと作らずに止める（must_stay_writable）。本人の scripts/ は丸ごと守る
+  （S04。囲いの中の update_dashboard.py は失敗のログを書けないが、write_error_log が例外を飲むので止まらない）
+- マーケットプレイスは、利用者の known_marketplaces.json の source が directory のものの installLocation を
+  丸ごと守る（S12）。読めない・無い・形が違うときは足さずに作る
 - 通信は止め、カレンダーの取得先の host だけ通す（S02・S09）。URL は環境変数で受け取り、host だけを取り出す。
   URL そのものは出力・エラー・ログに出さない。config に calendar（ics）が無い人は全部止める
 - 許可の一覧（permissions.allow）・読み取りの守り（denyRead）は作らない（S08・S10）
@@ -122,6 +125,32 @@ def add_dir_repos(cfg, home):
     return out
 
 
+def marketplace_roots(user_home, spec):
+    """known_marketplaces.json の source が directory のものの installLocation（S12）。読めない・無い・形が違うものは足さない"""
+    m = spec.get("marketplaces")
+    if not isinstance(m, dict) or not isinstance(m.get("file"), str) or m.get("base") != "user_home" \
+            or not isinstance(m.get("source_kind"), str):
+        raise Fail("守るパスの一覧の marketplaces の書き方が違います")
+    out = []
+    try:
+        with open(Path(user_home) / m["file"], encoding="utf-8-sig") as f:
+            data = json.load(f)
+    except Exception:
+        return out
+    if not isinstance(data, dict):
+        return out
+    for name, ent in data.items():
+        if not isinstance(ent, dict) or not isinstance(ent.get("source"), dict) or ent["source"].get("source") != m["source_kind"]:
+            continue
+        loc = ent.get("installLocation")
+        if not isinstance(loc, str) or not os.path.isabs(loc) or any(ch in BAD_PATH_CHARS for ch in loc):
+            continue
+        p = Path(os.path.normpath(loc))
+        if str(p) != "/" and p.is_dir():
+            out.append((str(name), p))
+    return out
+
+
 def build_settings(home, plugin_roots, config_path, user_home, calendar_url, paths_file):
     home = need_abs_dir(home, "本人のフォルダ")
     roots = [need_abs_dir(r, "プラグインの元") for r in plugin_roots]
@@ -146,15 +175,17 @@ def build_settings(home, plugin_roots, config_path, user_home, calendar_url, pat
         bases = {"home": [home], "user_home": [user_home], "plugin_root": roots}[e["base"]]
         for b in bases:
             targets.append((e["id"], Path(os.path.normpath(str(b / rel))), e["kind"]))
+    for i, (_mname, mpath) in enumerate(marketplace_roots(user_home, spec)):
+        targets.append(("S12-marketplace-%d" % (i + 1), mpath, "dir"))
     git_rel = spec.get("add_dir_git")
     if not isinstance(git_rel, list):
         raise Fail("守るパスの一覧に add_dir_git がありません")
     for d in add_dir_repos(cfg, home):
-        for r in git_rel:
-            if not isinstance(r, str) or os.path.isabs(r) or ".." in Path(r).parts:
+        for r in git_rel:   # ファイルかフォルダかは、名前でなく一覧の kind で決める
+            if not isinstance(r, dict) or not isinstance(r.get("path"), str) or r.get("kind") not in ("dir", "file") \
+                    or os.path.isabs(r["path"]) or ".." in Path(r["path"]).parts:
                 raise Fail("守るパスの一覧の add_dir_git の書き方が違います")
-            kind = "file" if r.endswith("config") else "dir"
-            targets.append(("X12-" + d.name, Path(os.path.normpath(str(d / r))), kind))
+            targets.append(("X12-" + d.name, Path(os.path.normpath(str(d / r["path"]))), r["kind"]))
 
     # 書けるままにする先（tasks.json・logs）を含む守り方は作らない
     stay = spec.get("must_stay_writable")
