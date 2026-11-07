@@ -909,15 +909,27 @@ def b4_task_dir_symlink_pointing_outside_home_is_not_written():
 
 
 @case
-def b4_leftover_regular_tmp_is_not_overwritten_in_place():
-    # O_EXCL：前から残っている一時ファイル（普通のファイル）にも書き込まない（1行で終わる）。リンクでなくても同じ
+def b4_leftover_regular_tmp_is_reused_and_symlink_tmp_is_refused():
+    # 前の実行が途中で止まって残った一時ファイル（普通のファイル）：上書きして使い、次の実行は成功する
     home = make_home()
-    tmp = os.path.join(home, "00_タスク管理", ".コックピット.html.tmp")
-    open(tmp, "w").write("残り物")
+    outdir = os.path.join(home, "00_タスク管理")
+    tmp = os.path.join(outdir, ".コックピット.html.tmp")
+    open(tmp, "w").write("残り物" * 1000)
     r = run(cwd=home)
+    eq(r.returncode, 0, r.stdout + r.stderr)
+    out = open(os.path.join(outdir, "コックピット.html"), encoding="utf-8").read()
+    assert out.startswith("<!doctype html>") and "残り物" not in out, "出力が新しい中身になっている"
+    eq(sorted(os.listdir(outdir)), ["data", "コックピット.html"], "一時ファイルは残らない")
+    # 一時ファイルがリンクなら、書かずに終了コード1（リンク先も守る）
+    home2 = make_home()
+    outdir2 = os.path.join(home2, "00_タスク管理")
+    victim = os.path.join(BASE, "victim2.txt")
+    open(victim, "w").write("守る")
+    os.symlink(victim, os.path.join(outdir2, ".コックピット.html.tmp"))
+    r = run(cwd=home2)
     eq((r.returncode, len(r.stdout.strip().splitlines())), (1, 1), r.stdout + r.stderr)
-    eq(open(tmp).read(), "残り物", "残っていた一時ファイルは書き換えない")
-    assert not os.path.exists(os.path.join(home, "00_タスク管理", "コックピット.html"))
+    eq(open(victim).read(), "守る")
+    assert not os.path.exists(os.path.join(outdir2, "コックピット.html"))
 
 
 @case

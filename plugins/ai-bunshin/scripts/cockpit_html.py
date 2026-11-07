@@ -747,7 +747,7 @@ def write_page(home, text):
         raise OSError(f"{OUT_REL[0]} が本人のフォルダの外を指しているので書きません")
     if tmp.is_symlink():
         raise OSError(f"{TMP_NAME} がリンクなので書きません")
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
     fd = os.open(tmp, flags, 0o644)
     with os.fdopen(fd, "w", encoding="utf-8") as f:
         f.write(text)
