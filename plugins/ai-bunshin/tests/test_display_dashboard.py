@@ -380,6 +380,53 @@ def display_problems_do_not_enter_check_config():
     eq(u.requests_cap(u.read_display({"display": {"type": "simple"}})), 3, "シンプルの既定は3")
 
 
+# ---------- 組⑦a：type が無く個別の設定だけのとき・雛形（K16・K18） ----------
+
+@case
+def overrides_only_without_type_ends_with_full_line_like_set_display_show():
+    # type が無く、効く個別の設定だけがあるとき：個別の設定の行 →「[見せ方：フル（今までどおり）]」の2行がこの順（K16）。
+    # set_display.py の show の出力の同じ2行と、1文字も違わない
+    for ov, want in (({"terms": "simple"}, OV_PREFIX + "terms=simple"),
+                     ({"requests_max": 5, "terms": "full"}, OV_PREFIX + "terms=full、requests_max=5")):
+        home = make_home({"overrides": ov}, tasks=tasks_with(0, 4))
+        t = session_text(home)
+        lines = t.splitlines()
+        i = lines.index(want)
+        eq(lines[i + 1], FULL_LINE, "個別の設定の行のすぐ後ろ")
+        eq(len(ov_lines(t)), 1, "個別の設定の行は1行だけ")
+        eq(len([l for l in lines if l.startswith("[見せ方：")]), 1, "「[見せ方：…]」は1行だけ")
+        env = {k: v for k, v in os.environ.items() if k not in ("CLAUDE_PROJECT_DIR", "AI_BUNSHIN_AUTO_RUN")}
+        env.update(AI_BUNSHIN_HOME=home, HOME=FAKE_HOME)
+        r = subprocess.run([sys.executable, SET_DISPLAY, "show"], capture_output=True, text=True, cwd=home, env=env)
+        assert r.returncode == 0, r.stderr[-200:]
+        pair = lambda text: [l for l in text.splitlines() if l.startswith((OV_PREFIX, "[見せ方："))]  # noqa: E731
+        eq(pair(t), pair(r.stdout), "set_display.py show と同じ2行・同じ並び")
+        eq(pair(r.stdout)[-1], FULL_LINE, "show の最後の「[見せ方：…]」")
+    # 個別の設定が無い（空・効かないものだけ）なら、今までどおり何も出さない
+    for display in ({"overrides": {}}, {"overrides": {"ng_guard": "full"}}, {"overrides": {"terms": "bogus"}}, {"overrides": "terms"}):
+        t = session_text(make_home(display))
+        assert "見せ方" not in t, f"display={display!r}：type も効く個別の設定も無いのに「見せ方」の行が出ている"
+    # type があるときは今までどおり（その型の行）
+    t = session_text(make_home({"type": "simple", "overrides": {"terms": "full"}}))
+    lines = t.splitlines()
+    eq(lines[lines.index(OV_PREFIX + "terms=full") + 1], SIMPLE_LINE, "type があれば、その型の行")
+
+
+@case
+def template_config_has_no_display_and_startup_stays_silent():
+    # 雛形の config.json に display が無い（K18）。その雛形で起動時のまとめに「見せ方」の行が出ない
+    tpl_path = os.path.join(HERE, "..", "templates", "config", "config.json")
+    tpl = json.load(open(tpl_path, encoding="utf-8"))
+    assert "display" not in tpl, "雛形に display が残っている"
+    home = make_home()
+    cfg = dict(tpl)
+    cfg.update(owner="テスト", owner_call=OWNER_CALL, ai_name="テストAI", departments=["総務"])
+    json.dump(cfg, open(os.path.join(home, "設定", "config.json"), "w", encoding="utf-8"), ensure_ascii=False)
+    t = session_text(home)
+    assert "見せ方" not in t, "雛形のままなのに「見せ方」の行が出ている"
+    eq(len(req_lines(t)), 6, "雛形のままはフル（お願いは全件）")
+
+
 def run_all():
     global fails
     for fn in names:

@@ -173,6 +173,7 @@ DISPLAY_BROKEN_LINE = "[見せ方：設定の display.type を読めないので
 def read_display(cfg):
     """config の display を読む。戻り値：{"type", "line", "overrides", "invalid"}。例外は出さない（U08・U14）。
     - 無い・空（None・""・{}・[]）→ 静かにフル（line は空。案内を出さない）
+    - type が無く、効く個別の設定だけがある → フルの行（「[見せ方：フル（今までどおり）]」）を出す（K16）
     - 壊れている（辞書でない・type が simple／full 以外）→ フルにして、案内の1行（overrides は読まない）
     - overrides は決まった6つの名前と値だけ読む。名前が違うものは無視。値が範囲外のものは invalid に入れ、その項目はフル（U14）"""
     out = {"type": "full", "line": "", "overrides": {}, "invalid": set()}
@@ -204,6 +205,9 @@ def read_display(cfg):
                 out["overrides"][name] = v
             else:
                 out["invalid"].add(name)
+    if "type" not in raw and out["overrides"]:
+        # type が無く、効く個別の設定だけがあるとき：最後の行は必ず「[見せ方：…]」（set_display.py の show と同じ並び。K16）
+        out["line"] = DISPLAY_LINE["full"]
     return out
 
 
