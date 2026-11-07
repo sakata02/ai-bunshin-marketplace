@@ -992,7 +992,7 @@ def g2_settings_allow_bash_reads_three_settings_without_stopping():
         return p
     assert C.settings_allow_bash([put("a.json", {"permissions": {"allow": ["Read", "Bash(python3:*)"]}})]) is True
     assert C.settings_allow_bash([put("b.json", {"permissions": {"allow": ["Bash"]}})]) is True
-    assert C.settings_allow_bash([put("c.json", {"permissions": {"allow": ["mcp__oplan__create"]}})]) is True
+    assert C.settings_allow_bash([put("c.json", {"permissions": {"allow": ["mcp__example__create"]}})]) is True
     assert C.settings_allow_bash([put("d.json", {"permissions": {"allow": [" Bash(ls:*)"]}})]) is True
     assert C.settings_allow_bash([put("e.json", {"permissions": {"allow": ["Read", "Edit(x)"]}})]) is False
     assert C.settings_allow_bash([put("f.json", {"permissions": {"deny": ["Bash(rm:*)"], "ask": ["Bash(git:*)"]}})]) is False, "deny・ask は許可ではない"

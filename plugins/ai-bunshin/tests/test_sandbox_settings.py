@@ -15,7 +15,9 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 SCRIPT = HERE.parent / "scripts" / "sandbox_settings.py"
 PATHS_JSON = HERE.parent / "scripts" / "protected_paths.json"
-REAL_HOME = Path("/Users/rd/workspace/AI坂田")
+# 本物の本人のフォルダ（読むだけの確認用）。環境変数 AI_BUNSHIN_REAL_HOME に入れたときだけ確かめる（無ければ飛ばす）
+_real = os.environ.get("AI_BUNSHIN_REAL_HOME", "")
+REAL_HOME = Path(_real).expanduser() if _real else Path("/nonexistent-ai-bunshin-real-home")
 
 SECRET = "SECRETTOKEN-9f3a1c"
 CAL_URL = "https://calendar.example.org/calendar/ical/a%40b.c/private-" + SECRET + "/basic.ics"
@@ -613,7 +615,9 @@ def test_no_writes():
     before = snapshot(fx["root"])
     ok_json(fx)
     check(snapshot(fx["root"]) == before, "スクリプトがファイルを作った・変えた")
-    if REAL_HOME.is_dir() and (REAL_HOME / "設定/config.json").is_file():
+    if not (REAL_HOME.is_dir() and (REAL_HOME / "設定/config.json").is_file()):
+        print("SKIP 本物の本人のフォルダの確認（AI_BUNSHIN_REAL_HOME が未設定か、config.json が見つからない）")
+    else:
         snap = {p: (REAL_HOME / p).stat().st_mtime_ns for p in ["設定/config.json", "00_タスク管理/data/tasks.json", "CLAUDE.md"] if (REAL_HOME / p).exists()}
         plug = HERE.parent
         rc, out, err = run(fx, args=["--home", str(REAL_HOME), "--plugin-root", str(plug)])

@@ -124,7 +124,7 @@ def tmp_files(root):
 def standard_cfg():
     """雛形（templates/config/config.json）に近い、いろいろな値の入った config。maintainer は末尾。"""
     return {
-        "owner": "坂田", "owner_call": "坂田さん", "ai_name": "デイビットはるか",
+        "owner": "山田", "owner_call": "山田さん", "ai_name": "デイビットはるか",
         "departments": ["HR事業部", "技術開発部"],
         "work_hours": {"start": "09:00", "end": "18:00"},
         "schedule": {"plan": "09:00", "review": "17:00"},
@@ -237,7 +237,7 @@ def t03_formatting_preserved():
 
 @case
 def t04_compact_one_line_kept_one_line():
-    cfg = {"owner": "坂田", "ng_allow": [], "maintainer": False}
+    cfg = {"owner": "山田", "ng_allow": [], "maintainer": False}
     raw = json.dumps(cfg, ensure_ascii=False).encode("utf-8")
     root = make_owner(raw)
     rc, out, err = run(root, "type", "simple")
