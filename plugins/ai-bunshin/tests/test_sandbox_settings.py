@@ -128,7 +128,7 @@ def expected(fx):
         (uh / ".claude/plugins", "dir", "S02 プラグイン（コピー）"),
         (pl, "dir", "S02 プラグイン（元）"),
         (h / "scripts", "dir", "S04 scripts/ を丸ごと"),
-        (h / ".ai-bunshin-canary-dir", "dir", "S15 囲いの点検の目印フォルダ（A1）"),
+        (h / ".ai-bunshin-canary-dir/guard", "dir", "S23 囲いの点検の目印（guard だけ。親は守らない）"),
         (fx["mkt"], "dir", "S12 マーケットプレイスのルート"),
         (fx["mkt2"], "dir", "S12 directory の2つ目"),
         (h / "CLAUDE.local.md", "file", "S13 CLAUDE.local.md"),
@@ -626,7 +626,7 @@ def test_paths_json_shape():
     spec = json.loads(PATHS_JSON.read_text(encoding="utf-8"))
     ids = {e["id"] for e in spec["entries"]}
     want = {"A-settings", "A-claude-md", "A-claude-local-md", "A-ai-bunshin-dir", "B-input", "C-claude", "C-git",
-            "D-plugin-cache", "D-plugin-source", "S04-scripts", "S15-canary-dir", "S13-launchagents", "S13-user-settings", "S13-user-claude-md",
+            "D-plugin-cache", "D-plugin-source", "S04-scripts", "S23-canary-guard", "S13-launchagents", "S13-user-settings", "S13-user-claude-md",
             "S13-user-skills", "S13-user-agents", "S13-user-commands"}
     check(ids == want, "一覧の id が決定どおり：差 %s" % (ids ^ want))
     check(spec["add_dir_git"] == [{"path": ".git", "kind": "git"}], "S17 add_dir_git は .git を丸ごと（kind=git）")
@@ -708,6 +708,82 @@ def test_git_file_form():
     (fz["repo"] / ".git").write_text("garbage\n", encoding="utf-8")
     rc, out, err = run(fz)
     check(rc == 1 and out == "", "S17・S05 足すリポジトリの使えない .git ファイルも作らない rc=%s" % rc)
+
+
+# --- 14. S23：目印は guard だけ守る（親は守らない）---
+def test_canary_guard_only():
+    fx = mkfixture()
+    s = ok_json(fx)
+    ww = [nfc(x) for x in deny_write(s)]
+    ee = [nfc(x) for x in deny_edit(s)]
+    g = nfc(str(fx["home"] / ".ai-bunshin-canary-dir/guard"))
+    par = nfc(str(fx["home"] / ".ai-bunshin-canary-dir"))
+    check(g in ww and "Edit(/%s/**)" % g in ee, "S23 guard が denyWrite と Edit の deny にある")
+    check(par not in ww and "Edit(/%s/**)" % par not in ee and "Edit(/%s)" % par not in ee, "S23 親の .ai-bunshin-canary-dir は守らない")
+    spec = json.loads(PATHS_JSON.read_text(encoding="utf-8"))
+    cg = [e for e in spec["entries"] if e["id"] == "S23-canary-guard"]
+    check(len(cg) == 1 and cg[0]["path"] == ".ai-bunshin-canary-dir/guard" and cg[0]["kind"] == "dir", "S23 一覧の項目（id・path・kind）")
+    check(all(e["path"] != ".ai-bunshin-canary-dir" for e in spec["entries"]), "S23 一覧に親そのものが無い")
+
+
+# --- 15. S24：worktree の commondir も守る ---
+def _commondir_fixture(content, make_target=True, as_dir=False):
+    """本人の .git をファイル（gitdir:）にし、指す先に commondir を置く。本体の .git は本人のフォルダの外の作り物"""
+    fx, target = _gitfile_fixture(True)
+    common = fx["root"] / "elsewhere" / "main_repo" / ".git"
+    if make_target:
+        common.mkdir(parents=True)
+    cdfile = target / "commondir"
+    if as_dir:
+        cdfile.mkdir()
+    elif content is not None:
+        cdfile.write_bytes(content.replace("{ABS}", str(common)).encode("utf-8") if isinstance(content, str) else content)
+    return fx, target, common
+
+
+def test_commondir():
+    # 絶対・相対（gitdir からの ../..）・改行なし
+    rel = "../../main_repo/.git"
+    for content, tag in (("{ABS}\n", "絶対"), (rel + "\n", "相対"), ("{ABS}", "改行なし"), (rel + "\r\n", "CRLF")):
+        fx, target, common = _commondir_fixture(content)
+        s = ok_json(fx)
+        ww = [nfc(x) for x in deny_write(s)]
+        ee = [nfc(x) for x in deny_edit(s)]
+        c = nfc(os.path.realpath(str(common)))
+        check(c in ww and "Edit(/%s/**)" % c in ee, "S24 commondir（%s）の指す先が denyWrite と Edit の deny にある" % tag)
+        check(nfc(str(target)) in ww, "S24 gitdir の指す先も今までどおりある（%s）" % tag)
+    # 足すリポジトリ（X12）の worktree にも commondir
+    fx, target, common = _commondir_fixture("{ABS}\n")
+    (fx["repo"] / ".git").rename(fx["repo"] / "git_moved_away")
+    t2 = fx["root"] / "elsewhere" / "repo_gitdir"
+    t2.mkdir(parents=True)
+    c2 = fx["root"] / "elsewhere" / "main_hp" / ".git"
+    c2.mkdir(parents=True)
+    (t2 / "commondir").write_text(str(c2) + "\n", encoding="utf-8")
+    (fx["repo"] / ".git").write_text("gitdir: ../../elsewhere/repo_gitdir\n", encoding="utf-8")
+    s = ok_json(fx)
+    check(nfc(os.path.realpath(str(c2))) in [nfc(x) for x in deny_write(s)], "S24 足すリポジトリの commondir の指す先も守る")
+    # 無いときは今のまま（余計な項目が増えない）
+    fx0, t0 = _gitfile_fixture(True)
+    s0 = ok_json(fx0)
+    check(not any("main_repo" in x for x in deny_write(s0)), "S24 commondir が無ければ増えない")
+    # 作らない（終了コード 1・出力なし。S05 と同じ側）
+    cases = (
+        (b"", "空", True, False), (b"\n", "改行だけ", True, False), (b"\xff\xfe\n", "読めない文字", True, False),
+        ("{ABS}\n", "指す先が無い", False, False), (b"/\n", "指す先が /", True, False),
+        (None, "commondir がフォルダ（読めない）", True, True), (b"nowhere/none\n", "指す先が無い（相対）", True, False),
+    )
+    for data, why, mk, as_dir in cases:
+        fy, _t, _c = _commondir_fixture(data, make_target=mk, as_dir=as_dir)
+        rc, out, err = run(fy)
+        check(rc == 1 and out == "" and err.startswith("sandbox_settings:"), "S24・S05 commondir が使えない（%s）は作らない rc=%s" % (why, rc))
+        check(SECRET not in err, "エラーに URL が出ない（commondir）")
+    # 指す先がファイル
+    fz, tz, cz = _commondir_fixture("{ABS}\n", make_target=False)
+    cz.parent.mkdir(parents=True)
+    cz.write_text("x", encoding="utf-8")
+    rc, out, err = run(fz)
+    check(rc == 1 and out == "", "S24・S05 commondir の指す先がフォルダでない rc=%s" % rc)
 
 
 # --- 想定外の例外でも URL を出さない・シンボリックリンクの実体も守る ---

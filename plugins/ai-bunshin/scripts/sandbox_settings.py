@@ -17,7 +17,8 @@
 - tasks.json は書けるまま（S02）。一覧がそれを含むと作らずに止める（must_stay_writable）。本人の scripts/ は丸ごと守る
   （S04。囲いの中の update_dashboard.py は失敗のログを書けないが、write_error_log が例外を飲むので止まらない）
 - 本人のフォルダと --add-dir のリポジトリの .git は丸ごと守る（S17。kind=git）。.git がファイル（worktree・submodule の
-  「gitdir: <先>」）なら、そのファイルと指す先のフォルダの両方。指す先が読めない・使えない形なら作らない（S05）。
+  「gitdir: <先>」）なら、そのファイルと指す先のフォルダの両方。指す先に commondir があれば、その指す先のフォルダも（S24）。
+  指す先が読めない・使えない形なら作らない（S05）。
   控えのコミットは囲いの外の daily_cycle.sh（backup_commit）がするので、囲いの中から .git に書けなくても困らない
 - マーケットプレイスは、利用者の known_marketplaces.json の source が directory のものの installLocation を
   丸ごと守る（S12）。読めない・無い・形が違うときは足さずに作る
@@ -165,7 +166,7 @@ def marketplace_roots(user_home, spec):
 
 def expand_git(tid, p):
     """kind=git の守る先（S17）。.git がフォルダ（無くてもよい）なら、そのまま dir。
-    ファイルなら「gitdir: <先>」を読み、そのファイル（file）と指す先のフォルダ（dir）の両方。読めない・形が違う・先が無い／フォルダでないときは作らない（S05）"""
+    ファイルなら「gitdir: <先>」を読み、そのファイル（file）と指す先のフォルダ（dir）の両方。指す先に commondir があれば、その指す先のフォルダも（S24）。読めない・形が違う・先が無い／フォルダでないときは作らない（S05）"""
     p = Path(p)
     if not p.is_file():
         return [(tid, p, "dir")]
@@ -181,7 +182,22 @@ def expand_git(tid, p):
     gd = Path(os.path.normpath(os.path.join(str(p.parent), loc)))   # 相対なら .git ファイルのあるフォルダから。絶対ならそのまま
     if str(gd) == "/" or not gd.is_dir():
         raise Fail("守る先 %s の .git ファイルが指す先が使えません（フォルダが無い）" % tid)
-    return [(tid, p, "file"), (tid + "-gitdir", gd, "dir")]
+    out = [(tid, p, "file"), (tid + "-gitdir", gd, "dir")]
+    # worktree は gitdir の中の commondir が、本体の .git（hooks・config を持つ側）を指す。そこも守る（S24。無ければ今のまま）
+    cd = gd / "commondir"
+    if os.path.lexists(str(cd)):
+        try:
+            with open(cd, encoding="utf-8") as f:
+                cl = f.readline().strip()
+        except Exception:
+            raise Fail("守る先 %s の commondir を読めません" % tid)
+        if not cl:
+            raise Fail("守る先 %s の commondir が空です" % tid)
+        cdir = Path(os.path.normpath(os.path.join(str(gd), cl)))   # 相対なら gitdir から。絶対ならそのまま
+        if str(cdir) == "/" or not cdir.is_dir():
+            raise Fail("守る先 %s の commondir が指す先が使えません（フォルダが無い）" % tid)
+        out.append((tid + "-commondir", cdir, "dir"))
+    return out
 
 
 def build_settings(home, plugin_roots, config_path, user_home, calendar_url, paths_file):
