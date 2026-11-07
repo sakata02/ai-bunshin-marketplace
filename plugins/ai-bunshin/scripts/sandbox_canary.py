@@ -289,8 +289,10 @@ def keychain_services(home):
     return out
 
 
-def existing_keychain_services(home, security_bin="security"):
-    """囲いの外で使う：keychain_services のうち、キーチェーンに項目がある名前だけ（-w なし。出力は捨てる）。項目が無い・確かめられない名前は入れない"""
+def existing_keychain_services(home, security_bin=None):
+    """囲いの外で使う：keychain_services のうち、キーチェーンに項目がある名前だけ（-w なし。出力は捨てる）。項目が無い・確かめられない名前は入れない。
+    security は囲いの中（execute）と同じ DEFAULT_SECURITY を使う（呼ぶときに決める。テストは import で DEFAULT_SECURITY を差し替える）"""
+    security_bin = security_bin or DEFAULT_SECURITY
     out = []
     for svc in keychain_services(home):
         try:
@@ -301,6 +303,25 @@ def existing_keychain_services(home, security_bin="security"):
         if r.returncode == 0:
             out.append(svc)
     return out
+
+
+def settings_allow_bash(paths):
+    """囲いの外で使う（S25）：設定のファイル（本人のフォルダの .claude/settings.json・settings.local.json、ユーザーのホームの .claude/settings.json）の
+    permissions.allow に Bash（または mcp）の許可があるか。あれば True。許可の中身（パターン）は返さない。無い・読めない・壊れた JSON・形が違うときは、その分を飛ばす（止めない）"""
+    for p in paths:
+        try:
+            with open(p, encoding="utf-8-sig") as f:
+                allow = json.load(f)["permissions"]["allow"]
+        except Exception:  # noqa: BLE001
+            continue
+        if not isinstance(allow, list):
+            continue
+        for x in allow:
+            if isinstance(x, str):
+                t = x.strip()
+                if t == "Bash" or t.startswith("Bash(") or t.startswith("mcp__"):
+                    return True
+    return False
 
 
 # ---------- 設定のファイル（囲いの外で置く）・結果の印 ----------

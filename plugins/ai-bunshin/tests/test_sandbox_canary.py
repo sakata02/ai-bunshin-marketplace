@@ -801,6 +801,15 @@ def n2b_existing_keychain_services_outside():
     calls_ = open(log).read().splitlines()
     assert calls_ == ["find-generic-password -s my-cal", "find-generic-password -s " + C.CLAUDE_CREDENTIAL_SERVICE], calls_
     assert C.existing_keychain_services(e["home"], SEC_BLOCKED) == []
+    # 引数を渡さなければ、囲いの中と同じ DEFAULT_SECURITY を使う（呼ぶときに決める。G4e 低1）
+    saved = C.DEFAULT_SECURITY
+    C.DEFAULT_SECURITY = p
+    try:
+        assert C.existing_keychain_services(e["home"]) == ["my-cal"]
+        C.DEFAULT_SECURITY = SEC_BLOCKED
+        assert C.existing_keychain_services(e["home"]) == []
+    finally:
+        C.DEFAULT_SECURITY = saved
     assert C.existing_keychain_services(e["home"], os.path.join(BASE, "no_such_security")) == []
 
 
@@ -962,6 +971,62 @@ def n4_unreadable_settings_gives_errors_not_blocked():
     assert res["checks"]["write"] == "error", "守る先が空なのに blocked"
     assert litter(e) == []
 
+
+@case
+def g1_default_security_is_fixed_to_usr_bin_security():
+    """G4e 低2：囲いの外と中で同じ security を使うので、その値を、スキップしない確かめで固定する"""
+    assert C.DEFAULT_SECURITY == "/usr/bin/security", C.DEFAULT_SECURITY
+    import inspect
+    assert inspect.signature(C.execute).parameters["security_bin"].default == "/usr/bin/security"
+
+
+@case
+def g2_settings_allow_bash_reads_three_settings_without_stopping():
+    """G4e S25：設定の permissions.allow に Bash（や mcp）の許可があれば True。許可の中身は返さない。読めない・壊れた JSON・形が違うときは飛ばす（例外にしない）"""
+    d = os.path.join(BASE, "g2")
+    os.makedirs(d)
+
+    def put(name, data, raw=None):
+        p = os.path.join(d, name)
+        open(p, "w", encoding="utf-8").write(raw if raw is not None else json.dumps(data))
+        return p
+    assert C.settings_allow_bash([put("a.json", {"permissions": {"allow": ["Read", "Bash(python3:*)"]}})]) is True
+    assert C.settings_allow_bash([put("b.json", {"permissions": {"allow": ["Bash"]}})]) is True
+    assert C.settings_allow_bash([put("c.json", {"permissions": {"allow": ["mcp__oplan__create"]}})]) is True
+    assert C.settings_allow_bash([put("d.json", {"permissions": {"allow": [" Bash(ls:*)"]}})]) is True
+    assert C.settings_allow_bash([put("e.json", {"permissions": {"allow": ["Read", "Edit(x)"]}})]) is False
+    assert C.settings_allow_bash([put("f.json", {"permissions": {"deny": ["Bash(rm:*)"], "ask": ["Bash(git:*)"]}})]) is False, "deny・ask は許可ではない"
+    for bad in ({"permissions": []}, {"permissions": {"allow": "Bash"}}, {"permissions": {"allow": [1, None, ["Bash"]]}}, [], "x", None, {}):
+        assert C.settings_allow_bash([put("g.json", bad)]) is False, bad
+    assert C.settings_allow_bash([put("h.json", None, raw="{broken")]) is False
+    assert C.settings_allow_bash([put("i.json", None, raw="")]) is False
+    assert C.settings_allow_bash([os.path.join(d, "no_such.json")]) is False
+    assert C.settings_allow_bash([]) is False
+    # 3つのうち1つにあれば True（壊れたもの・無いものがあっても、ほかを読む）
+    assert C.settings_allow_bash([os.path.join(d, "no_such.json"), os.path.join(d, "h.json"), os.path.join(d, "a.json")]) is True
+    # BOM 付きでも読む
+    assert C.settings_allow_bash([put("j.json", None, raw="\ufeff" + json.dumps({"permissions": {"allow": ["Bash(x:*)"]}}))]) is True
+
+
+@case
+def g3_gitignore_template_ignores_canary_marks():
+    """G4e 低6：雛形の .gitignore に .ai-bunshin-canary-*（囲いが効いていない日に残る空の目印）。実際に Git が無視する（一時フォルダの中だけ）"""
+    tpl = os.path.join(HERE, "..", "templates", "gitignore.txt")
+    text = open(tpl, encoding="utf-8").read()
+    lines = [x.strip() for x in text.splitlines()]
+    assert ".ai-bunshin-canary-*" in lines, "雛形の .gitignore に .ai-bunshin-canary-* が無い"
+    assert "00_タスク管理/data/forecast.json" in lines, "T118 の forecast.json の行が消えた"
+    repo = os.path.join(BASE, "gitchk")
+    os.makedirs(os.path.join(repo, "設定"))
+    subprocess.run(["git", "init", "-q", repo], check=True, capture_output=True)
+    open(os.path.join(repo, ".gitignore"), "w", encoding="utf-8").write(text)
+
+    def ignored(rel):
+        return subprocess.run(["git", "-C", repo, "check-ignore", rel], capture_output=True, text=True).returncode == 0
+    for rel in (".ai-bunshin-canary-N1-1", "設定/.ai-bunshin-canary-N1-2", ".ai-bunshin-canary-dir", ".ai-bunshin-canary-dir.moved-N1"):
+        assert ignored(rel), rel
+    for rel in ("CLAUDE.md", "設定/config.json", "ai-bunshin-canary.txt"):
+        assert not ignored(rel), rel
 
 @case
 def n5_case_probe_on_case_sensitive_names_is_not_a_leak():

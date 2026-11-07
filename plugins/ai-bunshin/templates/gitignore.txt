@@ -24,6 +24,8 @@ scripts/auto/.lock
 scripts/auto/last_success_*.txt
 scripts/auto/last_timeout.txt
 .*.tmp
+# 囲いの点検（カナリア）が、囲いの効いていない日に残す空の目印（名前が .ai-bunshin-canary- で始まる）
+.ai-bunshin-canary-*
 # 見張りが記録したコマンドの文面（トークンなどの秘密が入りうる）
 00_タスク管理/data/ng_log.jsonl
 # 秘密の情報が書かれうるファイル（鍵・パスワード・接続設定。控えに入れると履歴に残り続ける）

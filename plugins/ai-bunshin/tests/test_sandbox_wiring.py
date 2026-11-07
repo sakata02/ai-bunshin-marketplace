@@ -197,7 +197,7 @@ print("done")
 
 # security（キーチェーン）の代わり：rec/keychain_url ファイルに URL があればそれを出す（環境変数には置かない。claude の環境を汚さないため）。呼ばれた回数を記録する
 FAKE_SECURITY = '''#!/bin/sh
-echo "$*" >> "$FAKE_RECORD/security_calls"
+echo "$*" >> "$FAKE_RECORD/__LOG__"
 case " $* " in
   *" -w "*)
     # 中身を頼む呼び出し（カレンダーの URL を読む）
@@ -246,8 +246,14 @@ def make(name, cfg=None, plugin_files=None, repo=None):
     os.makedirs(rec)
     open(os.path.join(bindir, "claude"), "w").write(FAKE_CLAUDE.replace("__PY__", sys.executable).replace("__SECRET__", SECRET))
     open(os.path.join(bindir, "osascript"), "w").write('#!/bin/sh\necho "$*" >> "$FAKE_RECORD/notify.txt"\nexit 0\n')   # 通知の文面を記録する
-    open(os.path.join(bindir, "security"), "w").write(FAKE_SECURITY)
-    for f in ("claude", "osascript", "security"):
+    open(os.path.join(bindir, "security"), "w").write(FAKE_SECURITY.replace("__LOG__", "security_calls"))
+    # 囲いの外の「項目があるか」の確かめは C.DEFAULT_SECURITY を使う（G4e 低1）。テストでは import で差し替える：プラグインのコピーの sandbox_canary.py の末尾で DEFAULT_SECURITY を sec_default にする
+    open(os.path.join(bindir, "sec_default"), "w").write(FAKE_SECURITY.replace("__LOG__", "security_default_calls"))
+    canary_copy = os.path.join(plugin, "scripts", "sandbox_canary.py")
+    if os.path.exists(canary_copy):
+        with open(canary_copy, "a", encoding="utf-8") as f:
+            f.write("\n\nDEFAULT_SECURITY = %r   # テストだけ：import で security の代わりに差し替える\n" % os.path.join(bindir, "sec_default"))
+    for f in ("claude", "osascript", "security", "sec_default"):
         os.chmod(os.path.join(bindir, f), 0o755)
     return dict(d=d, plugin=plugin, home=home, bindir=bindir, rec=rec)
 
@@ -941,7 +947,7 @@ def k16_keychain_names_are_checked_outside_first():
     r = run(c, "do", stub_phase="do")
     cc = canary_calls(c)
     assert r.returncode == 0 and len(cc) == 1 and cc[0]["cfg_keychain"] == ["Claude Code-credentials"], (cc, log_of(c)[-300:])
-    sec = open(os.path.join(c["rec"], "security_calls")).read().splitlines()
+    sec = open(os.path.join(c["rec"], "security_default_calls")).read().splitlines()
     exist = [x for x in sec if "-w" not in x.split()]
     assert exist and all(x.startswith("find-generic-password -s ") and " -w" not in x and " -g" not in x for x in exist), "確かめの呼び方が違う（-w・-g を付けない）：%s" % exist
     assert has_python(calls(c)[0])
@@ -984,6 +990,106 @@ def k18_plan_and_review_deny_editing_claude_local_md():
     run(c, "review", stub_phase="review")
     cs = calls(c)
     assert cs and "Edit(CLAUDE.local.md)" in opt(cs[0], "--disallowedTools").split(","), cs
+
+@case
+def k19_settings_with_bash_allow_logs_one_line_and_does_not_stop():
+    """G4e S25：本人のフォルダ・ユーザーのホームの設定の permissions.allow に Bash（や mcp）の許可があれば、点検の前にログへ1行。許可の中身は出さない。点検は止めない（通る日は通る）。無い・壊れていても止めない"""
+    LINE = "設定に Bash の許可があるため、点検の結果の偽造は防げません（README の限界）"
+    PATTERN = "secretcmd-9f3a"
+
+    def settings(path, text):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        open(path, "w", encoding="utf-8").write(text)
+    allow = json.dumps({"permissions": {"allow": ["Read", "Bash(%s:*)" % PATTERN]}})
+    for tag, where, text in (("owner", "owner/.claude/settings.json", allow), ("local", "owner/.claude/settings.local.json", allow),
+                             ("user", "uhome/.claude/settings.json", allow),
+                             ("mcp", "owner/.claude/settings.json", json.dumps({"permissions": {"allow": ["mcp__%s__x" % PATTERN]}}))):
+        c = make("k19_" + tag)
+        uh = os.path.join(c["d"], "uhome")
+        os.makedirs(uh, exist_ok=True)
+        settings(os.path.join(c["d"], where), text)
+        r = run(c, "do", stub_phase="do", extra_env={"HOME": uh})
+        cs = calls(c)
+        assert r.returncode == 0 and len(cs) == 1 and has_settings(cs[0]) and has_python(cs[0]), (tag, log_of(c)[-400:])   # 止めない（全部止まった日は Python を許す）
+        assert log_of(c).count(LINE) == 1, (tag, log_of(c))
+        assert PATTERN not in all_text(c, r) + "".join(notices(c)), "%s: 許可の中身がログ・出力に出た" % tag
+        ln = [x for x in log_of(c).splitlines() if LINE in x][0]
+        assert log_of(c).index(ln) < log_of(c).index("点検（カナリア）も全部止まった"), "点検の前に出していない"
+    # 許可が無い・deny だけ・壊れた JSON・形が違う・計画と振り返りの段：1行も出さない。点検は動く
+    for tag, text in (("none", None), ("deny", json.dumps({"permissions": {"deny": ["Bash(rm:*)"]}})), ("broken", "{broken"),
+                      ("shape", json.dumps({"permissions": {"allow": "Bash"}})), ("readonly", json.dumps({"permissions": {"allow": ["Read"]}}))):
+        c = make("k19n_" + tag)
+        os.makedirs(os.path.join(c["d"], "uhome"), exist_ok=True)
+        if text is not None:
+            settings(os.path.join(c["home"], ".claude", "settings.json"), text)
+            settings(os.path.join(c["d"], "uhome", ".claude", "settings.json"), text)
+        r = run(c, "do", stub_phase="do", extra_env={"HOME": os.path.join(c["d"], "uhome")})
+        cs = calls(c)
+        assert r.returncode == 0 and len(cs) == 1 and has_python(cs[0]) and LINE not in log_of(c), (tag, log_of(c)[-400:])
+    c = make("k19p")
+    os.makedirs(os.path.join(c["d"], "uhome"), exist_ok=True)
+    settings(os.path.join(c["home"], ".claude", "settings.json"), allow)
+    run(c, "plan", extra_env={"STUB_NO_PLAN": "1", "HOME": os.path.join(c["d"], "uhome")})
+    assert LINE not in log_of(c), "点検の無い段でも出した"
+    # 点検が通らない日も出る（偽造できる日は通らない日のほうが安全、という読み方を妨げない）。出るのは1回だけ
+    c = make("k19f")
+    os.makedirs(os.path.join(c["d"], "uhome"), exist_ok=True)
+    settings(os.path.join(c["home"], ".claude", "settings.json"), allow)
+    r = run(c, "do", stub_phase="do", extra_env={"FAKE_CANARY": "leak:network", "HOME": os.path.join(c["d"], "uhome")})
+    assert log_of(c).count(LINE) == 1 and "network=leaked" in log_of(c)
+
+
+@case
+def k20_keychain_error_has_a_guidance_line():
+    """G4e 中2：keychain=error の日は、ログに案内を1行（write・parent_mv と同じ形）。ほかの項目だけが通らない日には出さない"""
+    LINE = "キーチェーンに確かめる項目（ai-bunshin-calendar か Claude Code-credentials）が無いため、点検が通りません。Python なしで動いています"
+    c = make("k20a")
+    open(os.path.join(c["rec"], "no_items"), "w").write("x")
+    r = run(c, "do", stub_phase="do")
+    lg = fell_back(c, r, "keychain=error")
+    assert lg.count(LINE) == 1, lg
+    c = make("k20b")
+    r = run(c, "do", stub_phase="do", extra_env={"FAKE_CANARY": "error:keychain,network"})
+    lg = fell_back(c, r, "keychain=error")
+    assert lg.count(LINE) == 1, lg
+    for tag, mode in (("net", "leak:network"), ("kcleak", "leak:keychain"), ("stale", "stale"), ("write", "leak:write")):
+        c = make("k20_" + tag)
+        r = run(c, "do", stub_phase="do", extra_env={"FAKE_CANARY": mode})
+        assert LINE not in log_of(c), (tag, log_of(c))
+    c = make("k20ok")
+    run(c, "do", stub_phase="do")
+    assert LINE not in log_of(c)
+
+
+@case
+def k21_timeout_has_a_guidance_line_about_leftover_marks():
+    """G4e 低3：時間切れの日にも、点検用の名前（.ai-bunshin-canary- で始まるもの）が残っているかもしれない案内を1行。時間切れ以外の失敗には出さない"""
+    LINE = "時間切れのため、点検用の名前（.ai-bunshin-canary- で始まるもの）が残っているかもしれません"
+    c = make("k21a")
+    r = run(c, "do", stub_phase="do", extra_env={"FAKE_CANARY": "hang", "AI_BUNSHIN_CANARY_SEC": "1"}, timeout=90)
+    lg = fell_back(c, r, "時間切れ")
+    assert lg.count(LINE) == 1, lg
+    for tag, mode in (("fail", "fail"), ("none", "none"), ("stale", "stale"), ("net", "leak:network"), ("write", "leak:write")):
+        c = make("k21_" + tag)
+        r = run(c, "do", stub_phase="do", extra_env={"FAKE_CANARY": mode})
+        assert LINE not in log_of(c), (tag, log_of(c))
+    # 通知は今までどおり1行（案内は通知に出さない）
+    c = make("k21n")
+    run(c, "do", stub_phase="do", extra_env={"FAKE_CANARY": "hang", "AI_BUNSHIN_CANARY_SEC": "1"}, timeout=90)
+    ns = [n for n in notices(c) if "囲いの点検" in n]
+    assert len(ns) == 1 and "canary-" not in ns[0], notices(c)
+
+
+@case
+def k22_outside_keychain_check_uses_default_security():
+    """G4e 低1：囲いの外の「項目があるか」の確かめも、囲いの中と同じ C.DEFAULT_SECURITY（テストでは import で差し替えた sec_default）。PATH の security は、カレンダーの URL を読むときだけ"""
+    c = make("k22")
+    r = run(c, "do", stub_phase="do")
+    assert r.returncode == 0 and canary_calls(c), log_of(c)[-300:]
+    dflt = open(os.path.join(c["rec"], "security_default_calls")).read().splitlines()
+    assert dflt and all(x.startswith("find-generic-password -s ") and " -w" not in x for x in dflt), dflt
+    path_calls = open(os.path.join(c["rec"], "security_calls")).read().splitlines() if os.path.exists(os.path.join(c["rec"], "security_calls")) else []
+    assert all(x.split()[-1] == "-w" for x in path_calls), "PATH の security が、項目の確かめに使われた：%s" % path_calls
 
 print(f"\n{len(names) - fails}/{len(names)} passed")
 sys.exit(1 if fails else 0)

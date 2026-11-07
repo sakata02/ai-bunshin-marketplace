@@ -292,6 +292,22 @@ sandbox_canary() {
   case "$sec" in (''|*[!0-9]*|0) sec=180 ;; esac
   min=$((sec / 60.0))
   if [ ! -f "$CANARY" ]; then CANARY_WHY="点検の道具が無い"; return 1; fi
+  # S25：本人のフォルダ・ユーザーのホームの設定（settings.json・settings.local.json）の permissions.allow に Bash（や mcp）の許可があると、点検の claude が鍵を読んで偽の結果を作れる。
+  # 止めずに点検は続け、ログに1行だけ出す（許可の中身は出さない。読めない・壊れた JSON でも止めない）
+  if python3 -I - "$PLUGIN_ROOT/scripts" "$ROOT/.claude/settings.json" "$ROOT/.claude/settings.local.json" "$HOME/.claude/settings.json" 2>/dev/null <<'PY'
+import sys
+found = False
+try:
+    sys.path.insert(0, sys.argv[1])
+    import sandbox_canary as C
+    found = C.settings_allow_bash(sys.argv[2:])
+except BaseException:
+    pass
+sys.exit(0 if found else 1)
+PY
+  then
+    log "囲いの点検：設定に Bash の許可があるため、点検の結果の偽造は防げません（README の限界）"
+  fi
   # 名前の付け替えの点検に使う目印フォルダ。守る先は中の guard だけで、親（.ai-bunshin-canary-dir）は守らない（S23）。囲いの外のここで前もって作る
   # （無ければ作る。守る先の一覧に guard が入っている。本物の scripts/・.git は付け替えない）
   if ! mkdir -p "$ROOT/.ai-bunshin-canary-dir/guard" 2>/dev/null; then CANARY_WHY="点検の目印フォルダを作れなかった"; return 1; fi
@@ -308,7 +324,7 @@ try:
     sys.path.insert(0, sys.argv[1])
     import sandbox_canary as C
     home, nonce, out, sjson = sys.argv[2:6]
-    names = C.existing_keychain_services(home)
+    names = C.existing_keychain_services(home, C.DEFAULT_SECURITY)   # 囲いの中（点検の道具）と同じ security（/usr/bin/security）で確かめる
     sha, minw, path = C.prepare(home, sjson, nonce, out, names)
     sys.stdout.write("%s\n%d\n%s\n" % (sha, minw, path))
 except BaseException:
@@ -420,6 +436,12 @@ sys.exit(0 if isinstance(d, dict) and d.get("sandbox", {}).get("enabled") is Tru
         log "囲いの点検（カナリア）が通らなかったので、Python は許さず今の許可で動かす（項目：${CANARY_WHY:-不明}）"
         case "$CANARY_WHY" in
           *write=leaked*|*case=leaked*) log "囲いの点検：守る先に、名前が .ai-bunshin-canary- で始まる空のファイルが残っているかもしれません（消さずに残しています。確かめてください）" ;;
+        esac
+        case "$CANARY_WHY" in
+          "時間切れ") log "囲いの点検：時間切れのため、点検用の名前（.ai-bunshin-canary- で始まるもの）が残っているかもしれません。確かめてください" ;;
+        esac
+        case "$CANARY_WHY" in
+          *keychain=error*) log "囲いの点検：キーチェーンに確かめる項目（ai-bunshin-calendar か Claude Code-credentials）が無いため、点検が通りません。Python なしで動いています" ;;
         esac
         case "$CANARY_WHY" in
           *parent_mv=leaked*) log "囲いの点検：点検用の目印フォルダ（.ai-bunshin-canary-dir）の名前を一時的に変えました。名前が .ai-bunshin-canary-dir.moved-… や guard.ai-bunshin-canary-… のフォルダが残っていたら、元の名前に戻してください（本物の scripts/・.git は変えていません）" ;;
