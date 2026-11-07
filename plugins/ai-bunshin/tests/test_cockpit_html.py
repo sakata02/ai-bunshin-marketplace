@@ -1,6 +1,6 @@
 """コックピットの HTML（scripts/cockpit_html.py。デスクトップ版のタスク表）のテスト（T196b）。
 - B1'：全部の欄（tasks.json・forecast.json・config・予定・Try）に <script> などを入れても、出力に生のまま出ない（属性の中も）。使うタグ・属性も決まったものだけ
-- B2'：パネルのテスト（hooks/register.test.tsx）の主な5つの入力と期待を、値のまま写して、同じ並び・同じ言葉になること
+- B2'：パネルのテスト（plugins/ai-bunshin/register.test.tsx）の主な5つの入力と期待を、値のまま写して、同じ並び・同じ言葉になること
     T191 の grouped／カテゴリ（C1・C2）／T189 カテゴリ／今日の予定：time_unknown／ガント：期限を過ぎた本人
 - B3：forecast.json が古い・無い・壊れている → パネルと同じ案内の1行。ガント以外は出る
 - B4：本人のフォルダでないときは書かない／出力先は固定（引数で変えられない）／読むだけ（入力を書き換えない）／一時ファイルを残さない
@@ -120,7 +120,7 @@ def line(r):
     return (f"[{r['mark']}] " if r["mark"] else "") + f"{r['id']} {r['title']}" + (f"・{r['who']}" if r["who"] else "") + r["due"]
 
 
-# ---------- パネルのテストの入力（hooks/register.test.tsx から値のまま写す） ----------
+# ---------- パネルのテストの入力（plugins/ai-bunshin/register.test.tsx から値のまま写す） ----------
 
 def gx(id_, title, **over):
     d = {"id": id_, "title": title, "assignee": "山田", "status": "ToDo", "priority": int(id_[1:])}
@@ -261,7 +261,7 @@ def b2_category_C1_C2_all_list():
     s = sec(out, "all")
     heads = [un(x) for x in re.findall(r"<h3>(.*?)</h3>", s)] + [un(x) for x in re.findall(r"<summary>(.*?)</summary>", s)]
     # B（順位2）→ C（3）→ A（5）→ 未分類 → 完了
-    eq(heads, ["■ B案件（2）", "■ C案件（1）", "■ A案件（2）", "■ 未分類（1）", "完了（2）"], "見出し")
+    eq(heads, ["■ B案件（2）", "■ C案件（1）", "■ A案件（2）", "■ 未分類（1）", "■ 完了（2）"], "見出し")
     rs = rows(s)
     eq([r["id"] for r in rs], ["T003", "T006", "T005", "T001", "T004", "T002", "T008", "T007"], "ID の並び（完了は新しい順）")
     assert "[ToDo] T003 B の先頭・dev-a" in [line(r) for r in rs]
@@ -283,7 +283,7 @@ def b2_category_C1_weird_values_are_uncategorized():
     # 完了は、カテゴリがあっても全部まとめて最後に1つ。未完了が 0 件でも落ちない
     d2 = [ct("T001", "x", None, "A案件", "完了"), ct("T002", "y", None, None, "完了")]
     s = sec(page(make_home(d2)), "all")
-    eq(re.findall(r"<summary>(.*?)</summary>", s), ["完了（2）"], "完了だけ")
+    eq(re.findall(r"<summary>(.*?)</summary>", s), ["■ 完了（2）"], "完了だけ")
     assert "<h3>" not in s
 
 
@@ -413,6 +413,20 @@ def gantt_waiting_and_loop_and_empty():
     assert "棒にできるタスクなし" in g and 'class="more"' not in g
 
 
+@case
+def gantt_waiting_uses_file_count_and_loop_task_has_no_bar():
+    # 見積もり待ちの件数は forecast.json の waiting のまま（tasks に待ちが2件あっても 5）
+    tasks = [ft("T1", "a", "AI", "2026-11-02", "2026-11-03"), ft("T2", "b", "AI", None, None, "見積もり待ち"),
+             ft("T3", "c", "AI", None, None, "見積もり待ち")]
+    g = sec(page(make_home(forecast=fc_file(tasks, waiting=5))), "gantt")
+    assert '<p class="more">見積もり待ち 5（棒なし）</p>' in g, g
+    # 依存の輪のタスクは、開始・終了があっても棒に出さず、件数だけ
+    out = page(make_home(forecast=fc_file([ft("T9", "x", "AI", "2026-11-02", "2026-11-04", "依存の輪")])))
+    g = sec(out, "gantt")
+    assert '<span class="id">T9</span>' not in g, "依存の輪の T9 が棒に出た"
+    assert '<p class="more">依存の輪 1（棒なし）</p>' in g, g
+
+
 # ---------- Try ----------
 
 LOG_HEAD = "| ID | 良くするもの（プラグイン／チーム／人間側） | 内容 | 確かめ方 | 開始日 |\n|---|---|---|---|---|\n"
@@ -469,6 +483,28 @@ def try_section_absent_when_log_missing_or_malformed():
     log = ("## 実施中の Try\n\n| 開始日 | 確かめ方（数字で） | 内容 | 良くするもの（チーム） | ID |\n|---|---|---|---|---|\n| 2026-11-08 | 確 | 本文A | 人 | Y9-1 |\n\n"
            "## 定着したルール\n\n| ID | 良くするもの | 内容 | 確かめ方 | 開始日 |\n|---|---|---|---|---|\n| Y9-2 | x | 本文B | y | 2026-11-01 |\n")
     eq(try_lines(page(make_home(log=log))), [("11/8", "Y9-1", "本文A")])
+
+
+@case
+def try_non_date_start_goes_first_like_the_panel():
+    # パネルの並び [開始日, ID, 内容]：日付の形でない開始日は、そのまま ID の前に出る
+    rows5 = ["| Y1 | a | 本文1 | c | 来週 |", "| Y2 | a | 本文2 | c | 2026-11-06 |", "| Y3 | a | 本文3 | c | |"]
+    s = sec(page(make_home(log=log_of(rows5))), "try")
+    items = re.findall(r'<li class="row">(.*?)</li>', s)
+    texts = [un(re.sub(r"<[^>]+>", "", x)) for x in items]
+    eq(texts, ["来週 Y1 本文1", "11/6Y2 本文2", "Y3 本文3"], "開始日・ID・内容の並び")
+    assert '<span class="nomark"></span><span class="title" style="grid-column:2 / 4">来週 <span class="id">Y1</span> 本文1' in s, s
+
+
+@case
+def iso_dates_are_ascii_digits_only_and_no_trailing_newline():
+    for bad in ("２０２６-１１-０６", "2026-11-06\n", "2026-11-06 "):
+        assert not CH.ISO.match(bad), repr(bad)
+    assert CH.ISO.match("2026-11-06")
+    eq(CH.md("２０２６-１１-０６"), "２０２６-１１-０６", "全角の数字は日付にしない（そのまま）")
+    # 全角の開始日の Try は、日付の印にせず、そのまま ID の前に出る
+    s = sec(page(make_home(log=log_of(["| Y1 | a | 本文 | c | ２０２６-１１-０６ |"]))), "try")
+    assert '<span class="nomark"></span>' in s and "２０２６-１１-０６ <span" in s, s
 
 
 # ---------- B1'：エスケープ ----------
@@ -844,6 +880,71 @@ def b4_symlink_tmp_is_not_followed_and_output_symlink_is_replaced():
     eq(r.returncode, 0, r.stderr)
     eq(open(victim).read(), "守る", "出力先がリンクでも、リンク先は書き換わらない")
     assert not os.path.islink(os.path.join(outdir, "コックピット.html"))
+
+
+@case
+def b4_task_dir_symlink_pointing_outside_home_is_not_written():
+    home = make_home()
+    outside = os.path.join(BASE, "outside_dir")
+    os.makedirs(outside)
+    # 00_タスク管理 を、本人のフォルダの外にある実体へのリンクにする（data は外の実体の中に置く）
+    real_dir = os.path.join(home, "00_タスク管理")
+    moved = os.path.join(outside, "00_タスク管理")
+    os.rename(real_dir, moved)
+    os.symlink(moved, real_dir)
+    before = tree(outside)
+    r = run(cwd=home)
+    eq(r.returncode, 1, f"外を指すリンクには書かない {r.stdout}")
+    eq(len(r.stdout.strip().splitlines()), 1, "1行で終わる")
+    assert "Traceback" not in r.stderr
+    eq(tree(outside), before, "外の実体には何も増えない")
+    # 本人のフォルダの中を指すリンクなら書ける
+    home2 = make_home()
+    inner = os.path.join(home2, "実体")
+    os.rename(os.path.join(home2, "00_タスク管理"), inner)
+    os.symlink(inner, os.path.join(home2, "00_タスク管理"))
+    r = run(cwd=home2)
+    eq(r.returncode, 0, r.stdout + r.stderr)
+    assert os.path.exists(os.path.join(inner, "コックピット.html"))
+
+
+@case
+def b4_leftover_regular_tmp_is_not_overwritten_in_place():
+    # O_EXCL：前から残っている一時ファイル（普通のファイル）にも書き込まない（1行で終わる）。リンクでなくても同じ
+    home = make_home()
+    tmp = os.path.join(home, "00_タスク管理", ".コックピット.html.tmp")
+    open(tmp, "w").write("残り物")
+    r = run(cwd=home)
+    eq((r.returncode, len(r.stdout.strip().splitlines())), (1, 1), r.stdout + r.stderr)
+    eq(open(tmp).read(), "残り物", "残っていた一時ファイルは書き換えない")
+    assert not os.path.exists(os.path.join(home, "00_タスク管理", "コックピット.html"))
+
+
+@case
+def deeply_nested_json_is_unreadable_not_a_crash():
+    deep = "[" * 100000 + "]" * 100000
+    # tasks.json：帯に「読めませんでした」
+    out = page(make_home(tasks_raw=deep))
+    assert "tasks.json を読めませんでした" in out and "Traceback" not in out
+    # 読み込みは通るが、題名の中の入れ子が深くて文字にするときに再帰が足りなくなる形（build の中）
+    mid = "[" * 450 + "]" * 450
+    out = page(make_home(tasks_raw='{"tasks": [{"id": "T1", "title": ' + mid + '}], "daily_sprints": []}'))
+    assert "tasks.json を読めませんでした" in out and "Traceback" not in out
+    # forecast.json・calendar_cache.json：それぞれの案内
+    out = page(make_home(forecast=deep, cal=deep))
+    assert "forecast.json を読めませんでした" in out and "予定を読めませんでした" in out
+    # config.json：本人のフォルダとして扱わない（壊れた config と同じ）。標準出力は1行で、何も書かない
+    home = make_home()
+    wjson(os.path.join(home, "設定", "config.json"), deep)
+    before = tree(home)
+    r = run(cwd=home)
+    eq((r.returncode, len(r.stdout.strip().splitlines()), tree(home)), (1, 1, before), "深い config")
+    assert "Traceback" not in r.stderr, r.stderr
+    # スクリプトの外側（main）でも、落ちずに1行で終わる
+    home = make_home(tasks_raw=deep)
+    r = run(cwd=home)
+    eq(r.returncode, 0, r.stderr)
+    assert "Traceback" not in r.stderr
 
 
 @case

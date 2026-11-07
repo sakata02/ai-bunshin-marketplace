@@ -22,7 +22,7 @@ UNCAT = "未分類"
 APPROVAL = "ルール変更の承認"
 APPROVAL_MARK = "承認"
 MAX_UP = 6
-ISO = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+ISO = re.compile(r"^\d{4}-\d{2}-\d{2}\Z", re.ASCII)
 STATE_WAIT = "見積もり待ち"
 STATE_LOOP = "依存の輪"
 WEEK = "月火水木金土日"
@@ -75,7 +75,7 @@ def _read_config(cfg_path):
     """config.json を BOM を除いて読む。読めない・壊れている・辞書でないなら None（パネルの findMe と同じ）。"""
     try:
         c = json.loads(Path(cfg_path).read_text(encoding="utf-8").lstrip("﻿"))
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
         return None
     return c if isinstance(c, dict) else None
 
@@ -353,7 +353,7 @@ def load_gantt(text, today):
         waiting = w if isinstance(w, (int, float)) and not isinstance(w, bool) and w >= 0 \
             else len([t for t in tasks if t["state"] == STATE_WAIT])
         return {"ok": True, "message": "", "days": days, "tasks": tasks, "waiting": waiting}
-    except (ValueError, KeyError, TypeError):
+    except (ValueError, KeyError, TypeError, RecursionError):
         return {"ok": False, "message": "forecast.json を読めませんでした（壊れています）。update_dashboard.py を動かし直すと出ます"}
 
 
@@ -414,7 +414,7 @@ def load_cal(text, today):
         stale = fetched[:10] < today
         err = f"予定を読めていません（最後の取得 {md(fetched[:10])} {fetched[11:]}）" if stale else ""
         return {"fetched": fetched, "events": events, "error": err}
-    except (ValueError, TypeError, AttributeError):
+    except (ValueError, TypeError, AttributeError, RecursionError):
         return {"fetched": "", "events": [], "error": "予定を読めませんでした"}
 
 
@@ -581,14 +581,14 @@ def try_section(tries):
     items = []
     for t in tries:
         body = skip_note(t["body"])
+        start = start_of(t["start"])
         if ISO.match(t["start"]):
-            lead = f'<span class="mark">{esc(md(t["start"]))}</span>'
-            text = body
+            lead, pre = f'<span class="mark">{esc(start)}</span>', ""
         else:
-            lead = '<span class="nomark"></span>'
-            text = " ".join(x for x in (t["start"], body) if x)
+            # 日付の形でない開始日は、パネルと同じ並び [開始日, ID, 内容]（空のものは飛ばす）
+            lead, pre = '<span class="nomark"></span>', (esc(start) + " " if start else "")
         items.append(f'<li class="row">{lead}<span class="title" style="grid-column:2 / 4">'
-                     f'<span class="id">{esc(t["id"])}</span> {esc(text)}</span><span class="due"></span></li>')
+                     f'{pre}<span class="id">{esc(t["id"])}</span> {esc(body)}</span><span class="due"></span></li>')
     return section("try", f"試し中の Try（{len(tries)}）", '<ul class="rows">' + "".join(items) + "</ul>")
 
 
@@ -667,7 +667,7 @@ def all_section(b):
         body = empty_p("なし")
     for name, done, rs in all_lines(b["all"]):
         if done:
-            body += f'<details class="done"><summary>{esc(f"完了（{len(rs)}）")}</summary>{rows_html(rs, True)}</details>'
+            body += f'<details class="done"><summary>{esc(f"■ 完了（{len(rs)}）")}</summary>{rows_html(rs, True)}</details>'
         else:
             body += f'<h3>■ {esc(f"{name}（{len(rs)}）")}</h3>{rows_html(rs, True)}'
     return section("all", f"全部のタスク {len(b['all'])} 件（未完了 {n_open}）", body)
@@ -726,7 +726,7 @@ def load_context(home, cfg, now):
     else:
         try:
             board = build(json.loads(text), today, owner)
-        except (ValueError, TypeError, AttributeError):
+        except (ValueError, TypeError, AttributeError, RecursionError):
             board = empty_board(today, "tasks.json を読めませんでした")
     has_cal = truthy(cfg.get("calendar"))
     cal = load_cal(_read(data_dir / "calendar_cache.json"), today) if has_cal else None
@@ -741,9 +741,16 @@ def write_page(home, text):
     out_dir = home / OUT_REL[0]
     tmp = out_dir / TMP_NAME
     out = out_dir / OUT_REL[1]
+    try:
+        Path(os.path.realpath(out_dir)).relative_to(os.path.realpath(home))
+    except ValueError:
+        raise OSError(f"{OUT_REL[0]} が本人のフォルダの外を指しているので書きません")
     if tmp.is_symlink():
         raise OSError(f"{TMP_NAME} がリンクなので書きません")
-    tmp.write_text(text, encoding="utf-8")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(tmp, flags, 0o644)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(text)
     os.replace(tmp, out)
     return out
 
@@ -766,6 +773,9 @@ def main(argv=None, now_utc=None):
         out = write_page(home, render(load_context(home, cfg, jst_now(now_utc))))
     except OSError as e:
         print(f"コックピットの HTML を書けませんでした（{e.__class__.__name__}）。")
+        return 1
+    except RecursionError:
+        print("コックピットの HTML を作る途中で、データを読めませんでした（入れ子が深すぎます）。")
         return 1
     print(out)
     return 0
