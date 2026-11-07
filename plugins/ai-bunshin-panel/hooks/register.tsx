@@ -229,7 +229,7 @@ const cellWidth = (s: string) => {
   return w
 }
 
-// 幅 w にちょうど収める（長ければ切って「…」（幅2として数える）、短ければ空白で埋める）。列がずれないように
+// 幅 w にちょうど収める（長ければ切って「~」（幅が1に決まっている文字。「…」は端末によって幅が違う）、短ければ空白で埋める）。列がずれないように
 const fitCells = (s: string, w: number) => {
   let out = ''
   let used = 0
@@ -239,12 +239,12 @@ const fitCells = (s: string, w: number) => {
   } else {
     for (const ch of s) {
       const cw = cellWidth(ch)
-      if (used + cw > w - 2) break
+      if (used + cw > w - 1) break
       out += ch
       used += cw
     }
-    out += '…'
-    used += 2
+    out += '~'
+    used += 1
   }
   return out + ' '.repeat(Math.max(0, w - used))
 }
@@ -318,12 +318,24 @@ function ganttCells(t: ForecastTask, days: ForecastDay[]): { cells: string; beyo
   return { cells: mark.join(''), beyond }
 }
 
-type GanttShow = { head: string; axis: string; rows: string[]; waitLine: string; more: number }
+type GanttShow = { head: string; overdueLine: string; axis: string; rows: string[]; waitLine: string; more: number }
 
-// 画面に出す文字を作る（幅 cols・行の高さ rowsMax）。タスク名の幅は、残りの幅から決める
-function ganttLines(g: Gantt, cols: number, rowsMax: number): GanttShow {
-  const draw = g.tasks.filter(t => t.end && t.state !== STATE_WAIT && t.state !== STATE_LOOP && (t.who === '本人' || t.start))
-  const shown = draw.slice(0, Math.max(1, rowsMax))
+// 棒（または印）の行にできるタスクと、期限を過ぎた本人のタスク（今日より前が期日。行にせず件数だけ出す）に分ける
+function ganttSplit(g: Gantt) {
+  const ok = g.tasks.filter(t => t.end && t.state !== STATE_WAIT && t.state !== STATE_LOOP && (t.who === '本人' || t.start))
+  const today = g.days[0]?.date ?? ''
+  const isOverdue = (t: ForecastTask) => t.who === '本人' && (t.end ?? '') < today
+  return { draw: ok.filter(t => !isOverdue(t)), overdue: ok.filter(isOverdue).length }
+}
+
+// 画面に出す文字を作る（幅 cols・窓の高さ bodyRows）。タスク名の幅は残りの幅から、行の数は窓の高さから決める。
+// 棒の行のほかに使う行：見出し・凡例・日付・「ほか」・件数のまとめ・ボタンで 6 行、期限超過の行が折り返す分
+function ganttLines(g: Gantt, cols: number, bodyRows: number, call: string): GanttShow {
+  const { draw, overdue } = ganttSplit(g)
+  const overdueLine = overdue > 0 ? `期限超過の${call}のタスク ${overdue} 件（今日より前）` : ''
+  const overdueRows = overdueLine ? Math.ceil(cellWidth(overdueLine) / Math.max(1, cols)) : 0
+  const rowsMax = Math.max(1, bodyRows - 6 - overdueRows)
+  const shown = draw.slice(0, rowsMax)
   const idW = Math.max(4, ...shown.map(t => cellWidth(t.id)))
   const titleW = Math.max(6, Math.min(24, cols - idW - 1 - 1 - g.days.length - 2))
   const lead = ' '.repeat(idW + 1 + titleW + 1)
@@ -332,12 +344,13 @@ function ganttLines(g: Gantt, cols: number, rowsMax: number): GanttShow {
     return `${fitCells(t.id, idW)} ${fitCells(t.title, titleW)} ${cells}${beyond ? '→' : ''}`
   })
   const loops = g.tasks.filter(t => t.state === STATE_LOOP).length
-  const parts = [g.waiting > 0 ? `${STATE_WAIT} ${g.waiting} 件` : '', loops > 0 ? `${STATE_LOOP} ${loops} 件` : ''].filter(Boolean)
+  const parts = [g.waiting > 0 ? `${STATE_WAIT} ${g.waiting}` : '', loops > 0 ? `${STATE_LOOP} ${loops}` : ''].filter(Boolean)
   return {
     head: `これから2週間（${md(g.days[0].date)}〜${md(g.days[g.days.length - 1].date)}）`,
+    overdueLine,
     axis: lead + g.days.map(d => d.date.slice(-1)).join(''),
     rows,
-    waitLine: parts.length ? `${parts.join('・')}は、棒にしていません` : '',
+    waitLine: parts.length ? `${parts.join('・')}（棒なし）` : '',
     more: draw.length - shown.length,
   }
 }
@@ -496,7 +509,7 @@ export const register: Register = on => {
     if (!me) return { result: NO_HOME }
     const { isPlaced, g } = await showGantt($)
     if (!g.ok) return { result: g.message }
-    const n = g.tasks.filter(t => t.end && t.state !== STATE_WAIT && t.state !== STATE_LOOP).length
+    const n = ganttSplit(g).draw.length
     return {
       result: isPlaced
         ? `これから2週間のガントチャート（${n}件）を右のパネルに出しました。`
@@ -547,23 +560,18 @@ export const register: Register = on => {
 
     if (v.mode === 'gantt') {
       const g = await read($, gantt)
-      // 窓の高さ（bodyRows）に収まる行数。見出し・凡例・日付・件数・ボタンで 7 行使う
-      const rowsMax = Math.max(3, e.props.scroll.bodyRows - 7)
-      const show = g.ok ? ganttLines(g, e.props.bodyColumns, rowsMax) : undefined
+      const show = g.ok ? ganttLines(g, e.props.bodyColumns, e.props.scroll.bodyRows, call) : undefined
       return (
         <Box flexDirection="column">
           <Text bold>{show ? show.head : GANTT_TITLE}</Text>
           {!show && <Text color="red" wrap="wrap">{g.message}</Text>}
-          {show && (
-            <Text dimColor wrap="wrap">
-              = AI（着手見込み〜完了予定）　* {call}の期日　. 休み　→ 2週間より先
-            </Text>
-          )}
+          {show && <Text dimColor wrap="truncate-end">= AI　* 期日　. 休み　→ 先</Text>}
+          {show && show.overdueLine !== '' && <Text wrap="wrap">{show.overdueLine}</Text>}
           {show && <Text dimColor>{show.axis}</Text>}
           {show && show.rows.length === 0 && <Text dimColor>棒にできるタスクなし</Text>}
           {show && show.rows.map((r, i) => <Text key={`gantt-${i}`} wrap="truncate-end">{r}</Text>)}
           {show && show.more > 0 && <Text dimColor>ほか {show.more} 件</Text>}
-          {show && show.waitLine !== '' && <Text dimColor wrap="wrap">{show.waitLine}</Text>}
+          {show && show.waitLine !== '' && <Text dimColor wrap="truncate-end">{show.waitLine}</Text>}
           <Button key="home" label="短い画面へ" onPress={() => void home($)} />
         </Box>
       )

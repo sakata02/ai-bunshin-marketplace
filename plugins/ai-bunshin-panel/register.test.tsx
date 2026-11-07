@@ -515,11 +515,11 @@ const fcFile = (tasks: FT[], over: Record<string, unknown> = {}) => ({
   ...over,
 })
 // 画面での幅（テストの側の数え方。全角・絵文字は 2）
-// 全角（かな・漢字・全角記号・絵文字）は 2、半角カナは 1、「…」は幅が環境で違うので 2 として数える（パネルも同じ）
+// 全角（かな・漢字・全角記号・絵文字）は 2、半角カナは 1（パネルも同じ）。切ったしるしの「~」は幅1に決まっている
 const wcols = (s: string) =>
   [...s].reduce((w, ch) => {
     const c = ch.codePointAt(0)!
-    return w + (c > 0xffff || c === 0x2026 || (c >= 0x2e80 && c <= 0xa4cf) || (c >= 0xff01 && c <= 0xff60) || (c >= 0xffe0 && c <= 0xffe6) ? 2 : 1)
+    return w + (c > 0xffff || (c >= 0x2e80 && c <= 0xa4cf) || (c >= 0xff01 && c <= 0xff60) || (c >= 0xffe0 && c <= 0xffe6) ? 2 : 1)
   }, 0)
 const TALL = { ...PANE.props, scroll: { offset: 0, bodyRows: 30 } } // 行が多くても全部出る高さ
 const ganttRows = async (ui: any) =>
@@ -536,7 +536,7 @@ test('ガント：新しい道具 show_gantt が登録され、説明は決め�
   expect(titles.at(-1)).toBe('これから2週間')
   let ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect((await ui.find({ type: 'Text', text: /これから2週間/ }))?.text).toBe('これから2週間（11/2〜11/15）')
-  expect(await ui.find({ type: 'Text', text: /= AI.*\* 山田さんの期日.*\. 休み.*→/ })).toBeTruthy()
+  expect((await ui.find({ type: 'Text', text: /^= AI/ }))?.text).toBe('= AI　* 期日　. 休み　→ 先')
   await ui.unmount()
   // 短い画面に戻す（open_task の id を空に）
   const back = await $.tool.call({ tool: 'mcp__ai-bunshin-panel__open_task', id: '' })
@@ -577,7 +577,7 @@ test('ガント：AI は棒（休みの日は .）、本人は期日に印（*�
   expect(by('T108')).not.toContain('*')
   // 見積もり待ち・依存の輪は行にならず、件数を1行
   expect(rows.some(r => /T105|T106|T107/.test(r))).toBe(false)
-  expect((await ui.find({ type: 'Text', text: /見積もり待ち 2 件/ }))?.text).toBe('見積もり待ち 2 件・依存の輪 1 件は、棒にしていません')
+  expect((await ui.find({ type: 'Text', text: /見積もり待ち 2/ }))?.text).toBe('見積もり待ち 2・依存の輪 1（棒なし）')
   expect(rows.length).toBe(5)
   await ui.unmount()
   expect(n.writes).toBe(0)
@@ -587,7 +587,7 @@ test('ガント：件数が 0 のときは、件数の行を出さない', async
   await setup($, on, { data: open(1), forecast: fcFile([ft('T101', 'AI棒', 'AI', '2026-11-02', '2026-11-02')]) })
   await $.tool.call({ tool: GT })
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-  expect(await ui.find({ type: 'Text', text: /棒にしていません/ })).toBeFalsy()
+  expect(await ui.find({ type: 'Text', text: /（棒なし）/ })).toBeFalsy()
   expect(await ui.find({ type: 'Text', text: /^T101 / })).toBeTruthy()
   await ui.unmount()
 })
@@ -634,8 +634,9 @@ test('ガント：全角の長いタスク名・半角・絵文字でも、列�
   for (const r of rows) expect(wcols(r)).toBeLessThanOrEqual(40)
   // 短い名前はそのまま、長い名前は「…」で切れる
   expect(rows[0]).toContain('あ ')
-  expect(rows[1]).toContain('…')
-  expect(rows[2]).toContain('…')
+  expect(rows[1]).toContain('~')
+  expect(rows[2]).toContain('~')
+  expect(rows.some(r => r.includes('…'))).toBe(false) // 幅が環境で違う「…」は使わない
   await ui.unmount()
   // 幅が広ければ名前を長く出す（切り方は幅で決まる）
   const wide = await $.ui.mount({ ...PANE, surface: 'terminal', props: { ...TALL, bodyColumns: 80 } })
@@ -649,10 +650,10 @@ test('ガント：行が多いときは優先順に上から出し、出せな�
   const tasks = Array.from({ length: 8 }, (_, i) => ft(`T3${String(i).padStart(2, '0')}`, `件${i}`, 'AI', '2026-11-02', '2026-11-03'))
   await setup($, on, { data: open(1), forecast: fcFile(tasks) })
   await $.tool.call({ tool: GT })
-  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' }) // bodyRows 10 → 3 行
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' }) // bodyRows 10 → 見出し・凡例・日付・ほか・ボタンの 5 行を引いて 4 行（件数のまとめが無いので 1 行余る）
   const rows = await ganttRows(ui)
-  expect(rows.map(r => r.slice(0, 4))).toEqual(['T300', 'T301', 'T302'])
-  expect((await ui.find({ type: 'Text', text: /^ほか/ }))?.text).toBe('ほか 5 件')
+  expect(rows.map(r => r.slice(0, 4))).toEqual(['T300', 'T301', 'T302', 'T303'])
+  expect((await ui.find({ type: 'Text', text: /^ほか/ }))?.text).toBe('ほか 4 件')
   await ui.unmount()
   // 窓が高ければ全部出て、「ほか」は出ない
   const tall = await $.ui.mount({ ...PANE, surface: 'terminal', props: { ...PANE.props, scroll: { offset: 0, bodyRows: 30 } } })
@@ -711,4 +712,93 @@ test('ガント：本人のフォルダの外では道具を登録せず、呼�
   expect(JSON.stringify(r)).toContain('本人のフォルダ')
   expect(n.forecastReads).toBe(0)
   expect(n.open).toBe(0)
+})
+
+test('ガント（境目）：14日目ちょうどに終わる AI のタスクと、その日が期日の本人のタスクは、→ が付かず * が出る。翌日は → が付く', async ($, on) => {
+  const last = GDAYS[13].date // 11/15（14 日目）
+  const tasks = [
+    ft('T401', '14日目に終わる', 'AI', '2026-11-13', last),
+    ft('T402', '14日目が期日', '本人', null, last),
+    ft('T403', '15日目に終わる', 'AI', '2026-11-13', '2026-11-16'),
+    ft('T404', '15日目が期日', '本人', null, '2026-11-16'),
+    ft('T405', '1日目が期日', '本人', null, '2026-11-02'),
+  ]
+  await setup($, on, { data: open(1), forecast: fcFile(tasks) })
+  await $.tool.call({ tool: GT })
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: TALL })
+  const by = async (id: string) => ((await ganttRows(ui)).find(r => r.startsWith(id + ' ')))!
+  // 14 日目（右端の列）まではその列に出て、→ は付かない
+  expect(await by('T401')).toMatch(/ {5}\.\. {4}=\.\.$/) // 13 日目（金）が =、14・15 日目（土日）が .
+  expect(await by('T402')).toMatch(/ {5}\.\. {5}\.\*$/) // 14 日目（右端の列）に *
+  expect(await by('T401')).not.toContain('→')
+  expect(await by('T402')).not.toContain('→')
+  // 15 日目以降は → （印は出ない）
+  expect(await by('T403')).toMatch(/→$/)
+  expect(await by('T404')).toMatch(/→$/)
+  expect(await by('T404')).not.toContain('*')
+  // 1 日目（今日）が期日なら左端に *（期限超過ではない）
+  expect(await by('T405')).toMatch(/\* {4}\.\. {5}\.\.$/)
+  expect(await ui.find({ type: 'Text', text: /期限超過/ })).toBeFalsy()
+  await ui.unmount()
+})
+
+test('ガント：期限を過ぎた本人のタスクは行にせず、凡例の下に1行でまとめる。0 件なら出さない。今日が期日なら * の行', async ($, on) => {
+  const tasks = [
+    ft('T501', '期限切れ1', '本人', null, '2026-11-01'),
+    ft('T502', '期限切れ2', '本人', null, '2026-10-20', '期限超過'),
+    ft('T503', '今日が期日', '本人', null, '2026-11-02'),
+    ft('T504', 'AI の作業', 'AI', '2026-11-02', '2026-11-03'),
+  ]
+  await setup($, on, { data: open(1), forecast: fcFile(tasks) })
+  await $.tool.call({ tool: GT })
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: TALL })
+  const rows = await ganttRows(ui)
+  expect(rows.map(r => r.slice(0, 4))).toEqual(['T503', 'T504'])
+  expect(rows[0]).toContain('*')
+  // 凡例のすぐ下に、呼び方つきの 1 行
+  const texts = ((await ui.findAll({ type: 'Text' })) as { text: string }[]).map(t => t.text)
+  expect(texts[1]).toMatch(/^= AI/)
+  expect(texts[2]).toBe('期限超過の山田さんのタスク 2 件（今日より前）')
+  await ui.unmount()
+  const r = await $.tool.call({ tool: GT })
+  expect(JSON.stringify(r)).toContain('2件') // 行にできるのは T503・T504
+})
+
+test('ガント：期限を過ぎた本人のタスクが 0 件のときは、その行を出さない', async ($, on) => {
+  const tasks = [ft('T503', '今日が期日', '本人', null, '2026-11-02'), ft('T504', 'AI の作業', 'AI', '2026-11-02', '2026-11-03')]
+  await setup($, on, { data: open(1), forecast: fcFile(tasks) })
+  await $.tool.call({ tool: GT })
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: TALL })
+  expect(await ui.find({ type: 'Text', text: /期限超過/ })).toBeFalsy()
+  expect((await ganttRows(ui)).length).toBe(2)
+  await ui.unmount()
+})
+
+test('ガント：凡例とまとめの行は幅40で1行。いちばん行が多い形でも、窓の高さ（bodyRows）に収まる', async ($, on) => {
+  const many = Array.from({ length: 9 }, (_, i) => ft(`T6${String(i).padStart(2, '0')}`, `件${i}`, 'AI', '2026-11-02', '2026-11-03'))
+  const tasks = [
+    ...many,
+    ft('T690', '期限切れ', '本人', null, '2026-10-30'),
+    ft('T691', '見積もり1', 'AI', null, null, '見積もり待ち'),
+    ft('T692', '見積もり2', 'AI', null, null, '見積もり待ち'),
+    ft('T693', '輪', 'AI', null, null, '依存の輪'),
+  ]
+  await setup($, on, { data: open(1), forecast: fcFile(tasks, { waiting: 12 }) })
+  await $.tool.call({ tool: GT })
+  for (const bodyRows of [10, 14, 24]) {
+    const ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: { ...PANE.props, scroll: { offset: 0, bodyRows } } })
+    const texts = ((await ui.findAll({ type: 'Text' })) as { text: string }[]).map(t => t.text)
+    const buttons = ((await ui.findAll({ type: 'Button' })) as { text: string }[]).length
+    const legend = texts.find(t => t.startsWith('= AI'))!
+    const wait = texts.find(t => t.includes('（棒なし）'))!
+    expect(wcols(legend)).toBeLessThanOrEqual(40)
+    expect(wcols(wait)).toBeLessThanOrEqual(40)
+    expect(wait).toBe('見積もり待ち 12・依存の輪 1（棒なし）')
+    // 画面の行数：テキスト（40 列で折り返す分を数える）＋ボタン。窓の高さを超えない
+    const lines = texts.reduce((n, t) => n + Math.max(1, Math.ceil(wcols(t) / 40)), 0) + buttons
+    expect(lines).toBeLessThanOrEqual(bodyRows)
+    // 窓が高いほど棒の行が増える（行の数は窓の高さで決まる）
+    if (bodyRows === 10) expect((await ganttRows(ui)).length).toBe(2) // 期限超過の行が折り返して 2 行 → 10 - 6 - 2 = 2 行
+    await ui.unmount()
+  }
 })
