@@ -21,9 +21,9 @@ const tasks = [
 ]
 
 const PANE = {
-  plugin: 'ai-bunshin-panel',
+  plugin: 'ai-bunshin',
   component: 'Pane',
-  requestId: 'ai-bunshin-panel',
+  requestId: 'ai-bunshin',
   props: {
     title: '今日のやること',
     isFocused: false,
@@ -135,7 +135,7 @@ test('全部のタスクに切り替え、ページを送り、短い画面に�
   expect(await ui.find({ type: 'Text', text: /\[済\]/ })).toBeFalsy()
   await ui.unmount()
 
-  const r = await $.tool.call({ tool: 'mcp__ai-bunshin-panel__show_all_tasks' })
+  const r = await $.tool.call({ tool: 'mcp__ai-bunshin__show_all_tasks' })
   expect(JSON.stringify(r)).toContain('20件')
 
   // bodyRows 10 → 1 ページ 5 行。見出し（■ 未分類（12）・■ 完了（8））も 1 行に数えるので、22 行 → 5 ページ（T134 で 4 → 5）
@@ -162,8 +162,8 @@ test('全部のタスクに切り替え、ページを送り、短い画面に�
   await ui.unmount()
 
   // open_task の id を空にすると短い画面に戻る
-  await $.tool.call({ tool: 'mcp__ai-bunshin-panel__show_all_tasks' })
-  const back = await $.tool.call({ tool: 'mcp__ai-bunshin-panel__open_task', id: '' })
+  await $.tool.call({ tool: 'mcp__ai-bunshin__show_all_tasks' })
+  const back = await $.tool.call({ tool: 'mcp__ai-bunshin__open_task', id: '' })
   expect(JSON.stringify(back)).toContain('一覧に戻しました')
   ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect(await ui.find({ type: 'Text', text: /今日の予定/ })).toBeTruthy()
@@ -186,7 +186,7 @@ const heading = async (ui: any) => (await ui.find({ type: 'Text', text: /全部�
 
 test('全部のタスクが 0 件のとき：1/1 ページで「なし」。次・前は出ない', async ($, on) => {
   await setup($, on, { data: { tasks: [], daily_sprints: [] }, hasFile: true, mtime: 1 })
-  await $.tool.call({ tool: 'mcp__ai-bunshin-panel__show_all_tasks' })
+  await $.tool.call({ tool: 'mcp__ai-bunshin__show_all_tasks' })
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect(await heading(ui)).toContain('1/1')
   expect(await ui.find({ type: 'Text', text: /^なし$/ })).toBeTruthy()
@@ -197,7 +197,7 @@ test('全部のタスクが 0 件のとき：1/1 ページで「なし」。次�
 
 test('全部のタスクで tasks.json が無いとき：赤いエラー文を出し「なし」は出さない', async ($, on) => {
   await setup($, on, { data: {}, hasFile: false, mtime: 1 })
-  await $.tool.call({ tool: 'mcp__ai-bunshin-panel__show_all_tasks' })
+  await $.tool.call({ tool: 'mcp__ai-bunshin__show_all_tasks' })
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect(await ui.find({ type: 'Text', text: /tasks\.json が見つかりません/ })).toBeTruthy()
   expect(await ui.find({ type: 'Text', text: /^なし$/ })).toBeFalsy()
@@ -207,7 +207,7 @@ test('全部のタスクで tasks.json が無いとき：赤いエラー文を�
 test('tasks.json はあるが JSON が壊れているとき：最初は赤いエラー文（「なし」は出ない）。前の表示があれば保持', async ($, on) => {
   const src: Src = { data: '{broken', hasFile: true, mtime: 1 }
   await setup($, on, src)
-  await $.tool.call({ tool: 'mcp__ai-bunshin-panel__show_all_tasks' })
+  await $.tool.call({ tool: 'mcp__ai-bunshin__show_all_tasks' })
   let ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect(await ui.find({ type: 'Text', text: /tasks\.json を読めませんでした/ })).toBeTruthy()
   expect(await ui.find({ type: 'Text', text: /^なし$/ })).toBeFalsy()
@@ -216,7 +216,7 @@ test('tasks.json はあるが JSON が壊れているとき：最初は赤いエ
   // 読めるようになる → 表示が出てエラーが消える。そのあと壊れても前の表示のまま
   src.data = open(3)
   src.mtime = 2
-  await $.tool.call({ tool: 'mcp__ai-bunshin-panel__show_all_tasks' })
+  await $.tool.call({ tool: 'mcp__ai-bunshin__show_all_tasks' })
   ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect(await ui.find({ type: 'Text', text: /件3/ })).toBeTruthy()
   expect(await ui.find({ type: 'Text', text: /読めませんでした/ })).toBeFalsy()
@@ -224,7 +224,7 @@ test('tasks.json はあるが JSON が壊れているとき：最初は赤いエ
 
   src.data = '{broken'
   src.mtime = 3
-  await $.tool.call({ tool: 'mcp__ai-bunshin-panel__show_all_tasks' })
+  await $.tool.call({ tool: 'mcp__ai-bunshin__show_all_tasks' })
   ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect(await ui.find({ type: 'Text', text: /件3/ })).toBeTruthy()
   expect(await ui.find({ type: 'Text', text: /読めませんでした/ })).toBeFalsy()
@@ -233,7 +233,7 @@ test('tasks.json はあるが JSON が壊れているとき：最初は赤いエ
 
 test('端数のある最終ページ：21 件・見出しも 1 行に数えて 6 ページ。最後は「（続き）」の見出しと 1 行（T134 で 5 → 6）', async ($, on) => {
   await setup($, on, { data: open(21), hasFile: true, mtime: 1 })
-  await $.tool.call({ tool: 'mcp__ai-bunshin-panel__show_all_tasks' })
+  await $.tool.call({ tool: 'mcp__ai-bunshin__show_all_tasks' })
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect(await heading(ui)).toContain('1/6')
   for (let i = 0; i < 5; i++) await ui.press({ key: 'next' })
@@ -248,7 +248,7 @@ test('端数のある最終ページ：21 件・見出しも 1 行に数えて 6
 test('件数が減ったとき：2 ページ目にいても最後のページに収まる', async ($, on) => {
   const src: Src = { data: open(20), hasFile: true, mtime: 1 }
   await setup($, on, src)
-  await $.tool.call({ tool: 'mcp__ai-bunshin-panel__show_all_tasks' })
+  await $.tool.call({ tool: 'mcp__ai-bunshin__show_all_tasks' })
   let ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   await ui.press({ key: 'next' })
   expect(await heading(ui)).toContain('2/5')
@@ -265,16 +265,16 @@ test('件数が減ったとき：2 ページ目にいても最後のページに
 
 test('全部の一覧から詳細を開いて戻ると、タイトルは「全部のタスク」。短い画面からなら「今日のやること」', async ($, on) => {
   const { titles } = await setup($, on, { data: open(3), hasFile: true, mtime: 1 })
-  await $.tool.call({ tool: 'mcp__ai-bunshin-panel__show_all_tasks' })
-  await $.tool.call({ tool: 'mcp__ai-bunshin-panel__open_task', id: 'T001' })
+  await $.tool.call({ tool: 'mcp__ai-bunshin__show_all_tasks' })
+  await $.tool.call({ tool: 'mcp__ai-bunshin__open_task', id: 'T001' })
   expect(titles.at(-1)).toBe('T001 の詳細')
   let ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   await ui.press({ key: 'back' })
   expect(titles.at(-1)).toBe('全部のタスク')
   await ui.unmount()
 
-  await $.tool.call({ tool: 'mcp__ai-bunshin-panel__open_task', id: '' }) // 短い画面へ
-  await $.tool.call({ tool: 'mcp__ai-bunshin-panel__open_task', id: 'T001' })
+  await $.tool.call({ tool: 'mcp__ai-bunshin__open_task', id: '' }) // 短い画面へ
+  await $.tool.call({ tool: 'mcp__ai-bunshin__open_task', id: 'T001' })
   ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   await ui.press({ key: 'back' })
   expect(titles.at(-1)).toBe('今日のやること')
@@ -358,7 +358,7 @@ async function expectNothing($: any, on: any, src: Src) {
   expect(n.calReads).toBe(0)
   expect(n.writes).toBe(0)
   // 道具・命令が呼ばれても、パネルは開かない
-  const r = await $.tool.call({ tool: 'mcp__ai-bunshin-panel__open_task', id: 'T001' })
+  const r = await $.tool.call({ tool: 'mcp__ai-bunshin__open_task', id: 'T001' })
   expect(JSON.stringify(r)).toContain('本人のフォルダ')
   expect(n.open).toBe(0)
 }
@@ -385,7 +385,7 @@ test('本人のフォルダの下（05_開発/x）で開いても、本人のフ
   expect(n.tool).toBe(3) // open_task・show_all_tasks・show_gantt
   expect(n.open).toBeGreaterThan(0)
   expect(n.every).toBe(1)
-  await $.tool.call({ tool: 'mcp__ai-bunshin-panel__show_all_tasks' })
+  await $.tool.call({ tool: 'mcp__ai-bunshin__show_all_tasks' })
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect(await heading(ui)).toContain('1/1')
   await ui.unmount()
@@ -498,7 +498,7 @@ test('調べるパス（Windows）：stat は config.json と tasks.json 以外�
 
 // ---------- これから2週間のガントチャート（T118）。forecast.json を読むだけ ----------
 
-const GT = 'mcp__ai-bunshin-panel__show_gantt'
+const GT = 'mcp__ai-bunshin__show_gantt'
 // 今日は 2026-11-02（月）。14 日ぶん。休みは土日（11/7・8・14・15）。テストの側でも暦は計算せず、日付の文字を並べるだけにする
 const GDAYS = Array.from({ length: 14 }, (_, i) => {
   const d = new Date(Date.parse('2026-11-02T00:00:00Z') + i * 86400e3)
@@ -548,7 +548,7 @@ test('ガント：新しい道具 show_gantt が登録され、説明は決め�
   expect((await ui.find({ type: 'Text', text: /^= AI/ }))?.text).toBe('= AI　* 期日　. 休み　→ 先')
   await ui.unmount()
   // 短い画面に戻す（open_task の id を空に）
-  const back = await $.tool.call({ tool: 'mcp__ai-bunshin-panel__open_task', id: '' })
+  const back = await $.tool.call({ tool: 'mcp__ai-bunshin__open_task', id: '' })
   expect(JSON.stringify(back)).toContain('一覧に戻しました')
   ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect(await ui.find({ type: 'Text', text: /今日の予定/ })).toBeTruthy()
@@ -675,7 +675,7 @@ test('ガント：forecast.json が作り直されたら、Bash のあとなど�
   const src: Src = { data: open(1), forecast: fcFile([ft('T101', '前', 'AI', '2026-11-02', '2026-11-02')]) }
   const { n } = await setup($, on, src)
   expect(n.forecastReads).toBe(1) // 起動のときに1回（T188：最初からガント）
-  await $.tool.call({ tool: 'mcp__ai-bunshin-panel__open_task', id: '' }) // ふつうの画面に戻す
+  await $.tool.call({ tool: 'mcp__ai-bunshin__open_task', id: '' }) // ふつうの画面に戻す
   const reads = n.forecastReads
   await $.tool.call({ tool: 'Bash' }) // ふつうの画面：forecast.json は読み直さない
   expect(n.forecastReads).toBe(reads)
@@ -695,14 +695,14 @@ test('ガント：開いたあとも、ふつうの画面・全部の一覧・T0
   const { titles } = await setup($, on, { data: open(3), forecast: fcFile([ft('T001', '実装', 'AI', '2026-11-02', '2026-11-03')]) })
   await $.tool.call({ tool: GT })
   // ガント → 詳細 → 戻る：ガントに戻る
-  await $.tool.call({ tool: 'mcp__ai-bunshin-panel__open_task', id: 'T001' })
+  await $.tool.call({ tool: 'mcp__ai-bunshin__open_task', id: 'T001' })
   expect(titles.at(-1)).toBe('T001 の詳細')
   let ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   await ui.press({ key: 'back' })
   expect(titles.at(-1)).toBe('これから2週間')
   await ui.unmount()
   // ガント → 全部の一覧 → 短い画面
-  await $.tool.call({ tool: 'mcp__ai-bunshin-panel__show_all_tasks' })
+  await $.tool.call({ tool: 'mcp__ai-bunshin__show_all_tasks' })
   ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect(await ui.find({ type: 'Text', text: /全部のタスク/ })).toBeTruthy()
   expect(await ui.find({ type: 'Text', text: /これから2週間/ })).toBeFalsy()
@@ -721,7 +721,7 @@ test('ガント：開いたあとも、ふつうの画面・全部の一覧・T0
 test('T190 「ガントへ」：短い画面（全部のタスクを見るの隣）と全部の一覧（短い画面への隣）にあり、押すとガント（タイトル「これから2週間」）。書かない', async ($, on) => {
   // 今日の forecast が無い → 最初は短い画面。その後ガント用の forecast を置いて押す
   const { titles, n } = await setup($, on, { data: open(3), forecast: fcFile([ft('T001', '実装', 'AI', '2026-11-02', '2026-11-03')]) })
-  await $.tool.call({ tool: 'mcp__ai-bunshin-panel__open_task', id: '' }) // 最初はガントで開くので、短い画面に戻す
+  await $.tool.call({ tool: 'mcp__ai-bunshin__open_task', id: '' }) // 最初はガントで開くので、短い画面に戻す
   let ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect(await ui.find({ type: 'Text', text: /今日の予定/ })).toBeTruthy()
   expect(await ui.find({ type: 'Button', text: /ガントへ/ })).toBeTruthy()
@@ -733,7 +733,7 @@ test('T190 「ガントへ」：短い画面（全部のタスクを見るの隣
   await ui.unmount()
 
   // 全部の一覧 → ガントへ
-  await $.tool.call({ tool: 'mcp__ai-bunshin-panel__show_all_tasks' })
+  await $.tool.call({ tool: 'mcp__ai-bunshin__show_all_tasks' })
   ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect(await ui.find({ type: 'Text', text: /全部のタスク/ })).toBeTruthy()
   expect(await ui.find({ type: 'Button', text: /短い画面へ/ })).toBeTruthy()
@@ -761,10 +761,10 @@ test('T190 「ガントへ」：forecast.json が無いときは、show_gantt �
 
 test('T190 「ガントへ」で開いたガントから詳細を開いて戻ると、ガントに戻る（戻るの動きは変わらない）', async ($, on) => {
   const { titles } = await setup($, on, { data: open(3), forecast: fcFile([ft('T001', '実装', 'AI', '2026-11-02', '2026-11-03')]) })
-  await $.tool.call({ tool: 'mcp__ai-bunshin-panel__open_task', id: '' })
+  await $.tool.call({ tool: 'mcp__ai-bunshin__open_task', id: '' })
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   await ui.press({ key: 'gantt' })
-  await $.tool.call({ tool: 'mcp__ai-bunshin-panel__open_task', id: 'T001' })
+  await $.tool.call({ tool: 'mcp__ai-bunshin__open_task', id: 'T001' })
   expect(titles.at(-1)).toBe('T001 の詳細')
   await ui.press({ key: 'back' })
   expect(titles.at(-1)).toBe('これから2週間')
@@ -1096,7 +1096,7 @@ test('T189 カテゴリ：棒にできるものが無いときは、見出しは
 
 // ---------- 案件のカテゴリ（T134）。tasks.json の category で、全部の一覧をまとめて出す ----------
 
-const AT = 'mcp__ai-bunshin-panel__show_all_tasks'
+const AT = 'mcp__ai-bunshin__show_all_tasks'
 type CT = { id: string; title: string; priority?: number; category?: unknown; status?: string; assignee?: string }
 const ct = (id: string, title: string, priority: number | undefined, category?: unknown, status = 'ToDo'): CT => ({
   id,
@@ -1261,7 +1261,7 @@ test('カテゴリ（C4）：ふつうの画面は区画も並びも変わらず
 test('カテゴリ（C4）：タスクの詳細に「カテゴリ：…」が出る。無いときは、未完了なら「未分類」、完了なら出さない', async ($, on) => {
   await setup($, on, { data: catData(MIX) })
   const detailText = async (id: string) => {
-    await $.tool.call({ tool: 'mcp__ai-bunshin-panel__open_task', id })
+    await $.tool.call({ tool: 'mcp__ai-bunshin__open_task', id })
     const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
     const ts = await texts(ui)
     await ui.unmount()
@@ -1285,7 +1285,7 @@ test('カテゴリ（C5・C6）：見出しは1行で切れる（truncate-end）
   expect(h.text).toBe(`■ ${long}（2）`)
   expect(h.props.wrap).toBe('truncate-end')
   await ui.unmount()
-  await $.tool.call({ tool: 'mcp__ai-bunshin-panel__open_task', id: 'T001' })
+  await $.tool.call({ tool: 'mcp__ai-bunshin__open_task', id: 'T001' })
   expect(titles.at(-1)).toBe('T001 の詳細')
   ui = await mountAll($, 12, 20)
   await ui.press({ key: 'back' })
@@ -1293,7 +1293,7 @@ test('カテゴリ（C5・C6）：見出しは1行で切れる（truncate-end）
   await ui.unmount()
   await $.tool.call({ tool: GT })
   expect(titles.at(-1)).toBe('これから2週間')
-  await $.tool.call({ tool: 'mcp__ai-bunshin-panel__open_task', id: '' })
+  await $.tool.call({ tool: 'mcp__ai-bunshin__open_task', id: '' })
   expect(titles.at(-1)).toBe('今日のやること')
 })
 
@@ -1378,7 +1378,7 @@ for (const [label, log] of NO_SECTION) {
     expect(((await ui.findAll({ type: 'Text' })) as any[]).some(t => t.props.color === 'red')).toBe(false)
     await ui.unmount()
     // 開こうとすると「ありません」
-    const r = await $.tool.call({ tool: 'mcp__ai-bunshin-panel__open_task', id: 'Y20261106-1' })
+    const r = await $.tool.call({ tool: 'mcp__ai-bunshin__open_task', id: 'Y20261106-1' })
     expect(JSON.stringify(r)).toContain('ありません')
     expect(n.writes).toBe(0)
   })
@@ -1447,7 +1447,7 @@ test('Try（T3）：行を押すと Try の詳細（ID・良くするもの・�
 
 test('Try（T3）：open_task に Y の ID を渡しても同じ詳細が開く。戻れる。知らない Y の ID は「ありません」の1行', async ($, on) => {
   const { titles, n } = await setup($, on, { data: catData([ct('T001', '仕事', 1)]), log: logOf(), cal: CAL_OK })
-  const r = await $.tool.call({ tool: 'mcp__ai-bunshin-panel__open_task', id: 'Y20261106-1' })
+  const r = await $.tool.call({ tool: 'mcp__ai-bunshin__open_task', id: 'Y20261106-1' })
   expect(JSON.stringify(r)).toContain('Y20261106-1')
   expect(JSON.stringify(r)).toContain('開きました')
   expect(titles.at(-1)).toBe('Y20261106-1 の詳細')
@@ -1460,12 +1460,12 @@ test('Try（T3）：open_task に Y の ID を渡しても同じ詳細が開く�
   await ui.unmount()
 
   // 小文字でも同じ
-  await $.tool.call({ tool: 'mcp__ai-bunshin-panel__open_task', id: 'y20261106-3' })
+  await $.tool.call({ tool: 'mcp__ai-bunshin__open_task', id: 'y20261106-3' })
   expect(titles.at(-1)).toBe('Y20261106-3 の詳細')
 
   // 知らない ID：1行（赤）で「ありません」。詳細は開かない
   const before = titles.length
-  const no = await $.tool.call({ tool: 'mcp__ai-bunshin-panel__open_task', id: 'Y99999999-9' })
+  const no = await $.tool.call({ tool: 'mcp__ai-bunshin__open_task', id: 'Y99999999-9' })
   expect(JSON.stringify(no)).toContain('Y99999999-9 は改善ログにありません')
   ui = await mountAll($, 30, 40)
   const err = ((await ui.findAll({ type: 'Text' })) as any[]).filter(t => t.props.color === 'red')
@@ -1478,7 +1478,7 @@ test('Try（T3）：open_task に Y の ID を渡しても同じ詳細が開く�
 
 test('Try（T3）：タスクの詳細の動きは変わらない（ボタンは「← 戻る」。T で始まる ID はこれまでどおり tasks.json を見る）', async ($, on) => {
   await setup($, on, { data: catData([ct('T001', '仕事', 1)]), log: logOf(), cal: CAL_OK })
-  await $.tool.call({ tool: 'mcp__ai-bunshin-panel__open_task', id: 'T001' })
+  await $.tool.call({ tool: 'mcp__ai-bunshin__open_task', id: 'T001' })
   const ui = await mountAll($, 30, 40)
   expect(await ui.find({ type: 'Button', text: /← 戻る/ })).toBeTruthy()
   expect(await ui.find({ type: 'Button', text: /一覧に戻る/ })).toBeFalsy()

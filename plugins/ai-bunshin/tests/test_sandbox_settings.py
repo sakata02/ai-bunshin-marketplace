@@ -94,9 +94,10 @@ def write_cfg(fx, cfg):
     (fx["home"] / "設定/config.json").write_text(json.dumps(cfg, ensure_ascii=False), encoding="utf-8")
 
 
-def run(fx, extra=None, url=CAL_URL, args=None, script=None):
+def run(fx, extra=None, url=CAL_URL, args=None, script=None, env_extra=None):
     a = args if args is not None else ["--home", str(fx["home"]), "--plugin-root", str(fx["plug"]), "--user-home", str(fx["uh"])]
-    env = {k: v for k, v in os.environ.items() if k != URL_ENV}
+    env = {k: v for k, v in os.environ.items() if k not in (URL_ENV, "CLAUDE_CONFIG_DIR")}   # 本物の CLAUDE_CONFIG_DIR は見ない（T201。使うテストだけ env_extra で渡す）
+    env.update(env_extra or {})
     if url is not None:
         env[URL_ENV] = url
     p = subprocess.run([sys.executable, str(script or SCRIPT), "--calendar-url-env", URL_ENV] + a + (extra or []),
@@ -141,6 +142,7 @@ def expected(fx):
         (uh / ".claude/skills", "dir", "S13 skills"),
         (uh / ".claude/agents", "dir", "S13 agents"),
         (uh / ".claude/commands", "dir", "S13 commands"),
+        (uh / ".claude/projects", "dir", "T201 自動記憶と会話の記録の置き場（無くても守る）"),
         (repo / ".git", "dir", "S17 足すリポジトリの .git を丸ごと"),
     ]
 
@@ -625,13 +627,86 @@ def test_no_writes():
         check(snap == {p: (REAL_HOME / p).stat().st_mtime_ns for p in snap}, "本物の本人のフォルダのファイルが変わった")
 
 
+# --- 11b. 自動記憶と会話の記録の置き場 ~/.claude/projects（T201）---
+def _load_canary():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("sandbox_canary_under_test_t201", str(HERE.parent / "scripts" / "sandbox_canary.py"))
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m
+
+
+def test_user_projects_protected_even_if_missing():
+    fx = mkfixture()
+    proj = fx["uh"] / ".claude/projects"
+    check(not proj.exists(), "テスト自体：偽のホームに projects は無い")
+    s = ok_json(fx)
+    check(nfc(str(proj)) in [nfc(x) for x in deny_write(s)], "T201 projects が無くても denyWrite に入る")
+    check(rule(nfc(str(proj)), "dir") in [nfc(x) for x in deny_edit(s)], "T201 projects が無くても Edit の deny に入る")
+    # 読むのは止めない（K4）：denyRead は作らない・memory/ の中を書けるままにする規則も作らない
+    check("denyRead" not in s["sandbox"]["filesystem"], "K4 denyRead は作らない")
+
+
+def test_user_projects_in_canary_targets():
+    """点検（sandbox_canary）の write の対象に入る。偽のホームに projects を実際に作ってから確かめる（無い先は確かめない作りのため）"""
+    C = _load_canary()
+    fx_no = mkfixture()
+    fx_yes = mkfixture()
+    (fx_yes["uh"] / ".claude/projects/-x/memory").mkdir(parents=True)
+    dw_no, dw_yes = deny_write(ok_json(fx_no)), deny_write(ok_json(fx_yes))
+    p = str(fx_yes["uh"] / ".claude/projects")
+    check(p in C.unique_paths(dw_yes) and os.path.isdir(p), "T201 点検の対象のフォルダ（実在）に projects が入る")
+    check(C.expected_write_count(dw_yes) == C.expected_write_count(dw_no) + 1, "T201 projects があると、write で確かめる数が1つ増える %s %s" % (C.expected_write_count(dw_yes), C.expected_write_count(dw_no)))
+
+
+def test_config_dir_env():
+    fx = mkfixture()
+    cfg = fx["root"] / "別の設定場所"
+    cfg.mkdir()
+    rc, out, err = run(fx, env_extra={"CLAUDE_CONFIG_DIR": str(cfg)})
+    check(rc == 0, "T201 CLAUDE_CONFIG_DIR があっても作れる err=%s" % err)
+    s = json.loads(out)
+    ww, ee = [nfc(x) for x in deny_write(s)], [nfc(x) for x in deny_edit(s)]
+    for base in (cfg / "projects", fx["uh"] / ".claude/projects"):
+        check(nfc(str(base)) in ww and nfd(str(base)) in deny_write(s), "T201 %s が denyWrite に NFC・NFD で入る" % base.name)
+        check(rule(nfc(str(base)), "dir") in ee, "T201 %s が Edit の deny に入る" % base.name)
+    check(len(deny_write(s)) == len(set(deny_write(s))), "重複なし")
+    # 日本語の名前（NFC・NFD の両方が出る）
+    jp = fx["root"] / nfc("ブ設定プ")
+    jp.mkdir()
+    rc, out, err = run(fx, env_extra={"CLAUDE_CONFIG_DIR": str(jp)})
+    check(rc == 0, "T201 日本語の CLAUDE_CONFIG_DIR でも作れる err=%s" % err)
+    if rc == 0:
+        s = json.loads(out)
+        check(nfc(str(jp / "projects")) in deny_write(s) and nfd(str(jp / "projects")) in deny_write(s), "T201 日本語の名前が NFC・NFD の両方で入る")
+    # ~/.claude と同じ場所を指しても重複しない・空の値は「無い」と同じ
+    rc, out, err = run(fx, env_extra={"CLAUDE_CONFIG_DIR": str(fx["uh"] / ".claude")})
+    check(rc == 0 and len(json.loads(out)["sandbox"]["filesystem"]["denyWrite"]) == len(set(json.loads(out)["sandbox"]["filesystem"]["denyWrite"])), "T201 ~/.claude と同じでも重複しない")
+    base_n = len(deny_write(ok_json(fx)))
+    rc, out, err = run(fx, env_extra={"CLAUDE_CONFIG_DIR": ""})
+    check(rc == 0 and len(deny_write(json.loads(out))) == base_n, "T201 空の CLAUDE_CONFIG_DIR は無いのと同じ")
+    # 置き場が無いフォルダでも守る（あとで作られても止まるように）
+    rc, out, err = run(fx, env_extra={"CLAUDE_CONFIG_DIR": str(fx["root"] / "まだ無い")})
+    check(rc == 0 and nfc(str(fx["root"] / "まだ無い/projects")) in [nfc(x) for x in deny_write(json.loads(out))], "T201 まだ無い置き場も守る")
+
+
+def test_config_dir_env_unusable_fails():
+    """相対パス・/・使えない文字のときは、黙って飛ばさず作らない（Python を許さない側。S05）"""
+    fx = mkfixture()
+    for label, val in (("相対", "relative/dir"), ("/", "/"), ("//", "//"), ("使えない文字", str(fx["root"] / "a*b")), ("改行", str(fx["root"]) + "/x\ny")):
+        rc, out, err = run(fx, env_extra={"CLAUDE_CONFIG_DIR": val})
+        check(rc == 1 and out == "", "T201 CLAUDE_CONFIG_DIR=%s は作らない rc=%s" % (label, rc))
+        check(err.startswith("sandbox_settings: ") and err.count("\n") == 1 and "CLAUDE_CONFIG_DIR" in err, "T201 %s：日本語1行で理由 %r" % (label, err))
+        check(val not in err or val == "/", "T201 %s：エラーの文に値（パス）を出さない" % label)
+
+
 # --- 12. 一覧の中身（外す・足りない形に壊されたら落ちる）---
 def test_paths_json_shape():
     spec = json.loads(PATHS_JSON.read_text(encoding="utf-8"))
     ids = {e["id"] for e in spec["entries"]}
     want = {"A-settings", "A-claude-md", "A-claude-local-md", "A-ai-bunshin-dir", "B-input", "C-claude", "C-git",
             "D-plugin-cache", "D-plugin-source", "S04-scripts", "S23-canary-guard", "S13-launchagents", "S13-user-settings", "S13-user-claude-md",
-            "S13-user-skills", "S13-user-agents", "S13-user-commands"}
+            "S13-user-skills", "S13-user-agents", "S13-user-commands", "S13-user-projects"}
     check(ids == want, "一覧の id が決定どおり：差 %s" % (ids ^ want))
     check(spec["add_dir_git"] == [{"path": ".git", "kind": "git"}], "S17 add_dir_git は .git を丸ごと（kind=git）")
     cg = [e for e in spec["entries"] if e["id"] == "C-git"]

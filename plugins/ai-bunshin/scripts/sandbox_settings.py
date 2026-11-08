@@ -5,9 +5,18 @@
   python3 sandbox_settings.py --home <本人のフォルダの絶対パス> --plugin-root <プラグインの元の絶対パス>
         [--plugin-root <もう1つ>] [--config <config.json>] [--user-home <ホーム>] [--paths-file <一覧>]
         [--calendar-url-env <環境変数の名前>]
-  python3 sandbox_settings.py --home <本人のフォルダ> --print-add-dirs [--config <config.json>]
+  python3 sandbox_settings.py --home <本人のフォルダ> --print-add-dirs [--config <config.json>] [--user-home <ホーム>]
   → 本人のフォルダの外にある開発のリポジトリ（config の dev.projects）を1行に1つ出す。読めなければ何も出さず終了コード0
-    （daily_cycle.sh の --add-dir と、囲いの守る先を同じ判定にそろえる。T119 W7）
+    （daily_cycle.sh の --add-dir と、囲いの守る先を同じ判定にそろえる。T119 W7）。
+    広すぎる先（/・ホーム・ホームの祖先・本人のフォルダの祖先）は出さず、標準エラーに1行（パスなし。T193 K4）
+  python3 sandbox_settings.py --home <本人のフォルダ> --print-read-rules --plugin-root <プラグインの元> [--plugin-root <もう1つ>]
+  → 自動実行で読めるようにするプラグインの元の読み取りの規則 Read(//…/**) を1行に1つ出す（NFC・NFD・実体。T193 K3）。
+    規則に使えない場所は出さず、標準エラーに1行（パスなし）。終了コードは0
+  python3 sandbox_settings.py --home <本人のフォルダ> --print-memory-deny [--user-home <ホーム>]
+  → Claude Code の自動記憶（<ホーム>/.claude/projects/*/memory/）に、書く道具（Edit・Write）で書くのを止める deny の規則
+    Edit(//…/projects/*/memory/**) を1行に1つ出す（NFC・NFD・実体。環境変数 CLAUDE_CONFIG_DIR があればそちらも。T193）。
+    これは道具の止め方の1つ目。2つ目は囲いの守る先（S13-user-projects。Bash の中の Python の書き込み。T201）で、設定の JSON（引数なし）に入る。
+    どちらも読み込みは止めない。規則に使えない場所は出さず、標準エラーに1行（パスなし）。終了コードは0
   → 標準出力に JSON を1行（そのまま claude -p --settings "$(…)" に渡せる）
   → 作れないときは、標準エラーに日本語1行・終了コード1（呼ぶ側は Python を許さず、今の許可に退く。T119 S05）
 
@@ -22,6 +31,9 @@
   控えのコミットは囲いの外の daily_cycle.sh（backup_commit）がするので、囲いの中から .git に書けなくても困らない
 - マーケットプレイスは、利用者の known_marketplaces.json の source が directory のものの installLocation を
   丸ごと守る（S12）。読めない・無い・形が違うときは足さずに作る
+- Claude Code の自動記憶（<ホーム>/.claude/projects/*/memory/）と会話の記録の置き場 <ホーム>/.claude/projects は、一覧（S13-user-projects）で
+  丸ごと守る（T201）。環境変数 CLAUDE_CONFIG_DIR があればその projects も守る。値が相対パス・/・使えない文字なら作らない（S05）。
+  読むのは止めない（denyRead は作らない）。Claude Code 本体が書く会話の記録は囲いの外なので止まらない
 - 通信は止め、カレンダーの取得先の host だけ通す（S02・S09）。URL は環境変数で受け取り、host だけを取り出す。
   URL そのものは出力・エラー・ログに出さない。config に calendar（ics）が無い人は全部止める
 - 許可の一覧（permissions.allow）・読み取りの守り（denyRead）は作らない（S08・S10）
@@ -41,6 +53,7 @@ DEFAULT_PATHS_FILE = HERE / "protected_paths.json"
 DEFAULT_URL_ENV = "AI_BUNSHIN_CALENDAR_URL"
 BASES = ("home", "user_home", "plugin_root")
 BAD_PATH_CHARS = set("*?[]{}()\n\r\x00")   # 権限の規則・囲いのパスで別の意味になる文字
+READ_BAD_RE = re.compile(r"(^|/)#|,|(^|\s)!|!(\s|$)")   # 読み取りの規則だけ：--allowedTools は , で区切られ、名前の頭の # はコメント、空白の前後の ! は否定になりうる（T193 K3。少し広めに避ける）
 HOST_RE = re.compile(r"^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$")
 
 
@@ -244,6 +257,14 @@ def build_settings(home, plugin_roots, config_path, user_home, calendar_url, pat
             else:
                 targets.append(("X12-" + d.name, tp, r["kind"]))
 
+    # 環境変数 CLAUDE_CONFIG_DIR があれば、そちらの projects（自動記憶と会話の記録の置き場）も守る（T201）。
+    # 使えない形（相対パス・/・使えない文字）のときは、黙って飛ばすと守らないまま Python を許してしまうので作らない（S05）。空の値は「無い」と同じ
+    cfg_dir = os.environ.get("CLAUDE_CONFIG_DIR")
+    if cfg_dir:
+        if not os.path.isabs(cfg_dir) or any(ch in BAD_PATH_CHARS for ch in cfg_dir) or os.path.normpath(cfg_dir).strip("/") == "":
+            raise Fail("環境変数 CLAUDE_CONFIG_DIR の場所が使えない形です（相対パス・使えない文字・ルート）")
+        targets.append(("S13-user-projects-config-dir", Path(os.path.normpath(cfg_dir)) / "projects", "dir"))
+
     # 書けるままにする先（tasks.json・logs）を含む守り方は作らない
     stay = spec.get("must_stay_writable")
     if not isinstance(stay, list):
@@ -285,16 +306,93 @@ def build_settings(home, plugin_roots, config_path, user_home, calendar_url, pat
     }
 
 
-def print_add_dirs(config, home):
-    """daily_cycle.sh の --add-dir に渡す先。読めない・無いときは何も出さない（前の daily_cycle.sh と同じ）"""
+def same_file(a, b):
+    """同じフォルダか（大文字小文字・リンクの違いを越えて）。どちらかが無い・調べられないときは False"""
+    try:
+        return os.path.samefile(a, b)
+    except OSError:
+        return False
+
+
+def print_add_dirs(config, home, user_home=None):
+    """daily_cycle.sh の --add-dir に渡す先。読めない・無いときは何も出さない（前の daily_cycle.sh と同じ）。
+    広すぎる先（/・ホーム・ホームの祖先・本人のフォルダの祖先。T193 K4）は出さず、標準エラーに1行（パスは出さない）。
+    本人が config に書いた ~/.ssh・~/Library のようなホームの中の先は外さない（config.json は AI が書けないので本人の意思）"""
     try:
         cfg = load_json(config, "config.json")
         dirs = add_dir_repos(cfg, Path(home))
     except Exception:
         return 0
+    wide_of = [canon(home), canon(user_home or os.path.expanduser("~"))]
+    wide_all = []   # ホーム・本人のフォルダと、その祖先（/ を除く）。大文字小文字だけ違う綴りは文字では一致しないので、samefile でも照らす（T193 K4）
+    for w in wide_of:
+        while w and w != "/":
+            if w not in wide_all:
+                wide_all.append(w)
+            w = os.path.dirname(w)
+    dropped = 0
     for d in dirs:
-        if not any(ch in str(d) for ch in "\n\r\x00"):   # 1行に1つで渡すので、改行を含む先は渡さない
-            sys.stdout.write(str(d) + "\n")
+        if any(ch in str(d) for ch in "\n\r\x00"):   # 1行に1つで渡すので、改行を含む先は渡さない
+            continue
+        cd = canon(d)
+        if cd == "/" or any(is_inside(w, cd) for w in wide_of) or any(same_file(d, w) for w in wide_all):   # その先が、本人のフォルダかホームを含む（＝同じか祖先）
+            dropped += 1
+            continue
+        sys.stdout.write(str(d) + "\n")
+    if dropped:
+        sys.stderr.buffer.write(("sandbox_settings: 広すぎる開発の置き場所（/・ホーム・ホームや本人のフォルダを含む先）を %d 件、--add-dir から外しました\n" % dropped).encode("utf-8"))
+    return 0
+
+
+def print_read_rules(plugin_roots):
+    """自動実行で読めるようにする場所（プラグインの元）の読み取りの規則。Read(//…/**) を1行に1つ（T193 K3）。
+    規則に使えない場所（相対パス・/・無いフォルダ・BAD_PATH_CHARS・, ・行頭の # ・空白の前後の !）は出さず、標準エラーに1行（パスは出さない）"""
+    rules, bad = [], 0
+    for root in plugin_roots:
+        p = os.path.normpath(root) if isinstance(root, str) and root else ""   # 末尾の / はここで取る
+        if not os.path.isabs(p) or p == "/" or not os.path.isdir(p) \
+                or any(ch in BAD_PATH_CHARS for ch in p) or READ_BAD_RE.search(p):
+            bad += 1
+            continue
+        for v in forms(p):
+            if any(ch in BAD_PATH_CHARS for ch in v) or READ_BAD_RE.search(v):
+                bad += 1
+                continue
+            r = "Read(/%s/**)" % v   # 権限の規則は // で始まる絶対パス（v は / で始まる）
+            if r not in rules:
+                rules.append(r)
+    for r in rules:
+        sys.stdout.write(r + "\n")
+    if bad:
+        sys.stderr.buffer.write(("sandbox_settings: プラグインの置き場所に規則に使えない文字があります（読み取りの規則を作れなかった先 %d 件）\n" % bad).encode("utf-8"))
+    return 0
+
+
+def print_memory_deny(user_home=None):
+    """自動記憶のフォルダ（<設定の置き場>/projects/*/memory/）に、書く道具（Edit・Write）で書くのを止める deny の規則。Edit(//…/projects/*/memory/**) を1行に1つ（T193）。
+    Bash の中の Python の書き込みは、この規則では止まらない。囲いの守る先（S13-user-projects。build_settings。T201）が止める。
+    Edit の規則は Write・NotebookEdit にも効く。規則に使えない場所は出さず、標準エラーに1行（パスは出さない）"""
+    cands = [os.path.join(user_home or os.path.expanduser("~"), ".claude")]
+    cfg = os.environ.get("CLAUDE_CONFIG_DIR")
+    if cfg:
+        cands.append(cfg)
+    rules, bad = [], 0
+    for c in cands:
+        p = os.path.normpath(c)
+        if not os.path.isabs(p) or p == "/" or any(ch in BAD_PATH_CHARS for ch in p) or READ_BAD_RE.search(p):
+            bad += 1
+            continue
+        for v in forms(p):   # 置き場が無くても、規則は作る（あとで作られても止まるように）
+            if any(ch in BAD_PATH_CHARS for ch in v) or READ_BAD_RE.search(v):
+                bad += 1
+                continue
+            r = "Edit(/%s/projects/*/memory/**)" % v   # 権限の規則は // で始まる絶対パス。* は1つ分のフォルダ名（gitignore の書き方）
+            if r not in rules:
+                rules.append(r)
+    for r in rules:
+        sys.stdout.write(r + "\n")
+    if bad:
+        sys.stderr.buffer.write(("sandbox_settings: 自動記憶の書き込みを止める規則に使えない文字があります（規則を作れなかった先 %d 件）\n" % bad).encode("utf-8"))
     return 0
 
 
@@ -312,11 +410,17 @@ def main(argv=None):
     ap.add_argument("--paths-file", default=str(DEFAULT_PATHS_FILE))
     ap.add_argument("--calendar-url-env", default=DEFAULT_URL_ENV)
     ap.add_argument("--print-add-dirs", action="store_true")
+    ap.add_argument("--print-read-rules", action="store_true")
+    ap.add_argument("--print-memory-deny", action="store_true")
     try:
         a = ap.parse_args(argv)
         config = a.config or str(Path(a.home) / "設定" / "config.json")
         if a.print_add_dirs:
-            return print_add_dirs(config, a.home)
+            return print_add_dirs(config, a.home, a.user_home)
+        if a.print_read_rules:
+            return print_read_rules(a.plugin_root)
+        if a.print_memory_deny:
+            return print_memory_deny(a.user_home)
         url = os.environ.get(a.calendar_url_env, "")
         out = build_settings(a.home, a.plugin_root, config, a.user_home, url, a.paths_file)
         sys.stdout.write(json.dumps(out, ensure_ascii=True, separators=(",", ":")) + "\n")

@@ -62,6 +62,12 @@ export AI_BUNSHIN_AUTO_RUN="$RUN_ID"
 write_lock() { printf '%s\n%s\n%s\n' "$$" "${LABEL}（$(date '+%H:%M')開始）" "$RUN_ID" > "$LOCK"; }
 
 log "開始"
+# 広すぎる開発の置き場所（/・ホーム・ホームや本人のフォルダの祖先）を --add-dir から外したら、その1行（パスなし）をログに残す（T193 K4）。
+# 上の ADD_DIRS（標準出力だけ）とは別の呼び出しで、標準エラーだけを受ける
+ADD_DIRS_NOTE=$(python3 -I "$SANDBOX" --home "$ROOT" --print-add-dirs 2>&1 >/dev/null)
+case "$ADD_DIRS_NOTE" in   # ログに書くのはこちらで決めた文だけ（道具の出力はそのまま写さない。パス・URL が混ざらないように）
+  "sandbox_settings: 広すぎる開発の置き場所"*) log "広すぎる開発の置き場所（/・ホーム・ホームや本人のフォルダを含む先）を --add-dir から外しました" ;;
+esac
 # 共通ルールの写し（.claude/rules/ai-bunshin-common.md）を、Claude を起動する前に最新にする
 # ふだんの出力は捨てる。写せなかった警告があるときだけ、その1行を $LOG に残す（朝に誰も見ていなくても後から分かるように）
 SESSION_OUT=$(CLAUDE_PROJECT_DIR="$ROOT" python3 "$DASH" --session < /dev/null 2>> "$LOG")
@@ -182,8 +188,10 @@ esac
 
 # 使える道具を絞る（送信・削除・設定やスクリプトの変更はできない）
 # Bash は update_dashboard.py・lock_check.py の完全なパス（ワイルドカードなし。T062）。スキルは "${CLAUDE_PLUGIN_ROOT}/scripts/…" を引用符つきで呼ぶので、引用符なし・ありの両方
-# 実行の段で囲いが作れたときだけ足す Python（SANDBOX_TOOLS）と、リンク経由の同じ道具の許可（LINK_TOOLS）は、run_claude の中で足す（ここには書かない）
-TOOLS="Read,Write,Edit,Glob,Grep,Agent,SendMessage,Skill,Bash(python3 $DASH:*),Bash(python3 \"$DASH\":*),Bash(python3 $PLUGIN_ROOT/scripts/lock_check.py:*),Bash(python3 \"$PLUGIN_ROOT/scripts/lock_check.py\":*)"
+# 実行の段で囲いが作れたときだけ足す Python（SANDBOX_TOOLS）と、リンク経由の同じ道具の許可（LINK_TOOLS）と、プラグインの中を読む規則（READ_TOOLS）は、run_claude の中で足す（ここには書かない）
+# ファイルを読む・書く・直す道具（Read・Write・Edit・Glob・Grep）は、場所の指定なしでは許さない（T193 K1）。
+# 書ける場所は --permission-mode acceptEdits が決める＝作業フォルダ（本人のフォルダ）と --add-dir の中だけ。外は -p では断られる。プラグインの中を読む規則は READ_TOOLS
+TOOLS="Agent,SendMessage,Skill,Bash(python3 $DASH:*),Bash(python3 \"$DASH\":*),Bash(python3 $PLUGIN_ROOT/scripts/lock_check.py:*),Bash(python3 \"$PLUGIN_ROOT/scripts/lock_check.py\":*)"
 DENY="Bash(rm:*),Bash(curl:*),Edit(.claude/settings.json),Edit(scripts/**),Edit(/$PLUGIN_ROOT/**),Edit(設定/**),Edit(CLAUDE.md),Edit(.claude/**),Edit(CLAUDE.local.md)"
 if [ "$PHASE" = "do" ]; then
   TOOLS="$TOOLS,WebSearch,WebFetch"   # 実行では調査のためにネットを読むことだけ許可
@@ -355,7 +363,7 @@ python3 -I \"$CANARY\" --nonce \"$nonce\""
     --model sonnet \
     --max-turns 6 \
     --allowedTools "Bash(python3 -I \"$CANARY\":*),Bash(python3 -I $CANARY:*)" \
-    --disallowedTools "$DENY,Write,Edit,NotebookEdit,Agent,Task,WebFetch,WebSearch" \
+    --disallowedTools "$DENY$MEM_DENY,Write,Edit,NotebookEdit,Agent,Task,WebFetch,WebSearch" \
     --settings "$sjson" \
     "${ADD_DIR_ARGS[@]}" \
     < /dev/null 2>> "$LOG" &
@@ -404,9 +412,37 @@ run_claude() {
   SANDBOX_ARGS=()
   SANDBOX_TOOLS=""
   LINK_TOOLS=""
+  READ_TOOLS=""
   if [ "$PLUGIN_ROOT_RAW" != "$PLUGIN_ROOT" ]; then   # リンク経由で呼ばれた（installPath が実体と違う）ときは、そちらの名前の完全なパスも許す
     LINK_TOOLS=",Bash(python3 $PLUGIN_ROOT_RAW/scripts/update_dashboard.py:*),Bash(python3 \"$PLUGIN_ROOT_RAW/scripts/update_dashboard.py\":*),Bash(python3 $PLUGIN_ROOT_RAW/scripts/lock_check.py:*),Bash(python3 \"$PLUGIN_ROOT_RAW/scripts/lock_check.py\":*)"
   fi
+  # 外で読む必要があるのはプラグインの中（雛形など）だけ。その読み取りの規則を、規則に使えない文字を除いて足す（T193 K3。3つの段とも同じ）。
+  # 規則は sandbox_settings.py が作る（NFC・NFD・実体の形。パスから組み立てる所を1か所にするため、ここで組み立てない）。ログに残すのは、こちらで決めた文（道具の出力はそのまま写さない）
+  local rr_roots=(--plugin-root "$PLUGIN_ROOT") rr_out rr_rc rr_line
+  [ "$PLUGIN_ROOT_RAW" != "$PLUGIN_ROOT" ] && rr_roots+=(--plugin-root "$PLUGIN_ROOT_RAW")
+  rr_out=$(python3 -I "$SANDBOX" --home "$ROOT" --print-read-rules "${rr_roots[@]}" 2>&1 < /dev/null)
+  rr_rc=$?
+  for rr_line in ${(f)rr_out}; do
+    case "$rr_line" in
+      "Read(//"*"/**)") READ_TOOLS="$READ_TOOLS,$rr_line" ;;
+      "sandbox_settings: プラグインの置き場所に規則に使えない文字があります"*) log "プラグインの置き場所に規則に使えない文字があります（読み取りの規則を作れなかった先があります）" ;;
+    esac
+  done
+  [ $rr_rc -ne 0 ] && log "プラグインの中を読む規則を作れませんでした（プラグインの中は読めない可能性があります）"
+  # Claude Code の自動記憶（~/.claude/projects/*/memory/）に書く道具（Edit・Write）で書くのを止める（T193。読み込みは残す）。Bash の中の Python からの書き込みは、囲いの守る先（S13-user-projects。sandbox_settings.py が作る --settings。T201）が止める。
+  # 環境変数 CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 は読み込みも止めるので使わない。止める規則（Edit の deny。Write にも効く）は sandbox_settings.py が作り、
+  # ここでこの起動の分だけ DENY に足す（DENY= の行は変えない＝T141 が読める形のまま）。囲いの点検の claude の止める道具にも同じものを足す（点検は本番の DENY を全部含む決まり＝test_sandbox_wiring k2。点検は Write・Edit を丸ごと止めているので、許可は広がらない）。ログに残すのは、こちらで決めた文だけ
+  MEM_DENY=""
+  local md_out md_rc md_line
+  md_out=$(python3 -I "$SANDBOX" --home "$ROOT" --print-memory-deny 2>&1 < /dev/null)
+  md_rc=$?
+  for md_line in ${(f)md_out}; do
+    case "$md_line" in
+      "Edit(//"*"/projects/*/memory/**)") MEM_DENY="$MEM_DENY,$md_line" ;;
+      "sandbox_settings: 自動記憶の書き込みを止める規則に使えない文字があります"*) log "自動記憶の書き込みを止める規則に使えない文字があります（規則を作れなかった先があります）" ;;
+    esac
+  done
+  [ $md_rc -ne 0 ] && log "自動記憶の書き込みを止める規則を作れませんでした（自動記憶に書ける可能性があります）"
   if [ "$PHASE" = "do" ]; then
     local cal_url sbx_out sbx_rc sbx_json sbx_why
     cal_url=$(calendar_url_for_sandbox)   # 取れなければ空。変数にだけ入れ、export しない・ログに書かない
@@ -469,8 +505,8 @@ sys.stdout.buffer.write(((t[0] if t else "")[:120]).encode("utf-8"))' 2>/dev/nul
     --permission-mode acceptEdits \
     --model opus \
     --max-turns "$MAX_TURNS" \
-    --allowedTools "$TOOLS$LINK_TOOLS$SANDBOX_TOOLS" \
-    --disallowedTools "$DENY" \
+    --allowedTools "$TOOLS$LINK_TOOLS$READ_TOOLS$SANDBOX_TOOLS" \
+    --disallowedTools "$DENY$MEM_DENY" \
     "${SANDBOX_ARGS[@]}" \
     "${ADD_DIR_ARGS[@]}" \
     < /dev/null 2>> "$LOG" &

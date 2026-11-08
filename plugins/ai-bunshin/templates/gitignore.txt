@@ -5,6 +5,8 @@
 00_タスク管理/data/calendar_cache.json
 # 右のパネルのガントチャート用（update_dashboard.py が毎回作り直す。毎回変わるので控えに入れない）
 00_タスク管理/data/forecast.json
+# デスクトップ用のタスク表（cockpit_html.py が毎回作り直す。予定の件名が入る）
+00_タスク管理/コックピット.html
 # Excel（tasks.json から自動で作り直せる）
 *.xlsx
 # ログ

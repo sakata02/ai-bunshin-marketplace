@@ -5,23 +5,23 @@ import type { AllRow, Board, Cal, CalEvent, Detail, ForecastDay, ForecastTask, G
 
 // 共通のパネル。本人のフォルダ（設定/config.json と 00_タスク管理/data/tasks.json がある所）でだけ出る。
 // tasks.json と予定のキャッシュは読むだけ。名前・呼び方は config.json の owner・owner_call から
-const PANE = 'ai-bunshin-panel'
+const PANE = 'ai-bunshin'
 const TITLE = '今日のやること'
 const ALL_TITLE = '全部のタスク'
 const GANTT_TITLE = 'これから2週間'
 
 const EMPTY: Board = { today: '', mine: [], ai: [], aiNext: [], aiNextMore: 0, all: [], soon: [], openRequests: 0, error: '' }
 // 形を変えたら shape の札も変える（前の版がしまった値を読まないように）
-const board = atom({ plugin: 'ai-bunshin-panel', key: 'board' } as const, EMPTY, { shape: 'board-5' })
+const board = atom({ plugin: 'ai-bunshin', key: 'board' } as const, EMPTY, { shape: 'board-5' })
 const HOME: View = { mode: 'home', page: 0 }
-const view = atom({ plugin: 'ai-bunshin-panel', key: 'view' } as const, HOME, { shape: 'view-2' })
-const mtime = atom({ plugin: 'ai-bunshin-panel', key: 'mtime' } as const, 0)
+const view = atom({ plugin: 'ai-bunshin', key: 'view' } as const, HOME, { shape: 'view-2' })
+const mtime = atom({ plugin: 'ai-bunshin', key: 'mtime' } as const, 0)
 const NONE: Detail = { id: '', title: '', lines: [], steps: [], error: '' }
-const detail = atom({ plugin: 'ai-bunshin-panel', key: 'detail' } as const, NONE, { shape: 'detail-1' })
+const detail = atom({ plugin: 'ai-bunshin', key: 'detail' } as const, NONE, { shape: 'detail-1' })
 const NO_CAL: Cal = { fetched: '', events: [], nowMin: 0, error: '' }
-const cal = atom({ plugin: 'ai-bunshin-panel', key: 'cal' } as const, NO_CAL, { shape: 'cal-1' })
+const cal = atom({ plugin: 'ai-bunshin', key: 'cal' } as const, NO_CAL, { shape: 'cal-1' })
 const NO_GANTT: Gantt = { ok: false, message: '', today: '', days: [], tasks: [], waiting: 0 }
-const gantt = atom({ plugin: 'ai-bunshin-panel', key: 'gantt' } as const, NO_GANTT, { shape: 'gantt-1' })
+const gantt = atom({ plugin: 'ai-bunshin', key: 'gantt' } as const, NO_GANTT, { shape: 'gantt-1' })
 
 type Task = {
   id: string
@@ -669,7 +669,7 @@ export const register: Register = on => {
     return { text: d.error || `${d.id} を右に開きました。` }
   })
 
-  on('tool.call', { tool: 'mcp__ai-bunshin-panel__open_task' }, async ($, e) => {
+  on('tool.call', { tool: 'mcp__ai-bunshin__open_task' }, async ($, e) => {
     if (!me) return { result: NO_HOME }
     const id = String((e as any).id ?? '').trim()
     if (!id) {
@@ -685,7 +685,7 @@ export const register: Register = on => {
     }
   })
 
-  on('tool.call', { tool: 'mcp__ai-bunshin-panel__show_all_tasks' }, async $ => {
+  on('tool.call', { tool: 'mcp__ai-bunshin__show_all_tasks' }, async $ => {
     if (!me) return { result: NO_HOME }
     const { isPlaced, count } = await showAll($)
     return {
@@ -695,7 +695,7 @@ export const register: Register = on => {
     }
   })
 
-  on('tool.call', { tool: 'mcp__ai-bunshin-panel__show_gantt' }, async $ => {
+  on('tool.call', { tool: 'mcp__ai-bunshin__show_gantt' }, async $ => {
     if (!me) return { result: NO_HOME }
     const { isPlaced, g } = await showGantt($)
     if (!g.ok) return { result: g.message }
