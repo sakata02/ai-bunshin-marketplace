@@ -288,7 +288,7 @@ with tempfile.TemporaryDirectory() as tmp:
     code, out, err = run(["show", "zzzz"], home=home, claude=claude)
     check("show 無い ID は失敗", code == 1 and err)
     code, out, err = run(["show", "aaaaaaaa", "--grep", "banana"], home=home, claude=claude)
-    check("show --grep 当たりなし", "当たる発言はありません" in out and "## まとめ" in out, out)
+    check("show --grep 当たりなし（K30：まとめは出さない）", "当たる発言はありません" in out and "## まとめ" not in out, out)
     # 長い会話：grep と context と 4000字の切り
     big = [user("最初の質問 FIRSTQ", ts="2026-11-13T01:00:00Z")]
     for i in range(1, 31):
@@ -747,6 +747,240 @@ with tempfile.TemporaryDirectory() as tmp:
     r = subprocess.run([sys.executable, os.path.join(HERE, "..", "scripts", "conversation_index.py"), "import", "-Users-x-proj"], env=env, capture_output=True)
     md_ = next((home / "06_会話履歴" / "会話").glob("*_aaaaaaaa.md"))
     check("K29 ファイルは UTF-8 で書く", r.returncode == 0 and "T257" in md_.read_bytes().decode("utf-8"))
+
+
+# ================= 直しの決定 K30〜K40 =================
+import time as _time_mod  # noqa: E402
+
+# ---- K30：show のまとめと本文を別々に切る ----
+with tempfile.TemporaryDirectory() as tmp:
+    home = make_home(tmp)
+    claude = make_claude(tmp)
+    pa = claude / "projects" / "-Users-x-proj"
+    big_summary = "まとめの行です。" * 400 + " SUMMARY_TAIL_MARK"
+    objs = [user("最初の質問", ts="2026-11-15T01:00:00Z")]
+    for i in range(1, 15):
+        objs.append(asst([{"type": "text", "text": "返事%d" % i}], ts="2026-11-15T01:%02d:00Z" % i))
+        objs.append(user("質問%d%s" % (i, " 坂田さんの件" if i == 7 else ""), ts="2026-11-15T01:%02d:30Z" % i))
+    objs.append(user(big_summary, isCompactSummary=True, ts="2026-11-15T02:00:00Z"))
+    (pa / "a0a0a0a0-0000-0000-0000-000000000000.jsonl").write_text(jl(*objs), encoding="utf-8")
+    run(["import", "-Users-x-proj"], home=home, claude=claude)
+    code, out, err = run(["show", "a0a0a0a0", "--grep", "坂田"], home=home, claude=claude)
+    check("K30 --grep はまとめを出さず本文だけ（まとめが長くても本文が出る）", "質問7 坂田さんの件" in out and "## まとめ" not in out and "まとめの行です" not in out, out[:300])
+    code, out, err = run(["show", "a0a0a0a0"], home=home, claude=claude)
+    sm_part = out.split("## まとめ\n", 1)[1].split("\n## 会話", 1)[0]
+    check("K30 まとめは最大1500字・超えたら --summary の案内", "（まとめの続きは --summary で）" in out and sm_part.index("（まとめの続きは") <= 1500 + 2 and "SUMMARY_TAIL_MARK" not in out, out[:200])
+    check("K30 まとめの残りの枠に本文が入る（全体 4000字以内）", "最初の質問" in out and "質問14" in out and len(out) <= 4000 + 5, str(len(out)))
+    code, out, err = run(["show", "a0a0a0a0", "--summary"], home=home, claude=claude)
+    check("K30 --summary はまとめだけ・全部（4000字で切る）", "SUMMARY_TAIL_MARK" in out and "## 会話" not in out and "返事3" not in out, out[-120:])
+    check("K30 --summary の全体は4000字以内（切りの注記つき）", len(out) <= 4000 + 40, str(len(out)))
+    huge = [user("質問", ts="2026-11-15T03:00:00Z"), user("あ" * 6000, isCompactSummary=True)]
+    (pa / "a1a1a1a1-0000-0000-0000-000000000000.jsonl").write_text(jl(*huge), encoding="utf-8")
+    run(["update"], home=home, claude=claude)
+    code, out, err = run(["show", "a1a1a1a1", "--summary"], home=home, claude=claude)
+    check("K30 --summary が4000字を超えたら切る", "4000字で切りました" in out and len(out) <= 4000 + 40, str(len(out)))
+
+# ---- K31：Git が壊れていても止める ----
+if shutil.which("git"):
+    with tempfile.TemporaryDirectory() as tmp:
+        home = make_home(tmp)
+        claude = make_claude(tmp)
+        subprocess.run(["git", "init", "-q", str(home)], capture_output=True)
+        (home / ".gitignore").write_text("06_会話履歴/\n", encoding="utf-8")
+        (home / ".git" / "HEAD").write_text("ゴミ\n", encoding="utf-8")   # .git/HEAD を壊す
+        code, out, err = run(["import", "-Users-x-proj"], home=home, claude=claude)
+        check("K31 .git が壊れて確かめられないときは止める", code == 1 and ".gitignore" in err and "確かめられません" in err and not (home / "06_会話履歴").exists(), out + err)
+    with tempfile.TemporaryDirectory() as tmp:
+        outer = Path(tmp) / "outer"
+        outer.mkdir()
+        subprocess.run(["git", "init", "-q", str(outer)], capture_output=True)
+        (outer / ".git" / "HEAD").write_text("ゴミ\n", encoding="utf-8")
+        home = make_home(outer, "inner")      # 本人のフォルダの「上」に壊れた .git
+        claude = make_claude(tmp)
+        code, out, err = run(["import", "-Users-x-proj"], home=home, claude=claude)
+        check("K31 上のフォルダに .git があって確かめられないときも止める", code == 1 and not (home / "06_会話履歴").exists(), out + err)
+    with tempfile.TemporaryDirectory() as tmp:
+        home = make_home(tmp)
+        claude = make_claude(tmp)
+        code, out, err = run(["import", "-Users-x-proj"], home=home, claude=claude)
+        check("K31 .git が無ければ進む", code == 0 and len(read_index(home)) == 2, out + err)
+    with tempfile.TemporaryDirectory() as tmp:
+        home = make_home(tmp)
+        claude = make_claude(tmp)
+        subprocess.run(["git", "init", "-q", str(home)], capture_output=True)
+        code, out, err = run(["import", "-Users-x-proj"], home=home, claude=claude)
+        check("K37 案内は printf '\\n06_会話履歴/\\n' >> .gitignore", code == 1 and "printf '\\n06_会話履歴/\\n' >> .gitignore" in err, err)
+    # git が動かない（PATH に無い）：.git があれば止める・無ければ進む
+    keep_path = os.environ.get("PATH", "")
+    with tempfile.TemporaryDirectory() as tmp:
+        home = make_home(tmp)
+        claude = make_claude(tmp)
+        subprocess.run(["git", "init", "-q", str(home)], capture_output=True)
+        os.environ["PATH"] = str(tmp)
+        try:
+            code, out, err = run(["import", "-Users-x-proj"], home=home, claude=claude)
+        finally:
+            os.environ["PATH"] = keep_path
+        check("K31 git コマンドが動かなくても .git があれば止める", code == 1 and not (home / "06_会話履歴").exists(), out + err)
+    with tempfile.TemporaryDirectory() as tmp:
+        home = make_home(tmp)
+        claude = make_claude(tmp)
+        os.environ["PATH"] = str(tmp)
+        try:
+            code, out, err = run(["import", "-Users-x-proj"], home=home, claude=claude)
+        finally:
+            os.environ["PATH"] = keep_path
+        check("K31 git も .git も無ければ進む", code == 0 and len(read_index(home)) == 2, out + err)
+
+# ---- K32：slash コマンドの囲い ----
+with tempfile.TemporaryDirectory() as tmp:
+    cmd_text = "<command-message>ai-bunshin:daily-plan</command-message>\n<command-name>/ai-bunshin:daily-plan</command-name>\n<command-args>今日の分</command-args>"
+    cv = parse_lines(tmp, user(cmd_text), asst([{"type": "text", "text": "はい"}]),
+                     user("<command-name>/clear</command-name>\n<command-message>clear</command-message>\n<command-args></command-args>"),
+                     user("<local-command-caveat>Caveat: これは消える</local-command-caveat>"),
+                     user("ふつうの発言"))
+    texts = [t[2] for t in cv["turns"] if t[0] == "user"]
+    check("K32 /name 引数 に変える", texts[0] == "（コマンド）/ai-bunshin:daily-plan 今日の分", str(texts))
+    check("K32 引数が空なら /name だけ", texts[1] == "（コマンド）/clear", str(texts))
+    check("K32 local-command-caveat は消える・ふつうの発言は残る", texts[2:] == ["ふつうの発言"], str(texts))
+    check("K32 題・first に囲いが残らない", "<command-" not in cv["title"] and "<command-" not in cv["first"] and cv["first"] == "（コマンド）/ai-bunshin:daily-plan 今日の分", cv["title"] + "|" + cv["first"])
+    check("K32 本文（md）にも囲いの文字が残らない", "<command-" not in ci.render_md(cv))
+    cv2 = parse_lines(tmp, user("<command-message>only-msg</command-message>"))
+    check("K32 name が無ければ message を使う", cv2["turns"][0][2] == "（コマンド）only-msg", cv2["turns"][0][2])
+
+# ---- K33：password 類・トークンの形 ----
+for src_, bad_ in (('{"password": "hunter2xyz"}', "hunter2xyz"), ("'passwd' : 'hunter2xyz'", "hunter2xyz"), ("password is hunter2xyz", "hunter2xyz"),
+                   ("パスワードは hunter2xyz です", "hunter2xyz"), ("PASSWORD: hunter2xyz", "hunter2xyz"), ('password="hunter2 xyz"', "hunter2"), ("パスワード：hunter2xyz", "hunter2xyz")):
+    o_ = ci.redact(src_)
+    check("K33 伏せる：" + src_, bad_ not in o_ and ci.MASK in o_, o_)
+check("K33 パスワードの変更方法（値が無い文）は変えない", ci.redact("パスワードは必須です") == "パスワードは必須です" and ci.redact("パスワードの変更方法") == "パスワードの変更方法")
+check("K33 伏せ済みを二重に伏せない", ci.redact('{"password": "%s"}' % ci.MASK).count(ci.MASK) == 1)
+for nm, secret in (("ntn", "ntn_" + "A1b2C3d4E5" * 3), ("npm", "npm_" + "a1B2c3D4e5" * 3), ("shpat", "shpat_" + "0a1b2c3d4e" * 3), ("ASIA", "ASIA" + "ABCDEFGHIJKLMNOP")):
+    o_ = ci.redact("鍵 %s です" % secret)
+    check("K33 伏せる：" + nm, secret not in o_ and ci.MASK in o_, o_)
+
+# ---- K34：読めなかった元は処理済みにしない ----
+with tempfile.TemporaryDirectory() as tmp:
+    home = make_home(tmp)
+    claude = make_claude(tmp)
+    run(["import", "-Users-x-proj"], home=home, claude=claude)
+    pa = claude / "projects" / "-Users-x-proj"
+    newj = pa / "b0b0b0b0-0000-0000-0000-000000000000.jsonl"
+    newj.write_text(jl(user("読めなかった元 UNREADABLE")), encoding="utf-8")
+    real_parse = ci.parse_code_jsonl
+
+    def deny(path):
+        if Path(path).name.startswith("b0b0b0b0"):
+            raise PermissionError("読めない")
+        return real_parse(path)
+    ci.parse_code_jsonl = deny
+    try:
+        code, out, err = run(["update"], home=home, claude=claude)
+    finally:
+        ci.parse_code_jsonl = real_parse
+    sj = json.loads((home / "06_会話履歴" / "sources.json").read_text(encoding="utf-8"))
+    check("K34 OSError の元は sources.json に記録しない", not any(k.endswith("b0b0b0b0-0000-0000-0000-000000000000.jsonl") for k in sj["files"]) and code == 0, out + err)
+    code, out, err = run(["update"], home=home, claude=claude)
+    check("K34 次の起動でやり直して入る", "足した 1 件" in out and "[b0b0b0b0]" in run(["search", "UNREADABLE"], home=home, claude=claude)[1], out + err)
+    # チャットの zip が壊れているとき
+    zdir = home / "03_インプット" / "会話"
+    zdir.mkdir(parents=True)
+    (zdir / "bad.zip").write_bytes("PK\x03\x04これはzipではない".encode("utf-8"))
+    code, out, err = run(["import", "bad.zip"], home=home, claude=claude)
+    sj = json.loads((home / "06_会話履歴" / "sources.json").read_text(encoding="utf-8"))
+    check("K34 壊れた zip も記録しない", code == 0 and "03_インプット/会話/bad.zip" not in sj["files"], out + err)
+    make_chat_zip(zdir / "bad.zip")      # 直ったら次の update で入る
+    code, out, err = run(["update"], home=home, claude=claude)
+    check("K34 直った zip は次の update で入る", "足した 2 件" in out, out + err)
+
+# ---- K35：一覧づくりでは伏せない・組み立てない ----
+with tempfile.TemporaryDirectory() as tmp:
+    home = make_home(tmp)
+    zdir = home / "03_インプット" / "会話"
+    zdir.mkdir(parents=True)
+    make_chat_zip(zdir / "e.zip")
+    calls = {"redact": 0, "conv": 0}
+    real_redact, real_conv = ci.redact, ci._chat_conv
+    ci.redact = lambda t: (calls.__setitem__("redact", calls["redact"] + 1), real_redact(t))[1]
+    ci._chat_conv = lambda c, s_: (calls.__setitem__("conv", calls["conv"] + 1), real_conv(c, s_))[1]
+    try:
+        code, out, err = run(["sources"], home=home, claude=Path(tmp) / "none")
+    finally:
+        ci.redact, ci._chat_conv = real_redact, real_conv
+    check("K35 sources では伏せる・発言の組み立てをしない", calls == {"redact": 0, "conv": 0}, str(calls))
+    check("K35 会話の数と期間は同じ（2件・読めない形は数えない）", "e.zip  会話 2 件  2026-10-01〜2026-10-05" in out, out)
+
+# ---- K36：まとめの先頭の system-reminder を取り除く ----
+with tempfile.TemporaryDirectory() as tmp:
+    cv = parse_lines(tmp, user("質問"), user("<system-reminder>\n<tools-used-before-summary>Agent, Bash</tools-used-before-summary>\n</system-reminder>\nSummary:\n1. 本当のまとめ", isCompactSummary=True))
+    check("K36 まとめから system-reminder を取り除く", cv["summaries"] == ["Summary:\n1. 本当のまとめ"] and "tools-used-before-summary" not in ci.render_md(cv), str(cv["summaries"]))
+
+# ---- K39：ID の頭8字・--limit ----
+check("K39 ファイル名の ID はファイル名に使えない字を _ にする", ci.conv_filename({"started": "2026-10-01T00:00:00+09:00", "id": "a/b:c*d?e-fghi"}) == "20261001_a_b_c_d_.md", ci.conv_filename({"started": "2026-10-01T00:00:00+09:00", "id": "a/b:c*d?e-fghi"}))
+with tempfile.TemporaryDirectory() as tmp:
+    home = make_home(tmp)
+    claude = make_claude(tmp)
+    run(["import", "-Users-x-proj"], home=home, claude=claude)
+    code, out, err = run(["search", "の", "--limit", "0"], home=home, claude=claude)
+    check("K39 --limit 0 でも1件は出す（負の値も）", len([x for x in out.splitlines() if "[" in x]) == 1 and run(["search", "の", "--limit", "-3"], home=home, claude=claude)[1].count("[") >= 1, out)
+
+# ---- K40：索引の末尾が切れたまま update を2回／save_sources の間引き ----
+with tempfile.TemporaryDirectory() as tmp:
+    home = make_home(tmp)
+    claude = make_claude(tmp)
+    pa = claude / "projects" / "-Users-x-proj"
+    run(["import", "-Users-x-proj"], home=home, claude=claude)
+    ip = home / "06_会話履歴" / "索引.jsonl"
+    with open(ip, "ab") as f:
+        f.write('{"id": "切れた行", "title": "途'.encode("utf-8"))
+    (pa / "f0f0f0f0-0000-0000-0000-000000000000.jsonl").write_text(jl(user("1回目の追加 ADD1")), encoding="utf-8")
+    run(["update", "--quiet"], home=home, claude=claude)
+    with open(ip, "ab") as f:
+        f.write('{"id": "また切れた", "tit'.encode("utf-8"))
+    (pa / "f1f1f1f1-0000-0000-0000-000000000000.jsonl").write_text(jl(user("2回目の追加 ADD2")), encoding="utf-8")
+    run(["update", "--quiet"], home=home, claude=claude)
+    rows = ci.load_index(home)
+    check("K40 末尾が切れたまま update を2回続けても、全部の会話が読める", sorted(k[:8] for k in rows) == ["aaaaaaaa", "bbbbbbbb", "f0f0f0f0", "f1f1f1f1"], str(sorted(rows)))
+    check("K40 2回のあと索引は全行が JSON（切れた行は置き換えで消える）", all(json.loads(x) for x in ip.read_text(encoding="utf-8").splitlines()))
+
+class FakeTime:
+    """monotonic が呼ばれるたびに step 秒進む時計（save_sources の間引きの確認用）。"""
+    def __init__(self, step):
+        self.t = 0.0
+        self.step = step
+
+    def monotonic(self):
+        self.t += self.step
+        return self.t
+
+    def time(self):
+        return _time_mod.time()
+
+
+def count_saves(step, n_files):
+    with tempfile.TemporaryDirectory() as tmp:
+        home = make_home(tmp)
+        claude = make_claude(tmp)
+        pa = claude / "projects" / "-Users-x-proj"
+        for i in range(n_files):
+            (pa / ("9%07d-0000-0000-0000-000000000000.jsonl" % i)).write_text(jl(user("多い %d" % i)), encoding="utf-8")
+        src = {"version": 1, "sources": [{"kind": "code", "name": "-Users-x-proj", "path": str(pa)}], "files": {}}
+        (home / "06_会話履歴").mkdir()
+        n = [0]
+        real_save, real_time = ci.save_sources, ci.time
+        ci.save_sources = lambda r, d: (n.__setitem__(0, n[0] + 1), real_save(r, d))[1]
+        ci.time = FakeTime(step)
+        try:
+            totals = ci.run_sync(home, src)
+        finally:
+            ci.save_sources, ci.time = real_save, real_time
+        return n[0], totals["files"]
+
+
+saves, nfiles = count_saves(0.0, 6)
+check("K40 save_sources の間引き：1秒たたなければ最後の1回だけ", saves == 1 and nfiles == 9, "%d/%d" % (saves, nfiles))
+saves, nfiles = count_saves(2.0, 6)
+check("K40 save_sources の間引き：1秒たつごとに保存する（ファイルごと＋最後）", saves == nfiles + 1, "%d/%d" % (saves, nfiles))
 
 if fail:
     print("失敗 %d 件" % fail)

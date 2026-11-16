@@ -15,7 +15,7 @@
   import <番号や名前…> | --all     選んだ元を sources.json に足して取り込む
   update [--quiet]                 選んだ元のうち、変わった・増えたファイルだけ作り直す（hook 用。無ければ何も出さない。20秒で打ち切る）
   search <言葉や T0XX…> [--limit N]  索引と本文を探す（言葉が全部入っている会話。日付の新しい順）
-  show <IDの頭8字> [--grep 言葉] [--context N]  まとめと、当たった発言とその前後だけ（4000字で切る）
+  show <IDの頭8字> [--grep 言葉] [--context N] [--summary]  まとめ（1500字まで）と本文。--grep はまとめなしで当たった発言とその前後だけ。--summary はまとめだけ（全体 4000字で切る）
 
 本人のフォルダの見つけ方は update_dashboard.py の find_root() をそのまま使う。見つからなければ何もせず終わる（終了コード 0）。
 Claude Code の保存場所は、環境変数 CLAUDE_CONFIG_DIR があればその下の projects、無ければ ~/.claude/projects。
@@ -40,6 +40,7 @@ CONV_DIR = "会話"
 CHAT_DIR = ("03_インプット", "会話")
 SKIP_FOLDER_WORDS = ("-private-tmp-", "-tmp-", "scratchpad", "-var-folders-", "AppData-Local-Temp")
 SHOW_LIMIT = 4000
+SUMMARY_LIMIT = 1500     # show で出すまとめの上限（超えたら --summary で全部）
 UPDATE_BUDGET = 20.0      # update の打ち切り（秒）
 LOCK_STALE_SEC = 60 * 60  # これより古いロックは無視する
 MASK = "［伏せた］"
@@ -83,11 +84,17 @@ _WHOLE_RES = [  # 全体を伏せる形
     re.compile(r"gh[pousr]_[A-Za-z0-9]{20,}"),
     re.compile(r"AKIA[0-9A-Z]{16}"),
     re.compile(r"xox[abpr]-[A-Za-z0-9-]{10,}"),
+    re.compile(r"(?<![A-Za-z0-9])ntn_[A-Za-z0-9]{20,}"),
+    re.compile(r"(?<![A-Za-z0-9])npm_[A-Za-z0-9]{20,}"),
+    re.compile(r"(?<![A-Za-z0-9])shpat_[A-Za-z0-9]{20,}"),
+    re.compile(r"ASIA[0-9A-Z]{16}"),
 ]
 _URL_CRED_RE = re.compile(r"(://)[^/\s:@]+:[^/\s@]+(@)")
 _QUERY_RE = re.compile(r"([?&](?:token|key|secret|sig|signature)=)[^&\s]+")
 _PATH_SECRET_RES = [re.compile(r"(calendar/ical/)\S+"), re.compile(r"(hooks\.slack\.com/services/)\S+")]
-_PASSWORD_RE = re.compile(r"((?:password|passwd|パスワード)\s*[:=：]\s*)(\S+)", re.I)
+# password 類：「password: X」「"password": "X"」「'passwd' : 'X'」「password is X」「パスワードは X」。引用符の中の値は閉じる引用符まで
+_PASSWORD_RE = re.compile(r"((?:password|passwd|パスワード)[\"']?\s*[:=：]\s*)(\"[^\"\n]*\"?|'[^'\n]*'?|\S+)", re.I)
+_PASSWORD_IS_RE = re.compile(r"((?:password|passwd|パスワード)(?:\s+is\s+|\s*は\s*))([!-~]+)", re.I)
 _KEYVAL_RE = re.compile(
     r"((?:(?i:token|secret|api[_-]?key|client_secret))|[A-Z_]*(?:KEY|TOKEN|SECRET|PASSWORD))(\"?'?\s*[:=]\s*\"?'?)(\S{8,})")
 
@@ -110,12 +117,32 @@ def redact(text):
     for r in _PATH_SECRET_RES:
         text = _sub(r, lambda m: m.group(1) + MASK, text)
     text = _PASSWORD_RE.sub(_keep_mask(1), text)
+    text = _PASSWORD_IS_RE.sub(_keep_mask(1), text)
     return _KEYVAL_RE.sub(_keep_mask(2), text)
 
 
-def clean_user_text(text):
-    for r in _STRIP_RES:
+_CMD_TAG_RES = {t: re.compile(r"<command-%s>(.*?)</command-%s>" % (t, t), re.S) for t in ("message", "name", "args")}
+_OTHER_WRAP_RES = [re.compile(r"<local-command-caveat>.*?</local-command-caveat>", re.S)]
+
+
+def _fold_slash_command(text):
+    """<command-message>…</command-message><command-name>/x</command-name><command-args>…</command-args> を「（コマンド）/x 引数」にする。"""
+    found = {t: r.search(text) for t, r in _CMD_TAG_RES.items()}
+    if not any(found.values()):
+        return text
+    name = found["name"].group(1).strip() if found["name"] else ""
+    args = found["args"].group(1).strip() if found["args"] else ""
+    msg = found["message"].group(1).strip() if found["message"] else ""
+    for r in _CMD_TAG_RES.values():
         text = r.sub("", text)
+    label = " ".join(x for x in ("（コマンド）" + (name or msg), args) if x)
+    return (label + "\n" + text.strip()).strip()
+
+
+def clean_user_text(text):
+    for r in _STRIP_RES + _OTHER_WRAP_RES:
+        text = r.sub("", text)
+    text = _fold_slash_command(text)
     text = _BASH_INPUT_RE.sub(lambda m: "（コマンド）" + m.group(1).strip(), text)
     return text.strip()
 
@@ -287,7 +314,7 @@ def parse_code_jsonl(path):
             ts = to_local_iso(o.get("timestamp"))
             if t == "user":
                 if o.get("isCompactSummary"):                       # ① まとめ
-                    s = redact(_text_of_content(content).strip())
+                    s = redact(_STRIP_RES[0].sub("", _text_of_content(content)).strip())   # 先頭の <system-reminder>…</system-reminder> は取り除く
                     if s:
                         summaries.append(s)
                     continue
@@ -350,9 +377,9 @@ def _chat_text(m):
     return _text_of_content(m.get("content"))   # type: text だけ（attachments・files は読まない）
 
 
-def load_chat_json(path):
+def load_chat_json(path, strict=False):
     """zip（名前の最後が conversations.json のもの全部）か conversations.json を読む。
-    (会話のリスト, 読めなかった・配列でなかったものの数) を返す。"""
+    (会話のリスト, 読めなかった・配列でなかったものの数) を返す。strict なら、ファイルが開けない（OSError・壊れた zip）ときは例外を出す。"""
     p = Path(path)
     raws = []
     try:
@@ -364,6 +391,8 @@ def load_chat_json(path):
         else:
             raws.append(p.read_bytes())
     except (OSError, zipfile.BadZipFile):
+        if strict:
+            raise
         return [], 1
     if not raws:
         return [], 1
@@ -382,8 +411,9 @@ def load_chat_json(path):
 
 
 def parse_chat(path, source):
-    """チャットのエクスポートから (会話のリスト, 飛ばした数) を返す。落ちない。同じ uuid は後のもので上書き。"""
-    data, skipped = load_chat_json(path)
+    """チャットのエクスポートから (会話のリスト, 飛ばした数) を返す。形が知らないものは飛ばす。同じ uuid は後のもので上書き。
+    ファイルが開けないときは OSError（壊れた zip は BadZipFile）を出す。"""
+    data, skipped = load_chat_json(path, strict=True)
     convs = {}
     for c in data:
         try:
@@ -395,6 +425,16 @@ def parse_chat(path, source):
         else:
             convs[conv["id"]] = conv
     return list(convs.values()), skipped
+
+
+def _chat_countable(c):
+    """sources・import の一覧用：読める会話か（伏せる・発言の組み立てはしない）。"""
+    if not isinstance(c, dict) or not isinstance(c.get("uuid"), str) or not c["uuid"]:
+        return False
+    msgs = c.get("chat_messages")
+    if not isinstance(msgs, list):
+        return False
+    return any(isinstance(m, dict) and m.get("sender") in ("human", "assistant") and _chat_text(m).strip() for m in msgs)
 
 
 def _chat_conv(c, source):
@@ -432,7 +472,7 @@ def _esc(text):
 
 def conv_filename(conv):
     d = date_of(conv["started"]).replace("-", "") or "00000000"
-    return "%s_%s.md" % (d, conv["id"][:8])
+    return "%s_%s.md" % (d, re.sub(r"[^A-Za-z0-9-]", "_", conv["id"])[:8])
 
 
 def render_md(conv):
@@ -641,7 +681,7 @@ def build_catalog(root):
         stamps, n = [], 0
         for c in data:
             try:
-                ok = _chat_conv(c, name) is not None
+                ok = _chat_countable(c)
             except Exception:
                 ok = False
             if ok:
@@ -662,21 +702,23 @@ def selected_keys(src):
 
 # ---- 取り込み ----
 def process_file(root, kind, name, path, index, srcfiles, key):
-    """元ファイル1つから会話を作って書く。(足した数, 更新した数, 飛ばした数) を返す。"""
+    """元ファイル1つから会話を作って書く。(足した数, 更新した数, 飛ばした数, 読めたか) を返す。"""
     added = updated = skipped = 0
     ids = []
-    if kind == "code":
-        convs = []
-        try:
+    try:
+        sig = stat_sig(path)     # 読む前の mtime・size を記録する（読んでいる間に変わっても、次の起動で拾える）
+        if kind == "code":
+            convs = []
             conv = parse_code_jsonl(path)
-        except OSError:
-            conv = None
-        if conv:
-            convs.append(conv)
+            if conv:
+                convs.append(conv)
+            else:
+                skipped = 1
         else:
-            skipped = 1
-    else:
-        convs, skipped = parse_chat(path, name)
+            convs, skipped = parse_chat(path, name)
+    except (OSError, zipfile.BadZipFile):
+        # 読めなかった元は、処理済みとして記録しない（次の起動でやり直す）
+        return added, updated, skipped, False
     for conv in convs:
         if conv["id"] in index:
             updated += 1
@@ -684,8 +726,8 @@ def process_file(root, kind, name, path, index, srcfiles, key):
             added += 1
         write_conv(root, conv, index)
         ids.append(conv["id"])
-    srcfiles[key] = dict(stat_sig(path), ids=ids)
-    return added, updated, skipped
+    srcfiles[key] = dict(sig, ids=ids)
+    return added, updated, skipped, True
 
 
 def scan_source(root, s):
@@ -704,7 +746,7 @@ def run_sync(root, src, budget=None):
     budget 秒を過ぎたら、残りは次の起動に回す。"""
     ensure_index_newline(root)
     index = load_index(root)
-    totals = {"added": 0, "updated": 0, "skipped": 0, "files": 0, "masked": 0, "left": 0}
+    totals = {"added": 0, "updated": 0, "skipped": 0, "files": 0, "masked": 0, "left": 0, "failed": 0}
     _masked[0] = 0
     t0 = time.monotonic()
     last_save = [t0]
@@ -723,7 +765,10 @@ def run_sync(root, src, budget=None):
                     cut = True
                     totals["left"] += 1
                     continue
-                a, u, k = process_file(root, kind, name, path, index, src["files"], key)
+                a, u, k, ok = process_file(root, kind, name, path, index, src["files"], key)
+                if not ok:
+                    totals["failed"] += 1
+                    continue
                 totals["added"] += a
                 totals["updated"] += u
                 totals["skipped"] += k
@@ -738,19 +783,35 @@ def run_sync(root, src, budget=None):
     return totals
 
 
-# ---- Git の控えに入らないことの確認（K16） ----
-def git_not_ignored(root):
-    """Git の管理下で、06_会話履歴/ が ignore されていなければ True。Git でない・git が無い・確かめられないときは False。"""
+# ---- Git の控えに入らないことの確認（K16・K31） ----
+def _git_dir_above(root):
+    for x in [root, *root.parents]:
+        if (x / ".git").exists():
+            return True
+    return False
+
+
+def git_problem(root):
+    """止めるべきなら理由（"not_ignored" か "unknown"）、進んでよければ None。
+    Git の管理下（本人のフォルダかその上に .git がある）で、06_会話履歴/ が ignore されていなければ止める。
+    確かめられないときも止める。Git が無い・.git が無いときだけ進む。"""
+    has_git_dir = _git_dir_above(root)
     try:
         r = subprocess.run(["git", "-C", str(root), "rev-parse", "--is-inside-work-tree"],
                            capture_output=True, text=True, timeout=15)
-        if r.returncode != 0 or r.stdout.strip() != "true":
-            return False
+        inside = r.returncode == 0 and r.stdout.strip() == "true"
+    except (OSError, subprocess.SubprocessError):
+        return "unknown" if has_git_dir else None     # git が動かない：.git があるなら確かめられないので止める
+    if not inside:
+        return "unknown" if has_git_dir else None     # git が「リポジトリでない」と言っても、.git があれば（壊れている）止める
+    try:
         r = subprocess.run(["git", "-C", str(root), "check-ignore", "-q", OUT_DIR + "/"],
                            capture_output=True, text=True, timeout=15)
-        return r.returncode == 1
     except (OSError, subprocess.SubprocessError):
-        return False
+        return "unknown"
+    if r.returncode == 0:
+        return None
+    return "not_ignored" if r.returncode == 1 else "unknown"
 
 
 # ---- コマンド ----
@@ -791,10 +852,12 @@ def _pick(cat, token):
 
 
 def cmd_import(root, args):
-    if git_not_ignored(root):
-        print("取り込まずに止めました：この本人のフォルダは Git の管理下で、%s/ が控えから外れていません。"
+    prob = git_problem(root)
+    if prob:
+        why = ("%s/ が控えから外れていません" % OUT_DIR) if prob == "not_ignored" else "%s/ が控えから外れているか確かめられません（Git が壊れているかもしれません）" % OUT_DIR
+        print("取り込まずに止めました：この本人のフォルダは Git の管理下で、%s。"
               "会話の中身が Git に入らないよう、先に .gitignore に1行足してください：\n"
-              "  ! cd \"%s\" && echo '%s/' >> .gitignore" % (OUT_DIR, root, OUT_DIR), file=sys.stderr)
+              "  ! cd \"%s\" && printf '\\n%s/\\n' >> .gitignore" % (why, root, OUT_DIR), file=sys.stderr)
         return 1
     cat, _ = build_catalog(root)
     chosen, bad = [], 0
@@ -918,11 +981,12 @@ def cmd_search(root, args):
         newer = {j for fp in h[2] for j in owners[fp] if j < i}
         if newer:
             follow[i] = min(newer)
-    for i, (r, n, _) in enumerate(hits[:args.limit]):
+    limit = max(1, args.limit)
+    for i, (r, n, _) in enumerate(hits[:limit]):
         note = "  （続きの会話あり：%s）" % hits[follow[i]][0]["id"][:8] if i in follow else ""
         print("%s  %s  [%s]  当たり %d%s" % (date_of(r.get("started", "")) or "----------", r.get("title", ""), r["id"][:8], n, note))
-    if len(hits) > args.limit:
-        print("…ほか %d 件（--limit で増やせます）" % (len(hits) - args.limit))
+    if len(hits) > limit:
+        print("…ほか %d 件（--limit で増やせます）" % (len(hits) - limit))
     return 0
 
 
@@ -945,10 +1009,21 @@ def cmd_show(root, args):
         print("読みやすい形のファイルが見つかりません：" + r.get("file", ""), file=sys.stderr)
         return 1
     _, summary, turns = parse_md(text)
-    out = ["# %s" % r["title"],
-           "ID %s ／ %s 〜 %s ／ %s" % (r["id"][:8], short_ts(r.get("started", "")), short_ts(r.get("ended", "")), r["file"]), ""]
-    if summary:
-        out += ["## まとめ", summary, ""]
+    head = ["# %s" % r["title"],
+            "ID %s ／ %s 〜 %s ／ %s" % (r["id"][:8], short_ts(r.get("started", "")), short_ts(r.get("ended", "")), r["file"]), ""]
+    if args.summary:       # まとめだけを全部（4000字で切る）
+        body = "\n".join(head + ["## まとめ", summary or "（まとめはありません）"])
+        if len(body) > SHOW_LIMIT:
+            body = body[:SHOW_LIMIT] + "\n…（%d字で切りました）" % SHOW_LIMIT
+        print(body)
+        return 0
+    head_text = "\n".join(head)
+    if summary and not args.grep:     # --grep のときは、まとめを出さず本文だけ
+        sm = summary
+        if len(sm) > SUMMARY_LIMIT:
+            sm = sm[:SUMMARY_LIMIT] + "\n…（まとめの続きは --summary で）"
+        head_text += "\n## まとめ\n" + sm + "\n"
+    out = []
     n = len(turns)
 
     def fmt(t):
@@ -978,10 +1053,11 @@ def cmd_show(root, args):
             out += [fmt(t) for t in turns[:5]]
             out.append("…（途中 %d 件は省略。--grep で探せます）" % (n - 10))
             out += [fmt(t) for t in turns[-5:]]
-    s = "\n".join(out)
-    if len(s) > SHOW_LIMIT:
-        s = s[:SHOW_LIMIT] + "\n…（%d字で切りました。続きは --grep <言葉> で絞ってください）" % SHOW_LIMIT
-    print(s)
+    body = "\n".join(out)
+    room = max(0, SHOW_LIMIT - len(head_text) - 1)      # 全体 4000字のうち、まとめの残りを本文に使う
+    if len(body) > room:
+        body = body[:room] + "\n…（%d字で切りました。続きは --grep <言葉> で絞ってください）" % SHOW_LIMIT
+    print(head_text + "\n" + body)
     return 0
 
 
@@ -1001,6 +1077,7 @@ def build_parser():
     p.add_argument("id")
     p.add_argument("--grep", default="")
     p.add_argument("--context", type=int, default=1)
+    p.add_argument("--summary", action="store_true", help="まとめだけを全部出す")
     return ap
 
 
