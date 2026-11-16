@@ -1982,7 +1982,7 @@ def t1_commander_has_the_three_short_rules_and_stays_small():
                 "今どこ？止まってない？", "目安の1/4（最短5分）", "TaskStop", "同じ失敗が2回続いたら3周目に入らない",
                 "見張りが壊れて Bash が全部止まったら", "Read しか使えない", "`! …` の1行を頼む"):
         assert key in COMMANDER, key
-    assert len(COMMANDER.encode("utf-8")) < 32000, len(COMMANDER.encode("utf-8"))
+    assert len(COMMANDER.encode("utf-8")) < 33000, len(COMMANDER.encode("utf-8"))   # T264：32000 → 33000（会話の索引の案内を足した）
 
 
 @case

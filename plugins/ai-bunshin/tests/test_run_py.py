@@ -110,8 +110,8 @@ def j(r):
 # --- 0. hooks.json の実物 ---
 hooks = json.load(open(HOOKS, encoding="utf-8"))
 cmds = [h["command"] for ev in hooks["hooks"].values() for g in ev for h in g["hooks"]]
-check("hooks.json：command が3つ", len(cmds) == 3, cmds)
-check("hooks.json：3つとも run_py.sh 経由（bash \"${CLAUDE_PLUGIN_ROOT}/scripts/run_py.sh\" …）",
+check("hooks.json：command が4つ（会話の索引の更新を足した：T264）", len(cmds) == 4, cmds)
+check("hooks.json：4つとも run_py.sh 経由（bash \"${CLAUDE_PLUGIN_ROOT}/scripts/run_py.sh\" …）",
       all(c.startswith('bash "${CLAUDE_PLUGIN_ROOT}/scripts/run_py.sh" "${CLAUDE_PLUGIN_ROOT}/scripts/') for c in cmds), cmds)
 check("hooks.json：名前だけで選ぶ形（command -v python3）が残っていない", not any("command -v" in c for c in cmds), cmds)
 def _called(c):
@@ -119,8 +119,8 @@ def _called(c):
     return (m.group(1) + (" " + m.group(2) if m.group(2) else "")) if m else c
 
 
-check("hooks.json：呼ぶスクリプトは update_dashboard.py ×2（--hook・--session）と ng_guard.py（引数なし）",
-      sorted(_called(c) for c in cmds) == sorted(["update_dashboard.py --hook", "update_dashboard.py --session", "ng_guard.py"]), cmds)
+check("hooks.json：呼ぶスクリプトは update_dashboard.py ×2（--hook・--session）・ng_guard.py（引数なし）・conversation_index.py（update --quiet）",
+      sorted(_called(c) for c in cmds) == sorted(["update_dashboard.py --hook", "update_dashboard.py --session", "ng_guard.py", "conversation_index.py update --quiet"]), cmds)
 
 # --- 1. python3 が偽物（動かない）→ 次の候補へ ---
 for kind in ("broken", "broken0"):
