@@ -80,7 +80,7 @@ def make(name, cfg=None, repo=None, plugin_name="plugin", link=False, owner="own
     os.makedirs(os.path.join(real, "scripts", "auto"))
     shutil.copy(CYCLE, os.path.join(real, "scripts", "auto", "daily_cycle.sh"))
     shutil.copy(os.path.join(SCRIPTS, "auto", "run_limited.py"), os.path.join(real, "scripts", "auto", "run_limited.py"))
-    for f in ("lock_check.py", "watch_check.py", "ng_guard.py", "ng_guard_legacy.py", "protected_paths.json", "calendar_today.py", "sandbox_canary.py"):
+    for f in ("lock_check.py", "watch_check.py", "ng_guard.py", "ng_guard_legacy.py", "protected_paths.json", "calendar_today.py", "sandbox_canary.py", "plugin_location.py"):
         shutil.copy(os.path.join(SCRIPTS, f), os.path.join(real, "scripts", f))
     shutil.copy(SANDBOX, os.path.join(real, "scripts", "sandbox_settings.py"))
     open(os.path.join(real, "scripts", "update_dashboard.py"), "w", encoding="utf-8").write(STUB)
@@ -107,9 +107,9 @@ def make(name, cfg=None, repo=None, plugin_name="plugin", link=False, owner="own
     return dict(d=d, plugin=plugin, real=real, home=home, bindir=bindir, rec=rec)
 
 
-def run(c, phase, stub_phase="plan", timeout=120):
+def run(c, phase, stub_phase="plan", timeout=120, user_home=None):
     env = {k: v for k, v in os.environ.items() if k not in ("AI_BUNSHIN_AUTO_RUN", "CLAUDE_PROJECT_DIR", "AI_BUNSHIN_CALENDAR_URL", "CLAUDE_CODE_DISABLE_AUTO_MEMORY")}
-    env.update({"HOME": FAKE_HOME, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull, "AI_BUNSHIN_HOME": c["home"],
+    env.update({"HOME": user_home or FAKE_HOME, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull, "AI_BUNSHIN_HOME": c["home"],
                 "PATH": c["bindir"] + os.pathsep + env.get("PATH", ""), "FAKE_RECORD": c["rec"], "STUB_PHASE": stub_phase})
     return subprocess.run(["/bin/zsh", os.path.join(c["plugin"], "scripts", "auto", "daily_cycle.sh"), phase],
                           capture_output=True, text=True, env=env, timeout=timeout)
@@ -406,6 +406,64 @@ def t8_print_memory_deny_forms_and_bad_chars():
     # 相対パス
     rc, out, err = cli("--home", FAKE_HOME, "--print-memory-deny", "--user-home", "relative/x")
     assert rules_of(out) == [] and err.count("\n") == 1, (out, err)
+
+
+def claude_dir_with(c, installed, known):
+    """この案件専用の偽の HOME（~/.claude/plugins に2つの JSON）を作って、その HOME を返す"""
+    uh = os.path.join(c["d"], "uh")
+    pd = os.path.join(uh, ".claude", "plugins")
+    os.makedirs(pd)
+    json.dump(installed, open(os.path.join(pd, "installed_plugins.json"), "w"))
+    json.dump(known, open(os.path.join(pd, "known_marketplaces.json"), "w"))
+    return uh
+
+
+@case
+def t9_read_location_differs_so_both_paths_are_allowed():
+    """beta.10：Claude Code が実際に読む場所（directory のマーケットプレイスの元）が、自動実行の本体の場所（installPath のコピー）と違うとき、
+    update_dashboard.py・lock_check.py の許可（引用符あり・なし）・Read の規則・Edit の止める規則を、両方の道にかける（3つの段とも）。ログに2つの場所と「別の場所」を1行"""
+    for phase, stub in (("plan", "plan"), ("do", "do"), ("review", "plan")):
+        c = make("t9" + phase)
+        mkt = os.path.join(c["d"], "mkt")
+        mplug = os.path.join(mkt, "plugins", "ai-bunshin")
+        os.makedirs(os.path.join(mplug, "scripts", "auto"))
+        open(os.path.join(mplug, "scripts", "auto", "daily_cycle.sh"), "w").write("#!/bin/zsh\n")
+        uh = claude_dir_with(c, {"version": 2, "plugins": {"ai-bunshin@mk": [{"scope": "project", "projectPath": c["home"], "installPath": c["plugin"]}]}},
+                             {"mk": {"source": {"source": "directory", "path": mkt}}})
+        r = run(c, phase, stub_phase=stub, user_home=uh)
+        assert r.returncode == 0, (phase, r.returncode, r.stderr[-300:], log_of(c)[-500:])
+        assert calls(c), phase
+        own, other = os.path.realpath(c["plugin"]), mplug
+        for call in calls(c):
+            its = tool_items(call)
+            for root in (own, other):
+                for f in ("update_dashboard.py", "lock_check.py"):
+                    assert f"Bash(python3 {root}/scripts/{f}:*)" in its and f'Bash(python3 "{root}/scripts/{f}":*)' in its, (phase, root, f, its)
+            assert any(i.startswith("Read(//") and other in i for i in its), (phase, "Read の規則が元の場所に無い", its)
+            dis = (opt(call, "--disallowedTools") or "").split(",")
+            assert f"Edit(/{own}/**)" in dis and f"Edit(/{other}/**)" in dis, (phase, dis)
+            assert not tool_problems(call), tool_problems(call)
+        lg = log_of(c)
+        assert f"プラグインの場所：{other}（読み込み元）／自動実行の本体：{own}" in lg and "別の場所" in lg, lg[:600]
+
+
+@case
+def t10_same_location_adds_nothing_and_unknown_location_still_works():
+    """beta.10：読む場所が本体の場所と同じなら、足すものは無い（今までと同じ）。決められないとき（JSON が無い）は今までどおり動き、ログにその旨"""
+    c = make("t10a")
+    uh = claude_dir_with(c, {"version": 2, "plugins": {"ai-bunshin@mk": [{"scope": "project", "projectPath": c["home"], "installPath": c["plugin"]}]}}, {})
+    r = run(c, "review", user_home=uh)
+    assert r.returncode == 0, (r.returncode, r.stderr[-300:], log_of(c)[-500:])
+    own = os.path.realpath(c["plugin"])
+    call = calls(c)[0]
+    assert len([i for i in tool_items(call) if "lock_check.py" in i]) == 2, tool_items(call)   # 引用符なし・ありの2つだけ
+    assert (opt(call, "--disallowedTools") or "").count(f"Edit(/{own}/**)") == 1
+    assert "別の場所" not in log_of(c) and f"プラグインの場所：{own}（読み込み元）／自動実行の本体：{own}" in log_of(c), log_of(c)[:500]
+    c2 = make("t10b")
+    r = run(c2, "review")   # FAKE_HOME には ~/.claude が無い
+    assert r.returncode == 0, (r.returncode, r.stderr[-300:])
+    assert "読み込み元は決められませんでした" in log_of(c2) and "別の場所" not in log_of(c2), log_of(c2)[:500]
+    assert len([i for i in tool_items(calls(c2)[0]) if "lock_check.py" in i]) == 2
 
 
 def main():

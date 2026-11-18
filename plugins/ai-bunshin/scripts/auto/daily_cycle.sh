@@ -22,6 +22,23 @@ LIMITED="$PLUGIN_ROOT/scripts/auto/run_limited.py"   # claude を時間の上限
 SANDBOX="$PLUGIN_ROOT/scripts/sandbox_settings.py"  # 実行の段の囲いの設定を作る（T119）。-I＝本人のフォルダの中のファイルを読み込まない
 CANARY="$PLUGIN_ROOT/scripts/sandbox_canary.py"     # 囲いが効いているかを確かめる点検（T119 G4a）。-I で動かす
 PLUGIN_ROOT_RAW="${0:a:h:h:h}"                       # 呼ばれた名前のままのプラグインの場所（installPath）。PLUGIN_ROOT はリンクを解いた実体
+# Claude Code が実際に読み込んでいる場所（スキルの ${CLAUDE_PLUGIN_ROOT} はここ）。決め方は scripts/plugin_location.py の1か所（run.sh と共通。beta.10）。
+# 決められなければ空（今までどおり、この本体の場所だけで動かす）。この本体の場所と違うときは、そちらの道の許可・止める規則・読み取りの規則も足す（EXTRA_ROOTS）
+READ_ROOT_RAW=""
+if [ -f "$PLUGIN_ROOT/scripts/plugin_location.py" ]; then
+  _loc_out=$(python3 -I "$PLUGIN_ROOT/scripts/plugin_location.py" --home "$ROOT" 2>/dev/null < /dev/null)
+  READ_ROOT_RAW=$(printf '%s\n' "$_loc_out" | sed -n 1p)
+  unset _loc_out
+fi
+EXTRA_ROOTS=()
+for _r in "$PLUGIN_ROOT_RAW" "$READ_ROOT_RAW" ${READ_ROOT_RAW:+"${READ_ROOT_RAW:A}"}; do
+  _r="${_r%/}"
+  if [ -n "$_r" ] && [ "$_r" != "$PLUGIN_ROOT" ] && [ "${EXTRA_ROOTS[(Ie)$_r]}" -eq 0 ]; then EXTRA_ROOTS+=("$_r"); fi
+done
+unset _r
+EXTRA_DENY=""   # 別の道からも、プラグインの中を書き換えさせない（DENY の Edit(/$PLUGIN_ROOT/**) と同じ形）
+for _r in "${EXTRA_ROOTS[@]}"; do EXTRA_DENY="$EXTRA_DENY,Edit(/$_r/**)"; done
+unset _r
 # カレンダーの URL は、この実行の環境変数に載せない（claude の中から読めないように。T119 S14）。囲いの設定を作る1行にだけ付けて渡す
 unset AI_BUNSHIN_CALENDAR_URL
 # 開発の置き場所のうち、本人のフォルダの外にあるリポジトリ（自動実行でも編集できるように --add-dir で渡す）。
@@ -52,6 +69,19 @@ notify() {
   local msg=${1//\"/\'}
   osascript -e "display notification \"$msg\" with title \"$AI_NAME\" subtitle \"$LABEL\""
 }
+
+# 起動時に、どちらの場所を使ったかを1行残す（2つが違うときはその旨も。beta.10）。
+# , * ! # を含む道は、ほかのログと同じく、道を出さない（T193 K3。許可の規則に使えない文字の形）
+_pshow() { case "$1" in *[,\*\!\#]*) echo "（道に , * ! # を含むため省略）" ;; *) echo "$1" ;; esac }
+if [ -n "$READ_ROOT_RAW" ]; then
+  _msg="プラグインの場所：$(_pshow "$READ_ROOT_RAW")（読み込み元）／自動実行の本体：$(_pshow "$PLUGIN_ROOT")"
+else
+  _msg="プラグインの場所：（読み込み元は決められませんでした）／自動実行の本体：$(_pshow "$PLUGIN_ROOT")"
+fi
+if [ "${#EXTRA_ROOTS[@]}" -gt 0 ] && [ -n "$READ_ROOT_RAW" ]; then _msg="$_msg。2つは別の場所なので、両方の道を許可しました"; fi
+log "$_msg"
+unset _msg
+unfunction _pshow
 
 # この実行の ID。ロックの3行目に書き、環境変数で claude にも渡す。
 # 中の Claude（daily-plan/do/review）は、ロックの ID が自分の AI_BUNSHIN_AUTO_RUN と一致すれば「自分のロック」とみなし、
@@ -363,7 +393,7 @@ python3 -I \"$CANARY\" --nonce \"$nonce\""
     --model sonnet \
     --max-turns 6 \
     --allowedTools "Bash(python3 -I \"$CANARY\":*),Bash(python3 -I $CANARY:*)" \
-    --disallowedTools "$DENY$MEM_DENY,Write,Edit,NotebookEdit,Agent,Task,WebFetch,WebSearch" \
+    --disallowedTools "$DENY$MEM_DENY$EXTRA_DENY,Write,Edit,NotebookEdit,Agent,Task,WebFetch,WebSearch" \
     --settings "$sjson" \
     "${ADD_DIR_ARGS[@]}" \
     < /dev/null 2>> "$LOG" &
@@ -413,13 +443,15 @@ run_claude() {
   SANDBOX_TOOLS=""
   LINK_TOOLS=""
   READ_TOOLS=""
-  if [ "$PLUGIN_ROOT_RAW" != "$PLUGIN_ROOT" ]; then   # リンク経由で呼ばれた（installPath が実体と違う）ときは、そちらの名前の完全なパスも許す
-    LINK_TOOLS=",Bash(python3 $PLUGIN_ROOT_RAW/scripts/update_dashboard.py:*),Bash(python3 \"$PLUGIN_ROOT_RAW/scripts/update_dashboard.py\":*),Bash(python3 $PLUGIN_ROOT_RAW/scripts/lock_check.py:*),Bash(python3 \"$PLUGIN_ROOT_RAW/scripts/lock_check.py\":*)"
-  fi
+  # リンク経由で呼ばれた（installPath が実体と違う）ときと、Claude Code が実際に読む場所が違うとき（beta.10）は、そちらの道の完全なパスも許す
+  local xr
+  for xr in "${EXTRA_ROOTS[@]}"; do
+    LINK_TOOLS="$LINK_TOOLS,Bash(python3 $xr/scripts/update_dashboard.py:*),Bash(python3 \"$xr/scripts/update_dashboard.py\":*),Bash(python3 $xr/scripts/lock_check.py:*),Bash(python3 \"$xr/scripts/lock_check.py\":*)"
+  done
   # 外で読む必要があるのはプラグインの中（雛形など）だけ。その読み取りの規則を、規則に使えない文字を除いて足す（T193 K3。3つの段とも同じ）。
   # 規則は sandbox_settings.py が作る（NFC・NFD・実体の形。パスから組み立てる所を1か所にするため、ここで組み立てない）。ログに残すのは、こちらで決めた文（道具の出力はそのまま写さない）
   local rr_roots=(--plugin-root "$PLUGIN_ROOT") rr_out rr_rc rr_line
-  [ "$PLUGIN_ROOT_RAW" != "$PLUGIN_ROOT" ] && rr_roots+=(--plugin-root "$PLUGIN_ROOT_RAW")
+  for xr in "${EXTRA_ROOTS[@]}"; do rr_roots+=(--plugin-root "$xr"); done
   rr_out=$(python3 -I "$SANDBOX" --home "$ROOT" --print-read-rules "${rr_roots[@]}" 2>&1 < /dev/null)
   rr_rc=$?
   for rr_line in ${(f)rr_out}; do
@@ -447,7 +479,7 @@ run_claude() {
     local cal_url sbx_out sbx_rc sbx_json sbx_why
     cal_url=$(calendar_url_for_sandbox)   # 取れなければ空。変数にだけ入れ、export しない・ログに書かない
     local sbx_roots=(--plugin-root "$PLUGIN_ROOT")
-    [ "$PLUGIN_ROOT_RAW" != "$PLUGIN_ROOT" ] && sbx_roots+=(--plugin-root "$PLUGIN_ROOT_RAW")
+    for xr in "${EXTRA_ROOTS[@]}"; do sbx_roots+=(--plugin-root "$xr"); done
     # 標準エラーも一緒に受ける（失敗の理由の1行を使う。成功のときの標準エラーは空）
     if [ -n "$cal_url" ]; then
       sbx_out=$(AI_BUNSHIN_CALENDAR_URL="$cal_url" python3 -I "$SANDBOX" --home "$ROOT" "${sbx_roots[@]}" 2>&1 < /dev/null)
@@ -506,7 +538,7 @@ sys.stdout.buffer.write(((t[0] if t else "")[:120]).encode("utf-8"))' 2>/dev/nul
     --model opus \
     --max-turns "$MAX_TURNS" \
     --allowedTools "$TOOLS$LINK_TOOLS$READ_TOOLS$SANDBOX_TOOLS" \
-    --disallowedTools "$DENY$MEM_DENY" \
+    --disallowedTools "$DENY$MEM_DENY$EXTRA_DENY" \
     "${SANDBOX_ARGS[@]}" \
     "${ADD_DIR_ARGS[@]}" \
     < /dev/null 2>> "$LOG" &

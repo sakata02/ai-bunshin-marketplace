@@ -28,11 +28,10 @@ cat > "$HOME_DIR/scripts/auto/run.sh" <<RUN
 # launchd から呼ばれる入口（install.sh が作成。手で直さず install.sh を実行し直す）
 export PATH="$RUN_PATH"
 export AI_BUNSHIN_HOME="$HOME_DIR"
-# プラグインの場所：Claude Code が実際に読み込んでいる場所（installed_plugins.json の installPath）。更新で変わるので毎回調べる
-PR=\$(python3 -c 'import json,os,sys
-d=json.load(open(os.path.expanduser("~/.claude/plugins/installed_plugins.json"), encoding="utf-8")).get("plugins",{})
-c=[e for k,v in d.items() if k.startswith("ai-bunshin@") for e in v if e.get("projectPath") in (sys.argv[1],None)]
-print(c[-1]["installPath"] if c else "")' "\$AI_BUNSHIN_HOME" 2>/dev/null)
+# プラグインの場所：Claude Code が実際に読み込んでいる場所。更新で変わるので毎回調べる。決め方は scripts/plugin_location.py の1か所
+# （マーケットプレイスが directory ならその元のフォルダ、そうでなければ installed_plugins.json の installPath。daily_cycle.sh も同じ道具で決める。beta.10）
+PR=""
+[ -f "$PLUGIN_ROOT/scripts/plugin_location.py" ] && PR=\$(python3 -I "$PLUGIN_ROOT/scripts/plugin_location.py" --home "\$AI_BUNSHIN_HOME" 2>/dev/null | head -n 1)
 [ -f "\$PR/scripts/auto/daily_cycle.sh" ] || PR="$PLUGIN_ROOT"
 # ここで失敗すると daily_cycle.sh の通知まで届かない（プラグインの更新でパスが変わったときなど）ので、ここでも知らせる（T073）
 if [ ! -f "\${PR%/}/scripts/auto/daily_cycle.sh" ]; then

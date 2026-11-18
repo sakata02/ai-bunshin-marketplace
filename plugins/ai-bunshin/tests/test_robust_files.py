@@ -608,7 +608,8 @@ def e1_every_open_in_shell_scripts_has_encoding():
             if "JSON" in call or "json" in call.lower() or "argv" in call or "expanduser" in call or "config" in call:
                 seen += 1
                 assert "encoding=" in call, f"{os.path.basename(p)}: 文字コードの指定がない: {call}"
-    assert seen >= 5, f"対象の open( を {seen} 個しか見つけていない（検査が空振り）"
+    # beta.10：run.sh の雛形の中の Python（installed_plugins.json を読む1つ）を scripts/plugin_location.py に移したため、5 → 4。移した先も encoding を指定している（test_plugin_location.py の BOM の項目）
+    assert seen >= 4, f"対象の open( を {seen} 個しか見つけていない（検査が空振り）"
 
 
 @case
