@@ -31,9 +31,12 @@ if [ -f "$PLUGIN_ROOT/scripts/plugin_location.py" ]; then
   unset _loc_out
 fi
 EXTRA_ROOTS=()
+EXTRA_DROPPED=0   # 許可の規則に使えない文字（, * " ! #）を含む道は足さない（足すと --allowedTools・--disallowedTools の区切りや否定を壊しうる）
 for _r in "$PLUGIN_ROOT_RAW" "$READ_ROOT_RAW" ${READ_ROOT_RAW:+"${READ_ROOT_RAW:A}"}; do
   _r="${_r%/}"
-  if [ -n "$_r" ] && [ "$_r" != "$PLUGIN_ROOT" ] && [ "${EXTRA_ROOTS[(Ie)$_r]}" -eq 0 ]; then EXTRA_ROOTS+=("$_r"); fi
+  [ -n "$_r" ] && [ "$_r" != "$PLUGIN_ROOT" ] || continue
+  case "$_r" in *[,\*\"\!\#]*) EXTRA_DROPPED=1; continue ;; esac
+  if [ "${EXTRA_ROOTS[(Ie)$_r]}" -eq 0 ]; then EXTRA_ROOTS+=("$_r"); fi
 done
 unset _r
 EXTRA_DENY=""   # 別の道からも、プラグインの中を書き換えさせない（DENY の Edit(/$PLUGIN_ROOT/**) と同じ形）
@@ -71,8 +74,8 @@ notify() {
 }
 
 # 起動時に、どちらの場所を使ったかを1行残す（2つが違うときはその旨も。beta.10）。
-# , * ! # を含む道は、ほかのログと同じく、道を出さない（T193 K3。許可の規則に使えない文字の形）
-_pshow() { case "$1" in *[,\*\!\#]*) echo "（道に , * ! # を含むため省略）" ;; *) echo "$1" ;; esac }
+# , * " ! # を含む道は、ほかのログと同じく、道を出さない（T193 K3。許可の規則に使えない文字の形）
+_pshow() { case "$1" in *[,\*\"\!\#]*) echo "（道に , * \" ! # を含むため省略）" ;; *) echo "$1" ;; esac }
 if [ -n "$READ_ROOT_RAW" ]; then
   _msg="プラグインの場所：$(_pshow "$READ_ROOT_RAW")（読み込み元）／自動実行の本体：$(_pshow "$PLUGIN_ROOT")"
 else
@@ -80,6 +83,7 @@ else
 fi
 if [ "${#EXTRA_ROOTS[@]}" -gt 0 ] && [ -n "$READ_ROOT_RAW" ]; then _msg="$_msg。2つは別の場所なので、両方の道を許可しました"; fi
 log "$_msg"
+[ "$EXTRA_DROPPED" -eq 1 ] && log "別の道のうち、許可に使えない文字（, * \" ! #）を含むものは、許可・止める規則・読む規則に足しませんでした"
 unset _msg
 unfunction _pshow
 

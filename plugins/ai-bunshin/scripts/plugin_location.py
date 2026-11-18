@@ -10,7 +10,7 @@
       <プラグイン名>@<マーケットプレイス> があり、known_marketplaces.json でそのマーケットプレイスの
       source が "directory" なら、元のフォルダの中：<path>/.claude-plugin/marketplace.json に、そのプラグインの
       source（"./plugins/…" のような文字列）があればそれ、無ければ <path>/plugins/<プラグイン名>
-      （そこに scripts/auto/daily_cycle.sh があるときだけ）
+      （そこに scripts/auto/daily_cycle.sh があり、元のフォルダの中に収まるときだけ。"../" で外を指すものは使わない）
   (b) そうでなければ（github など）、installed_plugins.json の installPath（そこに daily_cycle.sh があるときだけ）
   (c) どちらも無ければ、空を返す（呼ぶ側が今まで通り止めて知らせる）
 
@@ -39,6 +39,15 @@ def _real(p):
         return os.path.realpath(p)
     except (OSError, ValueError):
         return p
+
+
+def _inside(path, base):
+    """path（実体）が base（実体）の中に収まるか"""
+    try:
+        rp, rb = _real(path), _real(base)
+        return os.path.commonpath([rp, rb]) == rb
+    except ValueError:
+        return False
 
 
 def _has_cycle(root):
@@ -87,6 +96,8 @@ def _directory_marketplace_root(known, mkt, plugin):
             elif s is not None:
                 return None   # 元のフォルダの中の道ではない（github など）。(b) に任せる
             break
+    if not _inside(candidate, base):
+        return None   # "../" などで元のフォルダの外を指している。(b) に任せる
     return candidate if _has_cycle(candidate) else None
 
 

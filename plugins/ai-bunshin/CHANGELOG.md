@@ -3,16 +3,18 @@
 ## 1.0.0-beta.10 — 2026-11-18（自動実行が止まる件の修正：Claude Code が実際に読む場所で許可を作る）
 
 **更新のあと**：
-- **今 Mac の自動実行を使っている人は、`install.sh` を打ち直してください**（本人のフォルダの `scripts/auto/run.sh` が新しくなります。打ち直さないと、自動実行は今までの古い場所のコピーを使い続けて、直りません）：`zsh "<プラグインの元のフォルダ>/plugins/ai-bunshin/scripts/auto/install.sh" ~/workspace/<本人のフォルダ>`（`<プラグインの元のフォルダ>` は、マーケットプレイスを「フォルダ」で入れた先。GitHub から入れた人は、`claude plugin list` の「Read from」の場所の `scripts/auto/install.sh`）
+- **今 Mac の自動実行を使っている人は、`install.sh` を打ち直してください**（本人のフォルダの `scripts/auto/run.sh` が新しくなります。打ち直さないと、自動実行は今までの古い場所のコピーを使い続けて、直りません）。打つ形の例：`! zsh ~/workspace/ai-bunshin-marketplace/plugins/ai-bunshin/scripts/auto/install.sh ~/workspace/<本人のフォルダ>`（先頭の `!` は、入力欄で本人の手でそのまま実行するための印）。元のフォルダの場所が違う人は、そこに合わせる（マーケットプレイスを「フォルダ」で入れた先。GitHub から入れた人は、`claude plugin list` の「Read from」の場所の `scripts/auto/install.sh`）
+- **打ち直したあとの確かめ方**：① `grep -n plugin_location ~/workspace/<本人のフォルダ>/scripts/auto/run.sh` で行が出ること ② 次の朝のログ `scripts/auto/logs/<日付>.log` の先頭に「プラグインの場所：…（読み込み元）」の行が出ること
+- `install.sh` は「最後に成功した日時」（last_success）を今に書き直すので、打ち直した日は「自動実行が N日 動いていません」の警告が一度消えます
 - **開いている会話は、開き直すまで前のまま**です
 
 - **直したこと**：自動実行（朝の計画・実行、夕方の振り返り）が止まっていた。原因は、プラグインの場所が2つに分かれていたこと。自動実行は `installed_plugins.json` の `installPath`（キャッシュの古いコピー）の `daily_cycle.sh` で動き、`lock_check.py`・`update_dashboard.py` の許可（`--allowedTools`）もその道で作っていた。ところが Claude Code が実際に読み込むのは、マーケットプレイスが「フォルダ」で入っているときは、その元のフォルダで、スキルは `"${CLAUDE_PLUGIN_ROOT}/scripts/…"`（＝元のフォルダの道）でコマンドを打つ。許可の道と打つ道が違うので許可に当たらず、`claude -p` は許可待ちで止まった（2026-11-12 から）
-- **「Claude Code が実際に読む場所」を決める道具を1つにした**（`scripts/plugin_location.py`。読むだけ・何も書かない）。決め方は、(a) `known_marketplaces.json` でそのマーケットプレイスの source が `directory` なら、元のフォルダの中（`.claude-plugin/marketplace.json` にそのプラグインの source の道があればそれ、無ければ `plugins/<名前>`。そこに `scripts/auto/daily_cycle.sh` があるときだけ）、(b) そうでなければ（github など）`installed_plugins.json` の `installPath`、(c) どちらも無ければ空（今までどおり止めて知らせる）。項目は、本人のフォルダの `projectPath`（無い user スコープも）で選ぶ。JSON が無い・壊れているときも落ちない。`install.sh` が作る `run.sh` と `daily_cycle.sh` の両方がこの道具を使う
+- **「Claude Code が実際に読む場所」を決める道具を1つにした**（`scripts/plugin_location.py`。読むだけ・何も書かない）。決め方は、(a) `known_marketplaces.json` でそのマーケットプレイスの source が `directory` なら、元のフォルダの中（`.claude-plugin/marketplace.json` にそのプラグインの source の道があればそれ、無ければ `plugins/<名前>`。そこに `scripts/auto/daily_cycle.sh` があり、元のフォルダの中に収まるときだけ。`../` や外へのリンクで外を指すものは使わず (b) に落とす）、(b) そうでなければ（github など）`installed_plugins.json` の `installPath`、(c) どちらも無ければ空（今までどおり止めて知らせる）。項目は、本人のフォルダの `projectPath`（無い user スコープも）で選ぶ。JSON が無い・壊れているときも落ちない。`install.sh` が作る `run.sh` と `daily_cycle.sh` の両方がこの道具を使う
 - **`install.sh`（`run.sh` の雛形）**：本体（`daily_cycle.sh`）の場所を、上の道具で決める（今までは `installPath` だけ。ここに直書きしていた Python は道具に移した）。決められなかった・本体が無いときは、今までどおり `install.sh` を打った場所に替え、それも無ければログと通知で知らせて止まる。`PATH`・`AI_BUNSHIN_HOME`・最後の成功の記録・launchd の登録は変えていない
 - **`daily_cycle.sh`**：同じ道具で「読み込み元」を決め、本体の場所（呼ばれた名前・実体）と違うときは、その道の許可を足す。足すのは、`update_dashboard.py`・`lock_check.py` の許可（引用符あり・なし）、止める規則 `Edit(/<道>/**)`（実行の本体の起動と、囲いの点検の起動の両方）、プラグインの中を読む規則と囲いの設定の `--plugin-root`。リンク経由の許可（今までの `LINK_TOOLS`）は同じ仕組みに入れた（同じ文字列）。同じ場所のときは何も足さない
-- **起動時のログに1行**：`プラグインの場所：<道>（読み込み元）／自動実行の本体：<道>`（2つが違うときは「2つは別の場所なので、両方の道を許可しました」を続ける。決められないときは「読み込み元は決められませんでした」。`, * ! #` を含む道は、ほかのログと同じく出さない）
+- **起動時のログに1行**：`プラグインの場所：<道>（読み込み元）／自動実行の本体：<道>`（2つが違うときは「2つは別の場所なので、両方の道を許可しました」を続ける。決められないときは「読み込み元は決められませんでした」。`, * " ! #` を含む道は、ほかのログと同じく出さない）。別の道のうち `, * " ! #` を含むものは、許可・止める規則・読む規則に足さず、ログに「足しませんでした」を1行
 - **注意**：この直しの `daily_cycle.sh` が動くのは、`run.sh` がこの場所の本体を呼んだときだけ。今の `run.sh` は、キャッシュの古いコピーの `daily_cycle.sh` を呼ぶので、`install.sh` の打ち直しが先に要る（上の「更新のあと」）
-- テスト：新しく `tests/test_plugin_location.py`（決め方・JSON が無い／壊れているとき・projectPath の選び方・`install.sh` が作る `run.sh` の動き）。`tests/test_auto_paths.py` に、場所が違うとき両方の道が許可・止める規則・読む規則に入ること、同じときは足さないことの2項目を足した（作り物の `claude` と偽の HOME で。本物の自動実行・launchd は動かしていない）
+- テスト：新しく `tests/test_plugin_location.py`（決め方・JSON が無い／壊れているとき・projectPath の選び方・`install.sh` が作る `run.sh` の動き）。`tests/test_auto_paths.py` に、場所が違うとき両方の道が許可・止める規則・読む規則・囲いの点検（canary）の止める規則・囲いの設定（`--plugin-root`）に入ること、同じときは足さないこと、使えない文字を含む道は足さないことの3項目を足した（作り物の `claude` と偽の HOME で。本物の自動実行・launchd は動かしていない）
   - 【未確認】本物の朝の自動実行で止まらずに進むこと（`install.sh` を打ち直した次の朝に、ログの先頭の「プラグインの場所」の行と、計画が作られたかを確かめる）
 
 ## 1.0.0-beta.9 — 2026-11-16（会話の索引：前の会話を、あとから呼び出せる）

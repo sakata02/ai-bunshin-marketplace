@@ -429,10 +429,21 @@ def t9_read_location_differs_so_both_paths_are_allowed():
         os.makedirs(os.path.join(mplug, "scripts", "auto"))
         open(os.path.join(mplug, "scripts", "auto", "daily_cycle.sh"), "w").write("#!/bin/zsh\n")
         uh = claude_dir_with(c, {"version": 2, "plugins": {"ai-bunshin@mk": [{"scope": "project", "projectPath": c["home"], "installPath": c["plugin"]}]}},
-                             {"mk": {"source": {"source": "directory", "path": mkt}}})
+                             # installLocation はわざと別の場所：囲いの設定が自分で足す元のフォルダ（S12）と区別して、--plugin-root で元の道が渡ることを確かめる
+                             {"mk": {"source": {"source": "directory", "path": mkt}, "installLocation": os.path.join(c["d"], "elsewhere")}})
         r = run(c, phase, stub_phase=stub, user_home=uh)
         assert r.returncode == 0, (phase, r.returncode, r.stderr[-300:], log_of(c)[-500:])
         assert calls(c), phase
+        if phase == "do":
+            # 実行の段だけ囲いの点検（canary）の claude が起動する。その止める規則と囲いの設定にも、元の道が入る
+            cp = os.path.join(c["rec"], "canary_env.jsonl")
+            canary = [json.loads(ln)["args"] for ln in open(cp, encoding="utf-8").read().splitlines()] if os.path.exists(cp) else []
+            assert canary, "囲いの点検の起動が記録されていない（実行の段）"
+            for a in canary:
+                dis = a[a.index("--disallowedTools") + 1].split(",")
+                assert f"Edit(/{os.path.realpath(c['plugin'])}/**)" in dis and f"Edit(/{mplug}/**)" in dis, ("点検の止める規則に両方の道が無い", dis)
+                deny_write = json.loads(a[a.index("--settings") + 1])["sandbox"]["filesystem"]["denyWrite"]
+                assert any(mplug in x for x in deny_write), ("囲いの設定（--plugin-root）に元の道が渡っていない", deny_write)
         own, other = os.path.realpath(c["plugin"]), mplug
         for call in calls(c):
             its = tool_items(call)
@@ -464,6 +475,27 @@ def t10_same_location_adds_nothing_and_unknown_location_still_works():
     assert r.returncode == 0, (r.returncode, r.stderr[-300:])
     assert "読み込み元は決められませんでした" in log_of(c2) and "別の場所" not in log_of(c2), log_of(c2)[:500]
     assert len([i for i in tool_items(calls(c2)[0]) if "lock_check.py" in i]) == 2
+
+
+@case
+def t11_read_location_with_rule_breaking_chars_is_not_added():
+    """beta.10（部下D）：, * " ! # を含む読み込み元の道は、許可・止める規則・読む規則に足さない（区切りや否定を壊しうる）。claude は動き、ログに足さなかった旨を1行（道は出さない）"""
+    for i, name in enumerate(("mk,x", "mk*x", 'mk"x', "mk!x", "#mkx")):
+        c = make("t11_%d" % i)
+        mkt = os.path.join(c["d"], name)
+        mplug = os.path.join(mkt, "plugins", "ai-bunshin")
+        os.makedirs(os.path.join(mplug, "scripts", "auto"))
+        open(os.path.join(mplug, "scripts", "auto", "daily_cycle.sh"), "w").write("#!/bin/zsh\n")
+        uh = claude_dir_with(c, {"version": 2, "plugins": {"ai-bunshin@mk": [{"scope": "project", "projectPath": c["home"], "installPath": c["plugin"]}]}},
+                             {"mk": {"source": {"source": "directory", "path": mkt}, "installLocation": os.path.join(c["d"], "elsewhere")}})
+        r = run(c, "review", user_home=uh)
+        assert r.returncode == 0 and len(calls(c)) == 1, (name, r.returncode, r.stderr[-300:], log_of(c)[-400:])
+        call = calls(c)[0]
+        for flag in ("--allowedTools", "--disallowedTools"):
+            assert name not in (opt(call, flag) or ""), (name, flag, "足してはいけない道が入っている")
+        assert len([x for x in tool_items(call) if "lock_check.py" in x]) == 2, (name, tool_items(call))
+        lg = log_of(c)
+        assert "足しませんでした" in lg and name not in lg and "別の場所" not in lg, (name, lg[:500])
 
 
 def main():

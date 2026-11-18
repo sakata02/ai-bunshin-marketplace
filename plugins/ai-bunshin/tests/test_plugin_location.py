@@ -111,6 +111,36 @@ def l2_marketplace_json_source_and_fallbacks_to_install_path():
 
 
 @case
+def l6_source_outside_the_marketplace_folder_is_not_used():
+    """部下D：marketplace.json の source が "../" で元のフォルダの外を指しても、絶対パスでも、外へのリンクでも、使わず installPath に落とす。中に収まる "../" 入りの道は使う"""
+    d = os.path.join(BASE, "l6")
+    cache = mkplugin(os.path.join(d, "cache"))
+    outside = mkplugin(os.path.join(d, "outside", "ai-bunshin"))   # 元のフォルダの外にある、daily_cycle.sh のあるフォルダ
+    base = os.path.join(d, "mkt")
+    os.makedirs(os.path.join(base, ".claude-plugin"))
+    known = {"mk": {"source": {"source": "directory", "path": base}}}
+
+    def write_src(s):
+        json.dump({"plugins": [{"name": "ai-bunshin", "source": s}]}, open(os.path.join(base, ".claude-plugin", "marketplace.json"), "w"))
+    for i, s in enumerate(("../outside/ai-bunshin", "./../outside/ai-bunshin", "./a/../../outside/ai-bunshin", outside)):
+        write_src(s)
+        _, cdir = fixture("l6a%d" % i, inst(cache), known)
+        assert locate(cdir, "/home/x")[1:3] == (cache, "install-path"), (s, locate(cdir, "/home/x"))
+    # 外を指すリンク（plugins/ai-bunshin → 外）
+    os.makedirs(os.path.join(base, "plugins"))
+    os.symlink(outside, os.path.join(base, "plugins", "ai-bunshin"))
+    os.rename(os.path.join(base, ".claude-plugin", "marketplace.json"), os.path.join(base, ".claude-plugin", "marketplace.json.off"))
+    _, cdir = fixture("l6b", inst(cache), known)
+    assert locate(cdir, "/home/x")[1:3] == (cache, "install-path"), locate(cdir, "/home/x")
+    # 中に収まる（"../" を含んでも）ものは使う
+    inner = mkplugin(os.path.join(base, "src", "bunshin"))
+    os.rename(os.path.join(base, ".claude-plugin", "marketplace.json.off"), os.path.join(base, ".claude-plugin", "marketplace.json"))
+    write_src("./src/x/../bunshin")
+    _, cdir = fixture("l6c", inst(cache), known)
+    assert locate(cdir, "/home/x")[1:3] == (os.path.normpath(inner), "directory-marketplace"), locate(cdir, "/home/x")
+
+
+@case
 def l3_missing_or_broken_json_never_crashes():
     d = os.path.join(BASE, "l3")
     cache = mkplugin(os.path.join(d, "cache"))
